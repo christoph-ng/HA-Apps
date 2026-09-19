@@ -994,16 +994,34 @@ class ImportService:
         custom_pattern: str = "",
         entity_id: str = "",
     ) -> dict:
+        entity_rows = self.deps.index.list_entities()
         entity_options = [
             (
                 row["entity_id"],
                 entity_display_name(row["entity_id"], row["friendly_name"], row["custom_name"]),
                 row["unit"] or "",
             )
-            for row in self.deps.index.list_entities()
+            for row in entity_rows
+        ]
+        # Eigene, reichere Optionsliste fürs Ziel-Entität-Feld (entityPicker(),
+        # siehe _csv_import_section.html) — dieselbe Form wie table_editor.html/
+        # entity_migrate.html (entity_id/label/ha_name/is_custom), bewusst
+        # NICHT entity_options oben ersetzt: das speist weiterhin die
+        # Symcon-Zeilen (.map-picker je Zeile, datalist-basiert — bei 226+
+        # Zeilen kein eigenes Alpine-Popover je Zeile) und die gemeinsame
+        # #entity-datalist auf Seitenebene.
+        csv_entity_options = [
+            {
+                "entity_id": row["entity_id"],
+                "label": entity_display_name(row["entity_id"], row["friendly_name"], row["custom_name"]),
+                "ha_name": row["friendly_name"] or row["entity_id"],
+                "is_custom": bool(row["custom_name"]),
+            }
+            for row in entity_rows
         ]
         base = {
             "entity_options": entity_options,
+            "csv_entity_options": csv_entity_options,
             "delimiter_options": list(csv_import.DELIMITERS.items()),
             "ts_format_options": list(csv_import.TIMESTAMP_FORMATS.items()),
         }
