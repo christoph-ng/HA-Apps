@@ -1314,10 +1314,17 @@ class EnergieDashboardService:
                 add_stale_issue(f"{sp_name} (Ladung)", stale)
             speicher_entladen_val += sp_entladen_val
             speicher_laden_val += sp_laden_val
-            speicher_per_entity.append({
+            speicher_entry = {
                 "name": sp_name, "entladen_val": sp_entladen_val, "laden_val": sp_laden_val,
                 "has_both": bool(sp.get("laden_entity_id")) and bool(sp.get("entladen_entity_id")),
-            })
+                # Für die Wirkungsgrad-Plausibilitätsprüfung weiter unten: wie
+                # weit der Ladestand SELBST im Fenster gesunken ist (kWh) —
+                # nur gesetzt, wenn SOC-Sensor + Kapazität vorliegen und
+                # mindestens zwei Messpunkte im Fenster liegen (siehe die
+                # soc_entity_id-Auswertung unten).
+                "soc_delta_kwh": None,
+            }
+            speicher_per_entity.append(speicher_entry)
             speicher_laden_vals.append(sp_laden_val)
             if len(speicher_list) > 1 and (sp_entladen_val or sp_laden_val):
                 speicher_breakdown.append({"name": sp_name, "value": round(sp_laden_val - sp_entladen_val, 3)})
@@ -1336,6 +1343,14 @@ class EnergieDashboardService:
                 soc_series, _stale = entity_series(sp["soc_entity_id"])
                 if soc_series:
                     soc_period_pairs.append((sum(soc_series.values()) / len(soc_series), weight))
+                # Erster/letzter Messpunkt im FENSTER (nicht der Perioden-Ø
+                # oben) — derselbe Ansatz wie in _compute_speicher_efficiency,
+                # nur für das aktuell angezeigte Fenster statt die gesamte
+                # Historie, siehe Nutzung bei speicher_entladen_exceeds_names.
+                if capacity_kwh and len(soc_series) >= 2:
+                    soc_start = soc_series[min(soc_series)]
+                    soc_end = soc_series[max(soc_series)]
+                    speicher_entry["soc_delta_kwh"] = (soc_end - soc_start) / 100.0 * capacity_kwh
                 # Aktueller (Jetzt-)Füllstand, unabhängig vom gewählten
                 # Zeitraum — der Perioden-Ø oben kann bei Monat/Jahr deutlich
                 # vom tatsächlichen Stand gerade eben abweichen.
@@ -2019,10 +2034,30 @@ class EnergieDashboardService:
         # Je Speicher einzeln geprüft (nicht nur aggregiert), damit ein
         # einzelner falsch zugeordneter Speicher nicht von einem
         # unauffälligen Rest verdeckt wird.
-        speicher_entladen_exceeds_names = [
-            e["name"] for e in speicher_per_entity
-            if e["has_both"] and e["entladen_val"] > e["laden_val"] + 0.05
-        ]
+        #
+        # Bei kurzen Fenstern ("Stunde"/"Tag") ist das ohne Weiteres aber ein
+        # Fehlalarm: ein Speicher, der zu Fensterbeginn schon geladen war
+        # (z. B. morgens, vor der ersten PV-Ladung des Tages), entlädt dann
+        # zunächst mehr, als im selben Fenster geladen wurde — ganz normal,
+        # nichts vertauscht. Mit SOC-Sensor + Kapazität lässt sich das
+        # korrigieren: erlaubt ist Ladung PLUS der tatsächliche Rückgang des
+        # Ladestands im Fenster selbst (soc_delta_kwh negativ). Ohne SOC-Sensor
+        # fehlt diese Korrekturgröße — dort läuft die Prüfung nur noch für
+        # Monat/Jahr, wo ein einzelner nicht abgeschlossener Lade-/Entladezyklus
+        # im Verhältnis zur Gesamtmenge kaum noch ins Gewicht fällt.
+        speicher_entladen_exceeds_names = []
+        for e in speicher_per_entity:
+            if not e["has_both"]:
+                continue
+            soc_delta_kwh = e.get("soc_delta_kwh")
+            if soc_delta_kwh is not None:
+                threshold = e["laden_val"] + max(0.0, -soc_delta_kwh) + 0.05
+            elif range_key in ("month", "year"):
+                threshold = e["laden_val"] + 0.05
+            else:
+                continue
+            if e["entladen_val"] > threshold:
+                speicher_entladen_exceeds_names.append(e["name"])
 
         # Immer alle Prüfungen zeigen (nicht nur bei Problemen) — ein Sankey,
         # der scheinbar exakt aufgeht, aber auf veralteten, falsch
