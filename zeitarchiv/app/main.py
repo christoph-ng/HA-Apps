@@ -98,6 +98,7 @@ from .backup_scheduler import parse_schedule_time
 from .storage import (
     backup,
     cleanup,
+    entity_migration,
     entity_removal,
     hotbuffer,
     import_reports,
@@ -3020,6 +3021,175 @@ def entity_delete(entity_id: str) -> dict:
     entity_removal.delete_entity(DATA_DIR, index, entity_id)
     _background.invalidate_retention_overview()
     return {"ok": True}
+
+
+@app.get("/entities/{entity_id}/migrate", response_class=HTMLResponse)
+@_storage_locked(lambda args: args["entity_id"])
+def entity_migrate_page(request: Request, entity_id: str) -> HTMLResponse:
+    """Migrations-Assistent (Konzept-Erweiterung): überträgt den archivierten
+    Verlauf dieser Entität (als Quelle vorbelegt) vollständig in eine andere —
+    typischer Auslöser: Home Assistant hat die Entität ersetzt oder
+    umbenannt. Siehe entity_migration.py für die eigentliche Logik.
+
+    ?target=<entity_id> setzt die Ziel-Entität vorbelegt (genutzt vom
+    "Quelle/Ziel tauschen"-Knopf in Schritt 1: der lädt schlicht diese Seite
+    für die bisherige Ziel-Entität neu, mit der bisherigen Quelle als
+    vorbelegtem Ziel — eine echte beidseitig editierbare Auswahl bräuchte
+    zwei unabhängige Picker samt eigener Kompatibilitätsprüfung je Seite,
+    ohne dass "Quelle" dabei noch eine feste Bedeutung hätte)."""
+    entity = _require_entity(entity_id)
+    # Jeder Kandidat trägt dieselben Kennzahlen wie die Quelle oben — die
+    # Ziel-Vergleichskarte in Schritt 1 kann sie dadurch rein clientseitig
+    # aus candidates[] übernehmen, sobald eine Ziel-Entität gewählt wird,
+    # ohne einen eigenen Rundtrip nur für diese Anzeige.
+    # label bewusst NUR der Anzeigename, ohne "(entity_id)"-Anhängsel — wie
+    # all_entities()/entity_pin_options im Dashboard-Kachel-Picker (siehe
+    # dashboard_context()) und entity_options im Energiedashboard-Setup. Die
+    # entity_id steht stattdessen im Hover-Tooltip (ha_name/entity_id, siehe
+    # entity-picker.js scheduleHover() und das Popover-Markup unten) — nicht
+    # dauerhaft in der Zeile, das war der App-Standard-Bruch, den der
+    # bisherige "Label (entity_id)"-Zusammenbau hatte.
+    #
+    # Nur Entitäten desselben aggregation_type stehen überhaupt zur Wahl —
+    # eine Migration zwischen unterschiedlichen Zähltypen unterstützt
+    # entity_migration.py ohnehin nicht (IncompatibleTypesError, siehe dort).
+    # Vorfiltern statt es erst in der Vorschau als Fehler zu melden: dann
+    # bleibt in Schritt 2 nur noch ein möglicher Einheiten-Unterschied übrig
+    # (siehe migrate-factor-input in _entity_migrate_preview.html) — die
+    # Typ-Prüfung in entity_migration.py selbst bleibt trotzdem bestehen, als
+    # Schutz gegen eine zwischenzeitlich (in einem anderen Tab) geänderte
+    # Entität, nicht nur als UI-Vorfilter.
+    candidates = []
+    for row in index.list_entities(sort="entity_id"):
+        if row["entity_id"] == entity_id or row["aggregation_type"] != entity["aggregation_type"]:
+            continue
+        candidates.append({
+            "entity_id": row["entity_id"],
+            "label": entity_display_name(row["entity_id"], row["friendly_name"], row["custom_name"]),
+            "ha_name": row["friendly_name"] or row["entity_id"],
+            "is_custom": bool(row["custom_name"]),
+            "type_label": format_type(row["aggregation_type"]),
+            "unit": row["unit"] or "—",
+            "row_count": format_int(_visible_row_count(row)),
+            "first_ts": format_timestamp(row["first_ts"], TZ),
+            "last_ts": format_timestamp(row["last_ts"], TZ),
+        })
+    requested_target = request.query_params.get("target", "")
+    initial_target_entity_id = (
+        requested_target if any(c["entity_id"] == requested_target for c in candidates) else ""
+    )
+    return templates.TemplateResponse(
+        request,
+        "entity_migrate.html",
+        {
+            "entity_id": entity_id,
+            "display_name": entity_display_name(entity_id, entity["friendly_name"], entity["custom_name"]),
+            "type_label": format_type(entity["aggregation_type"]),
+            "unit": entity["unit"] or "—",
+            "row_count": format_int(_visible_row_count(entity)),
+            "first_ts": format_timestamp(entity["first_ts"], TZ),
+            "last_ts": format_timestamp(entity["last_ts"], TZ),
+            "candidates": candidates,
+            "initial_target_entity_id": initial_target_entity_id,
+        },
+    )
+
+
+class _EntityMigratePreviewBody(BaseModel):
+    target_entity_id: str
+    factor: float = 1.0
+    overlap_resolution: str = "target"
+
+
+@app.post("/entities/{entity_id}/migrate/preview", response_class=HTMLResponse)
+@_storage_locked(lambda args: [args["entity_id"], args["body"].target_entity_id])
+def entity_migrate_preview(request: Request, entity_id: str, body: _EntityMigratePreviewBody) -> HTMLResponse:
+    """Vorschau ohne Schreibvorgang (Migrations-Assistent, Schritt 2) — Typ-Prüfung
+    blockiert hart (IncompatibleTypesError), ein Einheiten-Unterschied wird nur
+    gemeldet. Dieselbe Sperre wie beim Ausführen: die Zeilenzahlen sollen zur
+    tatsächlichen Übertragung passen, nicht zu einem zwischenzeitlich veränderten
+    Stand."""
+    source = _require_entity(entity_id)
+    target = _require_entity(body.target_entity_id)
+    if body.overlap_resolution not in entity_migration.OVERLAP_RESOLUTIONS:
+        raise HTTPException(status_code=400, detail="Ungültiger Umgang mit Überschneidungen")
+    plan = None
+    error = None
+    result_first_ts = None
+    result_last_ts = None
+    try:
+        plan = entity_migration.plan_migration(
+            DATA_DIR, index, entity_id, body.target_entity_id, TZ, factor=body.factor,
+        )
+        # Der Zeitraum, den die Ziel-Entität NACH der Übertragung hätte —
+        # unabhängig von overlap_resolution, denn die überschreibt nur
+        # Werte an bereits bestehenden Zeitstempeln, nie den insgesamt
+        # abgedeckten Zeitraum.
+        first_candidates = [ts for ts in (source["first_ts"], target["first_ts"]) if ts is not None]
+        last_candidates = [ts for ts in (source["last_ts"], target["last_ts"]) if ts is not None]
+        if first_candidates:
+            result_first_ts = format_timestamp(min(first_candidates), TZ)
+        if last_candidates:
+            result_last_ts = format_timestamp(max(last_candidates), TZ)
+    except ValueError as exc:
+        error = str(exc)
+    return templates.TemplateResponse(
+        request,
+        "_entity_migrate_preview.html",
+        {
+            "entity_id": entity_id,
+            "target_entity_id": body.target_entity_id,
+            "target_display_name": entity_display_name(
+                body.target_entity_id, target["friendly_name"], target["custom_name"]
+            ),
+            "factor": body.factor,
+            "overlap_resolution": body.overlap_resolution,
+            "plan": plan,
+            "error": error,
+            "result_first_ts": result_first_ts,
+            "result_last_ts": result_last_ts,
+        },
+    )
+
+
+class _EntityMigrateExecuteBody(BaseModel):
+    target_entity_id: str
+    factor: float = 1.0
+    post_action: str = "delete"
+    overlap_resolution: str = "target"
+
+
+@app.post("/entities/{entity_id}/migrate")
+@_storage_locked(lambda args: [args["entity_id"], args["body"].target_entity_id])
+def entity_migrate_execute(entity_id: str, body: _EntityMigrateExecuteBody) -> dict:
+    """Führt die Migration aus (Migrations-Assistent, Schritt 3). post_action
+    siehe entity_migration.POST_ACTIONS, overlap_resolution siehe
+    entity_migration.OVERLAP_RESOLUTIONS."""
+    _require_entity(entity_id)
+    _require_entity(body.target_entity_id)
+    if body.post_action not in entity_migration.POST_ACTIONS:
+        raise HTTPException(status_code=400, detail="Ungültige Aktion für die Quelle")
+    if body.overlap_resolution not in entity_migration.OVERLAP_RESOLUTIONS:
+        raise HTTPException(status_code=400, detail="Ungültiger Umgang mit Überschneidungen")
+    try:
+        result = entity_migration.execute_migration(
+            DATA_DIR, index, entity_id, body.target_entity_id, TZ,
+            factor=body.factor, post_action=body.post_action, overlap_resolution=body.overlap_resolution,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _background.invalidate_retention_overview()
+    return {
+        "ok": True,
+        "target_entity_id": result.target_entity_id,
+        "rows_transferred": result.rows_transferred,
+        "duplicate_rows": result.duplicate_rows,
+        "overwritten_rows": result.overwritten_rows,
+        "post_action": result.post_action,
+        "overlap_resolution": result.overlap_resolution,
+        "repointed_dashboards": result.repointed_dashboards,
+        "duplicate_pin_dashboards": result.duplicate_pin_dashboards,
+    }
 
 
 # ---------------------------------------------------------------------------

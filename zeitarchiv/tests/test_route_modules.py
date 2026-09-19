@@ -80,7 +80,28 @@ def test_main_keeps_external_api_and_report_routes_out_of_the_monolith() -> None
     # Nutzer-Funktionalität, kein schleichendes Wachstum an schon bekannter
     # Stelle. Schwelle weiter nach "Ist-Stand plus kleiner Puffer": 5.420
     # gegen die heutigen 5.360, gut 60 Zeilen.
-    assert len(main.splitlines()) < 5_420
+    #
+    # Am 19. September auf 5.550 angehoben — neue Funktion "Datensätze
+    # migrieren" (Roadmap-Erweiterung): Verschiebt/kopiert den archivierten
+    # Verlauf einer Entität vollständig in eine andere (typischer Auslöser:
+    # Home Assistant hat sie ersetzt oder umbenannt). Drei neue Routen
+    # (GET migrate, POST migrate/preview, POST migrate) plus deren Kontext-
+    # Erbauer; die eigentliche Merge-/Dedup-Logik liegt in der neuen
+    # app/storage/entity_migration.py, nicht hier. main.py wuchs von 5.360
+    # auf 5.491 — wieder neue Nutzer-Funktionalität, kein schleichendes
+    # Wachstum an schon bekannter Stelle. Schwelle weiter nach "Ist-Stand
+    # plus kleiner Puffer": 5.550 gegen die heutigen 5.491, gut 60 Zeilen.
+    #
+    # Noch am 19. September auf 5.620 angehoben — Nachschärfungen an derselben
+    # Migrations-Funktion: overlap_resolution ("Quellwerte übernehmen" als
+    # echte Alternative zum bisher einzigen additiven Merge, samt eigener
+    # Validierung in Preview UND Execute), ein ?target=-Query-Param fürs
+    # Quelle/Ziel-Tauschen, und ein Typ-Vorfilter der Zielkandidaten (spart
+    # der Vorschau die sonst nötige "inkompatibler Typ"-Fehlermeldung). Kein
+    # schleichendes Wachstum, sondern dieselbe neue Funktionalität weiter
+    # ausgebaut. main.py wuchs von 5.491 auf 5.555 — Schwelle wieder nach
+    # "Ist-Stand plus kleiner Puffer": 5.620 gegen die heutigen 5.555.
+    assert len(main.splitlines()) < 5_620
 
 
 def test_api_router_has_explicit_runtime_dependencies_and_all_api_routes() -> None:

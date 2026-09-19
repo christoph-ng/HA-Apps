@@ -1,0 +1,94 @@
+/* Stepper-Kopfzeile (Schritt 1/2/3) — kein bestehendes Vorbild in der App
+   (import.html hat nur eine einfache Anleitungsliste, keinen echten
+   Wizard-Header), deshalb neu gebaut, aber ausschließlich mit bestehenden
+   Farbvariablen. */
+.migrate-stepper{display:flex;align-items:center;margin:18px 0 22px;flex-wrap:wrap;}
+/* .migrate-stepper{display:flex} oben gilt sonst auch mit dem hidden-Attribut
+   (höhere Spezifität als die UA-Regel [hidden]{display:none}) — ohne diese
+   Regel bleibt der Stepper nach showResult() (entity_migrate.js) trotz
+   .hidden=true sichtbar, siehe dort. */
+.migrate-stepper[hidden]{display:none;}
+.migrate-step{display:flex;align-items:center;gap:7px;font-size:calc(12.5px * var(--font-scale, 1));color:var(--ink-faint);}
+.migrate-step .dot{
+  width:22px;height:22px;border-radius:999px;background:var(--surface-alt);border:1px solid var(--border);
+  display:flex;align-items:center;justify-content:center;font-size:calc(11px * var(--font-scale, 1));font-weight:700;color:var(--ink-muted);flex-shrink:0;
+}
+.migrate-step.active .dot{background:var(--surface);border-color:var(--accent-line);color:var(--accent-line);}
+.migrate-step.active{color:var(--ink);font-weight:600;}
+.migrate-step.done .dot{background:var(--accent-line);border-color:var(--accent-line);color:var(--accent-contrast);}
+.migrate-connector{width:32px;height:1px;background:var(--border-strong);margin:0 8px;flex-shrink:0;}
+@media (max-width:480px){
+  .migrate-connector{width:16px;}
+}
+
+/* Vergleichskarten Quelle/Ziel + Tausch-Knopf, Schritt 1. */
+.migrate-compare-grid{display:grid;grid-template-columns:1fr 44px 1fr;gap:14px;align-items:start;}
+@media (max-width:640px){
+  .migrate-compare-grid{grid-template-columns:1fr;}
+  .migrate-swap-btn{justify-self:center;transform:rotate(90deg);}
+}
+.migrate-entity-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:15px;position:relative;min-width:0;
+}
+.migrate-entity-card.target{border-color:var(--accent-line);}
+.migrate-entity-role{font-size:calc(10.5px * var(--font-scale, 1));font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-faint);margin-bottom:6px;}
+.migrate-entity-name{font-size:calc(14px * var(--font-scale, 1));font-weight:700;margin-bottom:2px;word-break:break-word;}
+.migrate-entity-id{font-family:var(--font-mono);font-size:calc(11px * var(--font-scale, 1));color:var(--ink-muted);display:block;margin-bottom:10px;word-break:break-all;}
+.migrate-entity-stats{display:grid;grid-template-columns:auto 1fr;gap:5px 10px;font-size:calc(12px * var(--font-scale, 1));margin:0;}
+.migrate-entity-stats dt{color:var(--ink-muted);}
+.migrate-entity-stats dd{margin:0;font-weight:600;text-align:right;word-break:break-word;}
+.migrate-entity-card.is-empty{display:flex;align-items:center;justify-content:center;border-style:dashed;border-color:var(--border-strong);min-height:140px;}
+.migrate-entity-empty{text-align:center;}
+.migrate-entity-empty .hint{margin:0 0 10px;}
+
+/* Umschließt Ziel-Karte + "andere wählen"-Knopf + Popover als EIN
+   Grid-Element — der Knopf sitzt bewusst außerhalb der Karte (siehe
+   entity_migrate.html), damit Quelle- und Ziel-Karte im gefüllten Zustand
+   gleich hoch bleiben; das Popover positioniert sich relativ zu diesem
+   Wrapper, nicht mehr zur Karte selbst, und klappt dadurch unter Karte UND
+   Knopf zusammen auf. */
+.migrate-target-column{position:relative;min-width:0;}
+.migrate-picker-btn{margin-top:8px;}
+
+.migrate-swap-btn{
+  width:40px;height:40px;border-radius:999px;background:var(--surface);border:1px solid var(--border);
+  display:flex;align-items:center;justify-content:center;font-size:calc(15px * var(--font-scale, 1));color:var(--ink-muted);
+  margin-top:44px;justify-self:center;cursor:pointer;
+}
+.migrate-swap-btn:hover:not(:disabled){background:var(--surface-alt);color:var(--accent-line);}
+.migrate-swap-btn:disabled{opacity:.4;cursor:default;}
+
+.migrate-target-popover{position:absolute;top:calc(100% + 6px);left:0;right:0;width:auto;z-index:30;}
+.migrate-target-picker-list{max-height:220px;overflow-y:auto;}
+
+.migrate-banner{padding:12px 14px;border-radius:10px;font-size:calc(13px * var(--font-scale, 1));margin-bottom:14px;}
+.migrate-banner.positive{background:var(--positive-soft, var(--surface-alt));color:var(--positive, var(--ink));}
+.migrate-banner.warning{background:var(--warning-soft);color:var(--warning);}
+.migrate-banner.danger{background:var(--danger-soft);color:var(--danger);}
+
+/* Faktor-Feld inline in der Einheiten-Warnbanner, Schritt 2 (Mockup) — der
+   Knopf braucht dieselbe weiße Gegenfarbe wie .entity-data-action .btn
+   (entity_config.css)/.rows-actionbar .btn (cleanup.css): ohne sie
+   verschwindet ein .btn-Standardknopf auf der --warning-soft-Fläche fast,
+   weil dessen Füllung dem hellen Umgebungston zu nahe kommt. */
+.migrate-factor-input{display:inline-flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap;color:inherit;}
+.migrate-factor-input input{width:70px;font-family:var(--font-mono);font-size:calc(12px * var(--font-scale, 1));padding:4px 7px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--ink);}
+.migrate-banner.warning .btn{background:var(--surface);}
+.migrate-factor-suggested-hint{display:block;font-size:calc(11px * var(--font-scale, 1));margin-top:4px;opacity:.85;}
+
+.migrate-post-actions{display:flex;flex-direction:column;gap:8px;margin-top:10px;}
+.migrate-radio{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface-alt);cursor:pointer;}
+.migrate-radio:has(input:checked){border-color:var(--accent-line);background:var(--accent-line-soft, var(--surface-alt));}
+.migrate-radio input{margin-top:3px;flex-shrink:0;}
+.migrate-radio strong{display:block;font-size:calc(13px * var(--font-scale, 1));}
+.migrate-radio-hint{display:block;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);}
+
+.migrate-footer-row{display:flex;justify-content:space-between;margin-top:18px;padding-top:16px;border-top:1px solid var(--border);}
+
+/* Ergebnis-Ansicht nach erfolgreicher Übertragung (kein eigener
+   Stepper-Schritt, siehe entity_migrate.js showResult() — löst den
+   Wizard-Inhalt komplett ab, statt ihn als vierten Schritt zu zählen). */
+.migrate-result-list{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
+.migrate-result-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:calc(12px * var(--font-scale, 1));background:var(--surface-alt);border:1px solid var(--border);border-radius:8px;padding:8px 10px;}
+.migrate-result-row .tag{font-family:var(--font-mono);font-size:calc(10.5px * var(--font-scale, 1));color:var(--ink-faint);white-space:nowrap;}
+
