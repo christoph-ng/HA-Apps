@@ -111,6 +111,19 @@
   <div class="toolbar import-filter-toolbar" style="flex-wrap:wrap;overflow:visible;">
     <input type="search" class="search" id="ha-entity-search" placeholder="Entität suchen …" oninput="onHaSearch(this.value)">
     <span class="count-chip" id="ha-marked-count">0 markiert</span>
+    {# Rechtsbündige Gruppe am Ende der Toolbar, wie in entity_detail.html/
+       chart_editor.html (.toolbar-right in app.css) — beide Knöpfe in EINEM
+       Behälter, nicht margin-left:auto auf dem ersten, sonst würde nur er
+       nach rechts geschoben und der zweite bräche in die nächste Zeile. #}
+    <div class="toolbar-right">
+      {# Der Dry Run holt dieselben Daten wie der Import (ein Roundtrip je
+         Entität), schreibt aber nichts und hat deshalb keine Zahl, gegen die
+         ein Balken laufen könnte — hier reicht der Läuft-Chip. #}
+      <button type="button" class="btn" hx-post="import/ha/dry-run" hx-include="#ha-form" hx-target="#ha-import-output" hx-swap="innerHTML"
+              hx-disabled-elt="this">Vorschau (Dry Run)</button>
+      <button type="button" class="btn primary" hx-post="import/ha/start" hx-include="#ha-form" hx-target="#ha-import-output" hx-swap="innerHTML"
+              hx-disabled-elt="this">{{ "Vollimport starten" if ha_history_source == "full" else "Import starten" }}</button>
+    </div>
   </div>
 
   <div class="tbl-wrap">
@@ -206,15 +219,6 @@
     </select>
   </div>
 
-  <div class="actionbar">
-    {# Der Dry Run holt dieselben Daten wie der Import (ein Roundtrip je
-       Entität), schreibt aber nichts und hat deshalb keine Zahl, gegen die ein
-       Balken laufen könnte — hier reicht der Läuft-Chip. #}
-    <button type="button" class="btn" hx-post="import/ha/dry-run" hx-include="#ha-form" hx-target="#ha-import-output" hx-swap="innerHTML"
-            hx-disabled-elt="this">Vorschau (Dry Run)</button>
-    <button type="button" class="btn primary" hx-post="import/ha/start" hx-include="#ha-form" hx-target="#ha-import-output" hx-swap="innerHTML"
-            hx-disabled-elt="this">{{ "Vollimport starten" if ha_history_source == "full" else "Import starten" }}</button>
-  </div>
   <div id="ha-import-output" hx-get="import/ha/progress" hx-trigger="load" hx-swap="innerHTML"></div>
 </form>
 {% endif %}
