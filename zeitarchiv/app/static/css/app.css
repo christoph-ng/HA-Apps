@@ -676,11 +676,11 @@ a.stat:hover .label{color:var(--accent-line);}
 
 /* Toolbar / Filter-Chips / Suche */
 #controls,.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px;}
-#controls input[type="search"],.search,#controls select,#controls input[type="date"],#controls input[type="time"],select,input[type="date"],input[type="time"]{
+#controls input[type="search"],.search,#controls select,#controls input[type="date"],#controls input[type="time"],select,input[type="date"],input[type="time"],input[type="month"]{
   font-family:var(--font-display);font-size:calc(13px * var(--font-scale, 1));padding:7px 11px;border-radius:8px;
   border:1px solid var(--border);background:var(--surface);color:var(--ink);min-height:36px;box-sizing:border-box;
 }
-input[type="date"],input[type="time"]{color-scheme:inherit;}
+input[type="date"],input[type="time"],input[type="month"]{color-scheme:inherit;}
 #controls input[type="search"],.search{min-width:250px;}
 /* Buttons/Filter-Chips rechtsbündig, unabhängig von der (unveränderten)
    Breite des Suchfelds davor — auto-Margin auf dem ELEMENT DIREKT NACH dem
@@ -1975,10 +1975,10 @@ button[data-tooltip]{cursor:pointer;}
    readonly oder deaktiviert = gedämpfte Alternativfläche. Die !important-
    Deklaration korrigiert auch ältere seitenlokale Regeln, ohne deren Layout,
    Schrift oder Fokusdarstellung anzutasten. */
-input:is([type="text"],[type="search"],[type="date"],[type="time"],[type="datetime-local"],[type="number"],[type="password"],[type="url"],[type="email"]):not([readonly]):not(:disabled),
+input:is([type="text"],[type="search"],[type="date"],[type="time"],[type="datetime-local"],[type="month"],[type="number"],[type="password"],[type="url"],[type="email"]):not([readonly]):not(:disabled),
 select:not(:disabled),textarea:not([readonly]):not(:disabled){background:var(--surface)!important;}
-input:is([type="text"],[type="search"],[type="date"],[type="time"],[type="datetime-local"],[type="number"],[type="password"],[type="url"],[type="email"])[readonly],
-input:is([type="text"],[type="search"],[type="date"],[type="time"],[type="datetime-local"],[type="number"],[type="password"],[type="url"],[type="email"]):disabled,
+input:is([type="text"],[type="search"],[type="date"],[type="time"],[type="datetime-local"],[type="month"],[type="number"],[type="password"],[type="url"],[type="email"])[readonly],
+input:is([type="text"],[type="search"],[type="date"],[type="time"],[type="datetime-local"],[type="month"],[type="number"],[type="password"],[type="url"],[type="email"]):disabled,
 select:disabled,textarea[readonly],textarea:disabled{background:var(--surface-alt)!important;color:var(--ink-muted);cursor:default;}
 
 /* Statuskacheln für Planer und Wartungsbereiche. Dieselbe Klasse verhindert,
