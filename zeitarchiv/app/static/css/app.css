@@ -847,7 +847,21 @@ button.dd-picker-clear{
    Die Gruppe muss die Knöpfe umschließen, statt margin-left:auto auf den
    ersten von ihnen zu setzen — das schob nur diesen einen nach rechts und
    trennte "Optionen" in die nächste Zeile ab. */
-.toolbar-right{display:flex;align-items:center;gap:8px;}
+.toolbar-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+/* Label-über-Wert für Toolbar-Felder, die (anders als ein Chip/Menü-Knopf)
+   eine eigene Beschriftung brauchen — z. B. Jahr A/B beim Jahres-Vergleich
+   im Chart-Editor (chart_editor.html). Dieselbe Typografie wie
+   .menu-section-label, nur außerhalb eines Popovers. */
+.toolbar-field{display:flex;flex-direction:column;gap:2px;}
+.toolbar-field-label{
+  font-family:var(--font-mono);font-size:calc(10.5px * var(--font-scale, 1));font-weight:600;
+  text-transform:uppercase;letter-spacing:.05em;color:var(--ink-faint);
+}
+.toolbar-field select{
+  font-family:var(--font-mono);font-size:calc(13px * var(--font-scale, 1));padding:5px 8px;
+  border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--ink);cursor:pointer;
+}
+.toolbar-field select:hover{border-color:var(--accent-line);}
 @media (min-width:641px){
   .toolbar-right{margin-left:auto;}
 }
