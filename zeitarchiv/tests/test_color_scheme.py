@@ -90,7 +90,7 @@ def test_home_assistant_scheme_has_light_dark_and_chart_tokens() -> None:
     assert "--accent-contrast:#141414" in css
     assert ':root[data-color-mode="dark"]' in css
     assert ':root[data-color-mode="light"]{color-scheme:light;}' in css
-    assert 'input[type="date"],input[type="time"]{color-scheme:inherit;}' in css
+    assert 'input[type="date"],input[type="time"],input[type="month"]{color-scheme:inherit;}' in css
     assert "getPropertyValue(`--chart-${i + 1}`)" in dashboard_script
     assert "getPropertyValue(`--chart-${i + 1}`)" in chart_template
 
