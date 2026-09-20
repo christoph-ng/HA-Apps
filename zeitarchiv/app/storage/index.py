@@ -8,6 +8,7 @@ Tabelle (state_class → Standard/Zähler, Domain → Schalter).
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import subprocess
 import threading
@@ -36,6 +37,15 @@ DEFAULT_DECIMALS = "auto"
 DEFAULT_VALUE_FILTER = "decimals"
 DEFAULT_GAP_THRESHOLD = "15"
 DEFAULT_OUTLIER_THRESHOLD = "50"
+# "off": bewusst wirkungslos für neu erkannte Entitäten, anders als es ein
+# konkretes Zeitraster hier wäre. Automatische Verdichtung ist zwar separat
+# schon auf "aus" gesperrt (Housekeeping → Verdichten,
+# DEFAULT_COMPACT_AUTO_ENABLED in formatting.py) — ein Standard-Ziel ≠ "off"
+# würde aber trotzdem JEDE neue Entität automatisch für die Verdichtung
+# vormerken, sobald die Automatik einmal eingeschaltet wird. Das widerspräche
+# dem eigentlichen Zweck des Felds: gezielt einzelne Entitäten, nicht
+# stillschweigend alle.
+DEFAULT_COMPACT_TARGET = "off"
 VALUE_FILTER_HEARTBEAT_SECONDS = 6 * 60 * 60
 
 # Zeitraum und Kennzahlen einer Werte-Kachel (dashboard_pins, siehe die
@@ -110,22 +120,34 @@ def _normalized_name(name: str) -> str:
     return name.strip().casefold()
 
 
+def resolution_seconds(resolution: str) -> int | None:
+    """Intervallgröße einer Auflösungsstufe in Sekunden, oder None bei
+    ``raw``/unbekannten Werten. Öffentlicher Zugriff auf _RESOLUTION_SECONDS
+    für ingestion.py/resolution.py, statt das private Dict direkt zu lesen."""
+    return _RESOLUTION_SECONDS.get(resolution)
+
+
 def should_accept_write(
     resolution: str,
     last_ts: float | None,
     new_ts: float,
 ) -> bool:
-    """Prüft den Mindestabstand zum letzten tatsächlich gespeicherten Wert.
+    """Prüft, ob new_ts in einem neuen Zeitraster-Fenster liegt als last_ts.
 
     ``raw`` speichert jedes Event. Unbekannte Werte werden ebenfalls wie
     ``raw`` behandelt, damit eine beschädigte oder zukünftige Einstellung
-    nicht unbemerkt Messwerte verwirft. Die Intervalle laufen relativ zum
-    letzten akzeptierten Zeitstempel und sind nicht an Uhrzeit-Buckets gebunden.
+    nicht unbemerkt Messwerte verwirft. Feste Uhrzeit-Buckets
+    (ceil(ts/interval)*interval) statt eines Abstands zum letzten
+    akzeptierten Wert — sonst verschiebt sich das Raster nach jeder
+    Unterbrechung (Neustart, Funkloch) auf einen neuen, zufälligen Phasenwert.
+    Nur für Zähler/Switch relevant; Standard-Entitäten mit Auflösung ≠ raw
+    laufen stattdessen über resolution.py (Ø/Min/Max je Fenster statt
+    Verwerfen).
     """
-    interval = _RESOLUTION_SECONDS.get(resolution)
+    interval = resolution_seconds(resolution)
     if interval is None or last_ts is None:
         return True
-    return new_ts - last_ts >= interval
+    return math.ceil(new_ts / interval) != math.ceil(last_ts / interval)
 
 def should_accept_value(
     value_filter: str,
@@ -272,6 +294,7 @@ CREATE TABLE IF NOT EXISTS entities (
     friendly_name TEXT,
     custom_name TEXT,
     hourly_rollup INTEGER NOT NULL DEFAULT 0,
+    compact_target TEXT NOT NULL DEFAULT 'off',
     first_ts REAL,
     last_ts REAL,
     last_value REAL,
@@ -300,6 +323,21 @@ CREATE INDEX IF NOT EXISTS idx_deleted_points_entity_ts
     ON deleted_points(entity_id, ts);
 CREATE INDEX IF NOT EXISTS idx_deleted_points_entity_deleted_at
     ON deleted_points(entity_id, deleted_at);
+
+-- Merkt sich, WELCHE archivierten Monate bereits verdichtet wurden und AUF
+-- WELCHES Zeitraster — zwei Zwecke: verhindert eine (je nach Typ unsichere,
+-- siehe compact_raw_values()) doppelte Verdichtung, und verhindert, dass
+-- rebuild_entity_rollups() das Rollup still aus den jetzt gröberen Daten neu
+-- berechnet, statt den bestehenden, aus den vollen Rohdaten stammenden Stand
+-- zu behalten.
+CREATE TABLE IF NOT EXISTS compacted_months (
+    entity_id TEXT NOT NULL,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    target_resolution TEXT NOT NULL,
+    compacted_at REAL NOT NULL,
+    PRIMARY KEY (entity_id, year, month)
+);
 
 -- Archiv-weite Schnappschüsse für die Statistik-Übersicht (Konzept Abschnitt 03,
 -- "Verlaufs-Sparkline"/"Allgemeine Statistik-Übersicht"). Der interne
@@ -371,6 +409,31 @@ CREATE TABLE IF NOT EXISTS retention_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_retention_jobs_created_at
     ON retention_jobs(created_at DESC);
+
+-- Protokoll datensatz-verändernder Aktionen, die bisher keine Spur
+-- hinterließen: Korrektur, Hinzufügen, Bereinigen, Verdichten (manuell und
+-- automatisch) — Grundlage für Housekeeping → Aktivität. entity_id ist NULL
+-- bei Aktionen über mehrere Entitäten hinweg (z. B. die globale Bereinigung).
+-- detail ist ein freies JSON-Objekt statt einer Spalte je Aktionstyp
+-- (Zeitraum/Ziel bei Verdichten, alter/neuer Wert bei Korrektur, …), damit
+-- neue Aktionstypen kein Schema-Wachstum brauchen. retention_jobs/backup_jobs
+-- bleiben bewusst eigene Tabellen (siehe deren Kommentare) — Housekeeping →
+-- Aktivität vereint beide nur zur Anzeige, nicht im Schema.
+CREATE TABLE IF NOT EXISTS entity_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id TEXT,
+    action TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    started_at REAL,
+    finished_at REAL,
+    status TEXT NOT NULL,
+    rows_affected INTEGER,
+    detail TEXT,
+    error TEXT,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entity_actions_created_at
+    ON entity_actions(created_at DESC);
 
 -- Persistente Idempotenz für den Live-Schreibpfad. "processing" wird vor
 -- dem Dateianhang gespeichert; "done" wird gemeinsam mit den Entitäts-
@@ -567,24 +630,28 @@ CREATE TABLE IF NOT EXISTS table_rows (
 """
 
 
-def filter_deleted_occurrences(
-    rows: list[tuple[float, float]], deleted_counts: dict[float, int]
-) -> list[tuple[float, float]]:
+def filter_deleted_occurrences(rows: list[tuple], deleted_counts: dict[float, int]) -> list[tuple]:
     """Entfernt aus rows genau so viele Vorkommen je Zeitstempel wie in
     deleted_counts hinterlegt — NICHT pauschal alle Zeilen mit diesem
     Zeitstempel. rows muss in einer stabilen, deterministischen Reihenfolge
     vorliegen (z. B. sortiert), sonst würde bei einem Duplikat mal die eine,
     mal die andere Zeile verschwinden. Gemeinsam von cleanup.py und query.py
     genutzt, damit Bereinigungs-Tabelle und Chart-Anzeige nach dem Löschen
-    einer einzelnen Duplikat-Zeile konsistent bleiben."""
+    einer einzelnen Duplikat-Zeile konsistent bleiben.
+
+    Tupel-Form-neutral (liest nur row[0] als Zeitstempel, gibt die Zeile
+    unverändert zurück) — cleanup.py reicht beim Archiv-Purge auch
+    (ts, value, min_value, max_value)-Zeilen durch, query.py weiterhin
+    (ts, value)."""
     remaining = dict(deleted_counts)
-    kept: list[tuple[float, float]] = []
-    for ts, value in rows:
+    kept: list[tuple] = []
+    for row in rows:
+        ts = row[0]
         skip = remaining.get(ts, 0)
         if skip > 0:
             remaining[ts] = skip - 1
             continue
-        kept.append((ts, value))
+        kept.append(row)
     return kept
 
 
@@ -779,6 +846,12 @@ class Index:
             # Energiedashboard-Konfiguration automatisch gesetzt/entfernt
             # (siehe energiedashboard_routes.py), nicht manuell editierbar.
             self._conn.execute("ALTER TABLE entities ADD COLUMN hourly_rollup INTEGER NOT NULL DEFAULT 0")
+        if "compact_target" not in columns:
+            # Ziel-Zeitraster für die rückwirkende Verdichtung archivierter
+            # Monate (Roadmap "Verdichten") — 'off' erhält das bisherige
+            # Verhalten (keine automatische/manuelle Verdichtung) für alle
+            # bestehenden Entitäten bei.
+            self._conn.execute("ALTER TABLE entities ADD COLUMN compact_target TEXT NOT NULL DEFAULT 'off'")
 
         dp_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(deleted_points)")}
         if "id" not in dp_columns:
@@ -1311,7 +1384,8 @@ class Index:
                 self._conn.execute(
                     "SELECT key, value FROM settings WHERE key IN "
                     "('default_resolution', 'default_retention', 'default_decimals', "
-                    "'default_value_filter', 'default_gap_threshold', 'default_outlier_threshold')"
+                    "'default_value_filter', 'default_gap_threshold', 'default_outlier_threshold', "
+                    "'default_compact_target')"
                 ).fetchall()
             )
             resolution = default_rows.get("default_resolution", DEFAULT_RESOLUTION)
@@ -1320,13 +1394,14 @@ class Index:
             value_filter = default_rows.get("default_value_filter", DEFAULT_VALUE_FILTER)
             gap_threshold = default_rows.get("default_gap_threshold", DEFAULT_GAP_THRESHOLD)
             outlier_threshold = default_rows.get("default_outlier_threshold", DEFAULT_OUTLIER_THRESHOLD)
+            compact_target = default_rows.get("default_compact_target", DEFAULT_COMPACT_TARGET)
             self._conn.execute(
                 """
                 INSERT INTO entities
                     (entity_id, aggregation_type, resolution, retention, decimals, value_filter,
-                     gap_threshold, outlier_threshold,
+                     gap_threshold, outlier_threshold, compact_target,
                      unit, state_class, friendly_name, row_count, size_bytes, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
                 """,
                 (
                     entity_id,
@@ -1337,6 +1412,7 @@ class Index:
                     value_filter,
                     gap_threshold,
                     outlier_threshold,
+                    compact_target,
                     unit,
                     state_class,
                     friendly_name,
@@ -1465,6 +1541,7 @@ class Index:
         outlier_threshold: str | None = None,
         display_mode: str | None = None,
         custom_name: str | None = None,
+        compact_target: str | None = None,
     ) -> None:
         """Ändert Auflösung, Aufbewahrung, Nachkommastellen und/oder die Lücken-/
         Ausreißer-Schwellwerte einer Entität (Konzept Abschnitt 03/04). Alle
@@ -1491,6 +1568,9 @@ class Index:
         if outlier_threshold is not None:
             updates.append("outlier_threshold = ?")
             params.append(outlier_threshold)
+        if compact_target is not None:
+            updates.append("compact_target = ?")
+            params.append(compact_target)
         if display_mode is not None:
             updates.append("display_mode = ?")
             params.append(display_mode)
@@ -1857,6 +1937,41 @@ class Index:
                 (finished_at,),
             )
             return cur.rowcount
+
+    def log_entity_action(
+        self,
+        entity_id: str | None,
+        action: str,
+        trigger: str,
+        started_at: float,
+        finished_at: float,
+        status: str,
+        rows_affected: int | None = None,
+        detail: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Ein Eintrag in Housekeeping → Aktivität — Korrektur/Hinzufügen/
+        Bereinigen/Verdichten hatten bisher keine eigene Spur (anders als
+        Backup/Retention mit ihren jeweiligen Job-Tabellen). `detail` ist
+        vom Aufrufer bereits als JSON-String übergeben, nicht hier serialisiert
+        — der Index kennt die Struktur der einzelnen Aktionstypen nicht."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO entity_actions
+                    (entity_id, action, trigger, started_at, finished_at, status,
+                     rows_affected, detail, error, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (entity_id, action, trigger, started_at, finished_at, status,
+                 rows_affected, detail, error, time.time()),
+            )
+
+    def list_entity_actions(self, limit: int = 100) -> list[sqlite3.Row]:
+        safe_limit = max(1, min(int(limit), 500))
+        with self._lock, self._conn:
+            return self._conn.execute(
+                "SELECT * FROM entity_actions ORDER BY created_at DESC, id DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
 
     # -- Eindeutige Namen (Dashboards/Charts/Tabellen) -------------------------
     # Die drei folgenden Helfer setzen voraus, dass der Aufrufer self._lock
@@ -3503,34 +3618,15 @@ class Index:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM deleted_points").fetchone()
             return row["n"]
 
-    def get_deleted_points_by_entity(self) -> list[dict]:
+    def get_deleted_points_by_entity(self, search: str = "") -> list[dict]:
         """Aufschlüsselung der zur Löschung markierten Vorkommen je Entität
         (nur Entitäten mit mindestens einem markierten Vorkommen) — für die
         Statistik-Übersicht, damit sichtbar wird WELCHE Entitäten betroffen
-        sind, nicht nur die archiv-weite Summe (siehe get_deleted_points_count)."""
-        with self._lock, self._conn:
-            rows = self._conn.execute(
-                """
-                SELECT d.entity_id AS entity_id,
-                       COALESCE(e.custom_name, e.friendly_name) AS friendly_name,
-                       COUNT(*) AS n
-                FROM deleted_points d
-                LEFT JOIN entities e ON e.entity_id = d.entity_id
-                GROUP BY d.entity_id
-                ORDER BY n DESC, d.entity_id ASC
-                """
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    def list_deleted_points(
-        self, *, search: str = "", page: int = 1, page_size: int = 50
-    ) -> dict:
-        """Listet einzelne Soft-Delete-Markierungen serverseitig paginiert.
-
-        Die UI lädt diese Detailansicht bewusst erst auf Anforderung. Dadurch
-        bleibt die Einstellungsseite auch bei sehr vielen Markierungen klein
-        und es werden nie sämtliche Zeilen in den Arbeitsspeicher geladen.
-        """
+        sind, nicht nur die archiv-weite Summe (siehe get_deleted_points_count),
+        UND für die erste Ebene der "Markierte Datensätze"-Detailansicht
+        (Housekeeping → Speicherplatz), deren Suchfeld hier landet. Die zweite
+        Ebene (einzelne Markierungen EINER Entität) liefert
+        list_deleted_points_for_entity()."""
         search = search.strip().lower()
         pattern = f"%{search}%"
         where = """
@@ -3538,31 +3634,46 @@ class Index:
                    OR lower(COALESCE(e.friendly_name, '')) LIKE ?
                    OR lower(COALESCE(e.custom_name, '')) LIKE ?)
         """
-        page_size = max(10, min(int(page_size), 200))
         with self._lock, self._conn:
-            total = self._conn.execute(
+            rows = self._conn.execute(
                 f"""
-                SELECT COUNT(*) AS n
+                SELECT d.entity_id AS entity_id,
+                       COALESCE(e.custom_name, e.friendly_name) AS friendly_name,
+                       COUNT(*) AS n,
+                       MAX(d.deleted_at) AS last_deleted_at
                 FROM deleted_points d
                 LEFT JOIN entities e ON e.entity_id = d.entity_id
                 {where}
+                GROUP BY d.entity_id
+                ORDER BY n DESC, d.entity_id ASC
                 """,
                 (search, pattern, pattern, pattern),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_deleted_points_for_entity(
+        self, entity_id: str, *, page: int = 1, page_size: int = 50
+    ) -> dict:
+        """Wie list_deleted_points(), aber auf eine einzelne Entität
+        eingeschränkt (kein Suchfeld nötig) — die zweite Ebene der "Markierte
+        Datensätze"-Detailansicht, aufgerufen nach einem Klick auf eine
+        Entität aus get_deleted_points_by_entity()."""
+        page_size = max(10, min(int(page_size), 200))
+        with self._lock, self._conn:
+            total = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM deleted_points WHERE entity_id = ?", (entity_id,)
             ).fetchone()["n"]
             total_pages = max(1, -(-total // page_size))
             page = max(1, min(int(page), total_pages))
             offset = (page - 1) * page_size
             rows = self._conn.execute(
-                f"""
-                SELECT d.id, d.entity_id, d.ts, d.deleted_at,
-                       COALESCE(e.custom_name, e.friendly_name) AS friendly_name, e.unit
-                FROM deleted_points d
-                LEFT JOIN entities e ON e.entity_id = d.entity_id
-                {where}
-                ORDER BY d.deleted_at DESC, d.id DESC
+                """
+                SELECT id, ts, deleted_at FROM deleted_points
+                WHERE entity_id = ?
+                ORDER BY deleted_at DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
-                (search, pattern, pattern, pattern, page_size, offset),
+                (entity_id, page_size, offset),
             ).fetchall()
         return {
             "rows": [dict(row) for row in rows],
@@ -3576,30 +3687,57 @@ class Index:
             },
         }
 
-    def get_deleted_counts_for_entity(self, entity_id: str) -> dict[float, int]:
+    def get_deleted_counts_for_entity(self, entity_id: str, older_than: float | None = None) -> dict[float, int]:
         """Wie get_deleted_counts(), aber ohne Zeitfenster — für den Purge, der
         alle gelöschten Vorkommen einer Entität sehen muss, nicht nur die in
-        einem bestimmten Anzeige-Zeitraum."""
+        einem bestimmten Anzeige-Zeitraum.
+
+        ``older_than`` filtert zusätzlich auf deleted_at (wann eine Zeile zur
+        Löschung markiert wurde, nicht ihr eigener Zeitstempel) — für die
+        automatische Bereinigung (background.py), die nur Markierungen
+        anfasst, die das eingestellte Mindestalter schon erreicht haben. Der
+        manuelle Purge lässt older_than weg und sieht wie bisher alles."""
         with self._lock, self._conn:
-            rows = self._conn.execute(
-                "SELECT ts, COUNT(*) AS n FROM deleted_points WHERE entity_id = ? GROUP BY ts",
-                (entity_id,),
-            ).fetchall()
+            if older_than is None:
+                rows = self._conn.execute(
+                    "SELECT ts, COUNT(*) AS n FROM deleted_points WHERE entity_id = ? GROUP BY ts",
+                    (entity_id,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT ts, COUNT(*) AS n FROM deleted_points WHERE entity_id = ? AND deleted_at <= ? GROUP BY ts",
+                    (entity_id, older_than),
+                ).fetchall()
             return {row["ts"]: row["n"] for row in rows}
 
-    def remove_deleted_points(self, entity_id: str, timestamps: list[float]) -> None:
+    def remove_deleted_points(
+        self, entity_id: str, timestamps: list[float], *, older_than: float | None = None
+    ) -> None:
         """Entfernt je einen deleted_points-Eintrag pro Zeitstempel in timestamps
         (mehrfaches Vorkommen in der Liste entfernt entsprechend mehrere Einträge)
         — aufgerufen NACHDEM diese Vorkommen tatsächlich physisch aus dem Hot
         Buffer entfernt wurden (purge_hot_buffer() in cleanup.py), sie brauchen
-        dann keine Soft-Delete-Filterung mehr."""
+        dann keine Soft-Delete-Filterung mehr.
+
+        ``older_than`` (siehe get_deleted_counts_for_entity()) trifft mit
+        ORDER BY deleted_at ASC gezielt die ÄLTESTE noch offene Markierung
+        dieses Zeitstempels — kommt derselbe ts mehrfach vor (Duplikate,
+        unterschiedlich alt markiert), bleiben die jüngeren bis zum nächsten
+        Lauf unangetastet, statt dass eine willkürliche von ihnen mitgeht."""
         with self._lock, self._conn:
             removed = 0
             for ts in timestamps:
-                row = self._conn.execute(
-                    "SELECT id FROM deleted_points WHERE entity_id = ? AND ts = ? LIMIT 1",
-                    (entity_id, ts),
-                ).fetchone()
+                if older_than is None:
+                    row = self._conn.execute(
+                        "SELECT id FROM deleted_points WHERE entity_id = ? AND ts = ? LIMIT 1",
+                        (entity_id, ts),
+                    ).fetchone()
+                else:
+                    row = self._conn.execute(
+                        "SELECT id FROM deleted_points WHERE entity_id = ? AND ts = ? AND deleted_at <= ? "
+                        "ORDER BY deleted_at ASC LIMIT 1",
+                        (entity_id, ts, older_than),
+                    ).fetchone()
                 if row:
                     self._conn.execute("DELETE FROM deleted_points WHERE id = ?", (row["id"],))
                     removed += 1
@@ -3608,6 +3746,38 @@ class Index:
                     "UPDATE entities SET deleted_count = deleted_count - ? WHERE entity_id = ?",
                     (removed, entity_id),
                 )
+
+    def get_compacted_month(self, entity_id: str, year: int, month: int) -> sqlite3.Row | None:
+        """Marker eines bereits verdichteten Monats, oder None. Grundlage für
+        den Schutz vor doppelter Verdichtung (siehe compact_raw_values()) und
+        dafür, dass rebuild_entity_rollups() diesen Monat nicht still aus den
+        jetzt gröberen Rohdaten neu berechnet."""
+        with self._lock, self._conn:
+            return self._conn.execute(
+                "SELECT * FROM compacted_months WHERE entity_id = ? AND year = ? AND month = ?",
+                (entity_id, year, month),
+            ).fetchone()
+
+    def set_compacted_month(self, entity_id: str, year: int, month: int, target_resolution: str, compacted_at: float) -> None:
+        """Setzt/überschreibt den Verdichtet-Marker eines Monats — ein
+        UPSERT, weil Zähler-Monate (anders als Standard) erneut auf ein
+        gröberes Ziel verdichtet werden dürfen (siehe compact_raw_values())."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO compacted_months (entity_id, year, month, target_resolution, compacted_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT (entity_id, year, month)
+                   DO UPDATE SET target_resolution = excluded.target_resolution, compacted_at = excluded.compacted_at""",
+                (entity_id, year, month, target_resolution, compacted_at),
+            )
+
+    def list_all_compacted_months(self) -> list[sqlite3.Row]:
+        """Alle Verdichtet-Marker über alle Entitäten — für den einmaligen
+        Nachzieh-Lauf, der bei bereits verdichteten Monaten verwaiste
+        deleted_points-Markierungen aufräumt (siehe cleanup.
+        remove_deleted_points_for_already_compacted_months())."""
+        with self._lock, self._conn:
+            return self._conn.execute("SELECT * FROM compacted_months").fetchall()
 
     def recent_lock_busy_events(self, window_seconds: float = _BUSY_EVENTS_WINDOW_SECONDS) -> int:
         """Anzahl IndexBusy-Vorkommen (Lock-Timeout) innerhalb der letzten

@@ -3,10 +3,11 @@ Zählerrückgänge markieren,
 nie destruktiv löschen (Konzept Abschnitt 04).
 
 Löschen ist ein Soft-Delete über index.deleted_points — Zeitstempel werden aus
-allen Ansichten rausgefiltert. Ein manueller Purge (purge_hot_buffer() für den
-laufenden Monat, purge_archived_months() für bereits archivierte Monate,
-beide nur bei explizitem Klick in den Einstellungen) entfernt sie danach auch
-physisch.
+allen Ansichten rausgefiltert. Ein Purge (purge_hot_buffer() für den
+laufenden Monat, purge_archived_months() für bereits archivierte Monate)
+entfernt sie danach auch physisch — per Klick in den Einstellungen, oder
+automatisch im Hintergrund ab einem eingestellten Mindestalter der Markierung
+(``older_than``, standardmäßig aus, siehe background.py).
 """
 
 from __future__ import annotations
@@ -22,10 +23,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ..formatting import decimals_to_int, format_value
-from . import rollup
+from . import hotbuffer, rollup
+from . import resolution as resolution_mod
 from .hotbuffer import append as hot_append
 from .hotbuffer import hot_path, month_key, read_rows
-from .index import Index, filter_deleted_occurrences, should_accept_value
+from .index import Index, filter_deleted_occurrences, resolution_seconds, should_accept_value
 from .paths import entity_dir
 
 
@@ -856,7 +858,9 @@ def preview_purge(
     return {"totals": totals, "rows": rows}
 
 
-def purge_hot_buffer(data_dir: Path, index: Index, tz: ZoneInfo, now: datetime | None = None) -> int:
+def purge_hot_buffer(
+    data_dir: Path, index: Index, tz: ZoneInfo, now: datetime | None = None, older_than: float | None = None
+) -> int:
     """Entfernt weich gelöschte Vorkommen physisch aus dem Hot Buffer (laufender
     Monat, unkomprimiertes CSV) — der laufende Monat hat keine Rollup-Datei,
     seine Aggregation wird bei jeder Abfrage ohnehin live aus dem Hot Buffer
@@ -864,37 +868,38 @@ def purge_hot_buffer(data_dir: Path, index: Index, tz: ZoneInfo, now: datetime |
     CSV-Rewrite ohne Rollup-Folgeaufwand. Für bereits archivierte Monate siehe
     purge_archived_months() (Parquet-Rewrite + Rollup-Neuberechnung).
 
+    ``older_than`` (siehe Index.get_deleted_counts_for_entity()) beschränkt auf
+    Markierungen, die mindestens so alt sind — für die automatische
+    Bereinigung (background.py). Der manuelle Purge lässt es weg.
+
     Gibt die Anzahl tatsächlich physisch entfernter Zeilen zurück."""
     now = now or datetime.now(tz)
     current_month_start = datetime(now.year, now.month, 1, tzinfo=tz).timestamp()
     purged_total = 0
     for entity in index.list_entities():
         entity_id = entity["entity_id"]
-        deleted = index.get_deleted_counts_for_entity(entity_id)
+        deleted = index.get_deleted_counts_for_entity(entity_id, older_than=older_than)
         relevant = {ts: count for ts, count in deleted.items() if ts >= current_month_start}
         if not relevant:
             continue
         path = hot_path(data_dir, entity_id, now.timestamp(), tz)
-        rows = read_rows(path)
-        if not rows:
+        records = hotbuffer.read_full_rows(path)
+        if not records:
             continue
         remaining = dict(relevant)
-        kept_rows: list[tuple[float, float]] = []
+        kept_records: list[hotbuffer.HotRecord] = []
         removed_timestamps: list[float] = []
-        for ts, value in rows:
+        for record in records:
+            ts = record[0]
             if remaining.get(ts, 0) > 0:
                 remaining[ts] -= 1
                 removed_timestamps.append(ts)
             else:
-                kept_rows.append((ts, value))
+                kept_records.append(record)
         if not removed_timestamps:
             continue
-        tmp_path = path.with_suffix(".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            for ts, value in kept_rows:
-                f.write(f"{ts},{value}\n")
-        tmp_path.replace(path)
-        index.remove_deleted_points(entity_id, removed_timestamps)
+        hotbuffer.write_records(path, kept_records)
+        index.remove_deleted_points(entity_id, removed_timestamps, older_than=older_than)
         index.add_row_count(entity_id, -len(removed_timestamps))
         purged_total += len(removed_timestamps)
     return purged_total
@@ -925,6 +930,7 @@ def purge_archived_months(
     tz: ZoneInfo,
     now: datetime | None = None,
     on_month: Callable[[int, str], None] | None = None,
+    older_than: float | None = None,
 ) -> dict:
     """Entfernt weich gelöschte Vorkommen physisch aus bereits archivierten
     Monaten — schreibt die betroffene Parquet-Datei ohne die gelöschten
@@ -932,9 +938,14 @@ def purge_archived_months(
     Rollup-Zeilen (fein/Monat, bei Zähler-Entitäten ggf. ein bereits
     berechnetes Jahr) über rollup.replace_month() passend neu. Ergänzt
     purge_hot_buffer() um den bisher fehlenden Teil (Konzept, "Offene
-    Punkte") — bewusst weiterhin nur bei explizitem Klick in den
-    Einstellungen, nie automatisch/lazy: anders als beim Hot Buffer wird hier
-    eine echte Archivdatei angefasst.
+    Punkte") — eine echte Archivdatei wird angefasst, deshalb läuft das immer
+    unter der globalen Sperre (coordinator.exclusive()), egal ob der Aufrufer
+    der manuelle Button oder die automatische Bereinigung (background.py) ist.
+
+    ``older_than`` (siehe Index.get_deleted_counts_for_entity()) beschränkt auf
+    Markierungen, die mindestens so alt sind — nur von der Automatik gesetzt,
+    damit "Rückgängig" für eine gerade erst markierte Charge nicht ins Leere
+    läuft. Der manuelle Purge lässt es weg und sieht wie bisher alles.
 
     ``on_month`` wird nach jedem tatsächlich neu geschriebenen Monat mit
     (Anzahl bisher, "entity_id 2024-03") gerufen — die Fortschrittsanzeige der
@@ -953,7 +964,7 @@ def purge_archived_months(
         entity_id = entity["entity_id"]
         aggregation_type = entity["aggregation_type"]
         hourly_rollup = bool(entity["hourly_rollup"])
-        deleted = index.get_deleted_counts_for_entity(entity_id)
+        deleted = index.get_deleted_counts_for_entity(entity_id, older_than=older_than)
         if not deleted:
             continue
         archive_dir = entity_dir(data_dir, "archive", entity_id)
@@ -971,8 +982,7 @@ def purge_archived_months(
             year_str, month_str = path.stem.split("-")
             year, month = int(year_str), int(month_str)
 
-            table = pq.read_table(path)
-            rows = sorted(zip(table.column("ts").to_pylist(), table.column("value").to_pylist()))
+            rows = sorted(_read_archive_month_full(path), key=lambda r: (r[0], r[1]))
             kept = filter_deleted_occurrences(rows, relevant)
             removed = len(rows) - len(kept)
             if removed == 0:
@@ -980,7 +990,12 @@ def purge_archived_months(
 
             old_size = path.stat().st_size
             if kept:
-                kept_table = pa.table({"ts": [r[0] for r in kept], "value": [r[1] for r in kept]})
+                kept_table = pa.table({
+                    "ts": [r[0] for r in kept],
+                    "value": [r[1] for r in kept],
+                    "min_value": [r[2] for r in kept],
+                    "max_value": [r[3] for r in kept],
+                })
                 tmp_path = path.with_suffix(".tmp")
                 pq.write_table(kept_table, tmp_path, compression="zstd")
                 tmp_path.replace(path)
@@ -1003,7 +1018,7 @@ def purge_archived_months(
             index.add_row_count(entity_id, -removed)
             index.add_size_bytes(entity_id, new_size - old_size)
             removed_timestamps = [ts for ts, count in relevant.items() for _ in range(count)]
-            index.remove_deleted_points(entity_id, removed_timestamps)
+            index.remove_deleted_points(entity_id, removed_timestamps, older_than=older_than)
 
             rows_purged += removed
             months_purged += 1
@@ -1014,6 +1029,44 @@ def purge_archived_months(
             _update_first_ts_after_archive_purge(data_dir, index, entity_id, tz, now)
 
     return {"rows_purged": rows_purged, "months_purged": months_purged}
+
+
+def read_values_for_timestamps(
+    data_dir: Path, entity_id: str, timestamps: list[float], tz: ZoneInfo, now: datetime | None = None
+) -> dict[float, float]:
+    """Liest den Rohwert zu einer Menge bestimmter Zeitstempel einer Entität —
+    rein lesend, für die Detailansicht markierter Datensätze (Housekeeping →
+    Speicherplatz → "Markierte Datensätze anzeigen"): ein weich gelöschter
+    Zeitstempel wird aus allen normalen Ansichten rausgefiltert (siehe
+    Modul-Docstring), sein Wert steht sonst nirgends mehr. Liest NUR die
+    Monate, die unter den übergebenen Zeitstempeln tatsächlich vorkommen —
+    bei einer paginierten Detailseite (20-200 Zeilen) sind das meist nur eine
+    Handvoll Dateien, nie die komplette Historie einer Entität.
+
+    Ein Zeitstempel ohne Treffer (Rohdaten inzwischen anderweitig entfernt,
+    z. B. durch einen bereits erfolgten Purge) fehlt im Ergebnis-dict statt
+    mit None aufzutauchen — der Aufrufer zeigt dafür „—"."""
+    now = now or datetime.now(tz)
+    by_month = _group_by_month({ts: 1 for ts in timestamps}, tz)
+    current_month = month_key(now.timestamp(), tz)
+    values: dict[float, float] = {}
+    for month, wanted in by_month.items():
+        if month == current_month:
+            path = hot_path(data_dir, entity_id, now.timestamp(), tz)
+            if not path.exists():
+                continue
+            for ts, value in read_rows(path):
+                if ts in wanted:
+                    values[ts] = value
+        else:
+            archive_path = entity_dir(data_dir, "archive", entity_id) / f"{month}.parquet"
+            if not archive_path.exists():
+                continue
+            table = pq.read_table(archive_path, columns=["ts", "value"])
+            for ts, value in zip(table.column("ts").to_pylist(), table.column("value").to_pylist()):
+                if ts in wanted:
+                    values[ts] = value
+    return values
 
 
 # -- Bearbeitungsbereich: nachträgliches Hinzufügen/Korrigieren von Rohwerten --
@@ -1031,19 +1084,29 @@ def purge_archived_months(
 
 
 def _rewrite_archive_month(
-    data_dir: Path, index: Index, entity_id: str, aggregation_type: str, rows: list[tuple[float, float]],
+    data_dir: Path, index: Index, entity_id: str, aggregation_type: str,
+    rows: list[tuple[float, float, float | None, float | None]],
     year: int, month: int, tz: ZoneInfo, hourly_rollup: bool = False,
 ) -> None:
-    """Schreibt einen archivierten Monat komplett neu aus `rows` (bereits
-    sortiert, inkl. der Änderung) und berechnet die Rollup-Zeilen dieses
-    Monats neu — gemeinsam von add_raw_value()/correct_raw_value() genutzt,
-    dieselbe atomare tmp-Datei-plus-rename-Technik wie überall sonst in
-    diesem Modul, damit ein Absturz mittendrin nie eine halb geschriebene
-    Archivdatei hinterlässt."""
+    """Schreibt einen archivierten Monat komplett neu aus `rows` (ts, value,
+    min_value, max_value — bereits sortiert, inkl. der Änderung) und
+    berechnet die Rollup-Zeilen dieses Monats neu — gemeinsam von
+    add_raw_value()/correct_raw_value() genutzt, dieselbe atomare
+    tmp-Datei-plus-rename-Technik wie überall sonst in diesem Modul, damit
+    ein Absturz mittendrin nie eine halb geschriebene Archivdatei
+    hinterlässt. min_value/max_value müssen mitgeführt werden, sonst würde
+    jede Korrektur/jedes Hinzufügen in einem Monat, der Standard-
+    Auflösungs-Zeilen (Ø je Zeitfenster) enthält, deren Min/Max-Spalten für
+    alle unberührten Zeilen des Monats stillschweigend löschen."""
     archive_path = entity_dir(data_dir, "archive", entity_id) / f"{year:04d}-{month:02d}.parquet"
     old_size = archive_path.stat().st_size if archive_path.exists() else 0
     archive_path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.table({"ts": [r[0] for r in rows], "value": [r[1] for r in rows]})
+    table = pa.table({
+        "ts": [r[0] for r in rows],
+        "value": [r[1] for r in rows],
+        "min_value": [r[2] for r in rows],
+        "max_value": [r[3] for r in rows],
+    })
     tmp_path = archive_path.with_suffix(".tmp")
     pq.write_table(table, tmp_path, compression="zstd")
     tmp_path.replace(archive_path)
@@ -1052,6 +1115,29 @@ def _rewrite_archive_month(
     )
     new_size = archive_path.stat().st_size
     index.add_size_bytes(entity_id, new_size - old_size)
+
+
+def _read_archive_month_full(
+    archive_path: Path,
+) -> list[tuple[float, float, float | None, float | None]]:
+    """Liest einen archivierten Monat als (ts, value, min_value, max_value).
+    Ältere Archivdateien (vor der Standard-Auflösung) kennen die beiden
+    letzten Spalten noch nicht — dann werden sie als None aufgefüllt, statt
+    dass das Lesen mit KeyError abbricht."""
+    table = pq.read_table(archive_path)
+    ts_col = table.column("ts").to_pylist()
+    value_col = table.column("value").to_pylist()
+    min_col = (
+        table.column("min_value").to_pylist()
+        if "min_value" in table.column_names
+        else [None] * len(ts_col)
+    )
+    max_col = (
+        table.column("max_value").to_pylist()
+        if "max_value" in table.column_names
+        else [None] * len(ts_col)
+    )
+    return list(zip(ts_col, value_col, min_col, max_col))
 
 
 def add_raw_value(
@@ -1077,13 +1163,14 @@ def add_raw_value(
         hot_append(data_dir, entity_id, ts, value, tz)
     else:
         archive_path = entity_dir(data_dir, "archive", entity_id) / f"{ts_month_key}.parquet"
-        if archive_path.exists():
-            table = pq.read_table(archive_path)
-            rows = list(zip(table.column("ts").to_pylist(), table.column("value").to_pylist()))
-        else:
-            rows = []
-        rows.append((ts, value))
-        rows.sort()
+        rows = _read_archive_month_full(archive_path) if archive_path.exists() else []
+        # Manuell nachgetragener Wert ist kein Ø aus mehreren Rohwerten.
+        rows.append((ts, value, None, None))
+        # Nur nach (ts, value) sortieren, nicht per Tupel-Vergleich über alle
+        # vier Felder — bei exakten (ts, value)-Duplikaten würde das sonst
+        # None mit einem float vergleichen (TypeError) statt einfach die
+        # bestehende Reihenfolge der Duplikate beizubehalten.
+        rows.sort(key=lambda r: (r[0], r[1]))
         _rewrite_archive_month(
             data_dir, index, entity_id, entity["aggregation_type"], rows, ts_dt.year, ts_dt.month, tz,
             hourly_rollup=bool(entity["hourly_rollup"]),
@@ -1113,35 +1200,43 @@ def correct_raw_value(
     ts_dt = datetime.fromtimestamp(ts, tz)
     ts_month_key = ts_dt.strftime("%Y-%m")
 
-    def _replace_first_match(rows: list[tuple[float, float]]) -> tuple[list[tuple[float, float]], bool]:
+    # Trifft der Vergleich die Zeile, die gerade korrigiert wird, werden
+    # min_value/max_value mitgelöscht: sie gehörten zum alten (Ø-)Wert, der
+    # jetzt durch eine bewusste manuelle Korrektur ersetzt wird — der neue
+    # Wert ist kein Ø aus mehreren Rohwerten mehr.
+    def _replace_first_match_full(
+        rows: list[tuple[float, float, float | None, float | None]],
+    ) -> tuple[list[tuple[float, float, float | None, float | None]], bool]:
         changed = False
         result = []
-        for row_ts, row_value in rows:
+        for row_ts, row_value, min_value, max_value in rows:
             if not changed and row_ts == ts and row_value == old_value:
-                result.append((row_ts, new_value))
+                result.append((row_ts, new_value, None, None))
                 changed = True
             else:
-                result.append((row_ts, row_value))
+                result.append((row_ts, row_value, min_value, max_value))
         return result, changed
 
     if ts_month_key == now_month_key:
         path = hot_path(data_dir, entity_id, ts, tz)
-        rows = read_rows(path)
-        new_rows, changed = _replace_first_match(rows)
+        records = hotbuffer.read_full_rows(path)
+        changed = False
+        new_records: list[hotbuffer.HotRecord] = []
+        for row_ts, row_value, event_id, min_value, max_value in records:
+            if not changed and row_ts == ts and row_value == old_value:
+                new_records.append((row_ts, new_value, event_id, None, None))
+                changed = True
+            else:
+                new_records.append((row_ts, row_value, event_id, min_value, max_value))
         if not changed:
             return False
-        tmp_path = path.with_suffix(".tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            for row_ts, row_value in new_rows:
-                handle.write(f"{row_ts},{row_value}\n")
-        tmp_path.replace(path)
+        hotbuffer.write_records(path, new_records)
     else:
         archive_path = entity_dir(data_dir, "archive", entity_id) / f"{ts_month_key}.parquet"
         if not archive_path.exists():
             return False
-        table = pq.read_table(archive_path)
-        rows = sorted(zip(table.column("ts").to_pylist(), table.column("value").to_pylist()))
-        new_rows, changed = _replace_first_match(rows)
+        rows = sorted(_read_archive_month_full(archive_path), key=lambda r: (r[0], r[1]))
+        new_rows, changed = _replace_first_match_full(rows)
         if not changed:
             return False
         _rewrite_archive_month(
@@ -1150,3 +1245,297 @@ def correct_raw_value(
         )
 
     return True
+
+
+# -- Verdichten: rückwirkende Reduktion bereits archivierter Monate --
+#
+# Ergänzt die Live-Auflösung (resolution.py) um die rückwirkende Variante für
+# Monate, die schon in voller Auflösung archiviert wurden, bevor eine
+# Auflösungs-Entscheidung getroffen wurde — oder für Fälle, in denen die
+# Live-Auflösung bewusst auf "raw" bleibt, alte Daten aber trotzdem
+# irgendwann reduziert werden sollen. Nutzt denselben Zeitraster-Begriff wie
+# resolution.py (bucket_end(): Bucket-ENDE statt -Anfang), damit rückwirkend
+# und live verdichtete Zeitstempel gleich interpretierbar sind.
+
+
+class CompactionError(ValueError):
+    """Verdichtung abgelehnt (Schalter, kein Verdichtungsziel, bereits
+    verdichteter Monat) — main.py wandelt das in einen HTTP 400 um."""
+
+
+def _compacted_rows_for_month(
+    rows: list[tuple[float, float, float | None, float | None]],
+    aggregation_type: str,
+    interval: int,
+) -> list[tuple[float, float, float | None, float | None]]:
+    """Bucketet einen sortierten Monat auf `interval` und aggregiert je
+    Bucket typabhängig. Gemeinsam von compact_raw_values() und
+    preview_compact_raw_values() genutzt, damit die Vorschau exakt
+    vorhersagt, was der tatsächliche Lauf schreibt.
+
+    Zähler: letzter Wert je Bucket (Teleskopsumme bleibt exakt korrekt).
+    Zusätzlich bleiben Reset-Zeitpunkte (detect_counter_decreases) als eigene
+    Rohzeilen erhalten, unabhängig vom Raster — sonst würde ein echter
+    Zählerrücksprung im Bucket-Mittendrin verschluckt.
+
+    Standard: Ø der Bucket-Werte, Min/Max über value UND bereits vorhandene
+    min_value/max_value (falls das Fenster teils schon durch die Live-
+    Auflösung vor-aggregierte Zeilen enthält). Bewusst ein einfacher,
+    ungewichteter Durchschnitt über die Bucket-Zeilen — ohne mitgeführte
+    Stichprobenanzahl je Zeile lässt sich kein exakt gewichteter Durchschnitt
+    bilden, dieselbe akzeptierte Vereinfachung wie bei der Live-Auflösung."""
+    buckets: dict[float, list[tuple[float, float, float | None, float | None]]] = {}
+    for row in rows:
+        buckets.setdefault(resolution_mod.bucket_end(interval, row[0]), []).append(row)
+
+    if aggregation_type == "counter":
+        decreases = detect_counter_decreases([(r[0], r[1]) for r in rows])
+        new_rows = [
+            (bucket_ts, bucket_rows[-1][1], None, None)
+            for bucket_ts, bucket_rows in buckets.items()
+        ]
+        new_rows.extend((r[0], r[1], None, None) for r in rows if r[0] in decreases)
+    else:
+        new_rows = []
+        for bucket_ts, bucket_rows in buckets.items():
+            values = [r[1] for r in bucket_rows]
+            mins = [r[2] if r[2] is not None else r[1] for r in bucket_rows]
+            maxs = [r[3] if r[3] is not None else r[1] for r in bucket_rows]
+            new_rows.append((bucket_ts, sum(values) / len(values), min(mins), max(maxs)))
+    new_rows.sort(key=lambda r: (r[0], r[1]))
+    return new_rows
+
+
+def _compactable_months(
+    index: Index,
+    entity_id: str,
+    aggregation_type: str,
+    target_resolution: str,
+    interval: int,
+    archive_dir: Path,
+    start_ts: float,
+    end_ts: float,
+    current_month_start: float,
+    tz: ZoneInfo,
+) -> list[tuple[int, int, Path]]:
+    """Archivierte Monate im Zeitraum, die tatsächlich verdichtet werden
+    dürfen — gemeinsam von compact_raw_values() und
+    preview_compact_raw_values() genutzt, damit beide exakt dieselben Monate
+    berücksichtigen. Siehe compact_raw_values() für die Schutzregeln."""
+    result = []
+    for year, month in _months_between(start_ts, end_ts, tz):
+        month_start = datetime(year, month, 1, tzinfo=tz).timestamp()
+        if month_start >= current_month_start:
+            continue
+        archive_path = archive_dir / f"{year:04d}-{month:02d}.parquet"
+        if not archive_path.exists():
+            continue
+        existing_marker = index.get_compacted_month(entity_id, year, month)
+        if existing_marker is not None:
+            if aggregation_type != "counter":
+                continue
+            existing_interval = resolution_seconds(existing_marker["target_resolution"])
+            if existing_interval is None or interval <= existing_interval:
+                continue
+        result.append((year, month, archive_path))
+    return result
+
+
+def _validate_compaction_target(entity: dict, target_resolution: str) -> int:
+    if entity["aggregation_type"] == "switch":
+        raise CompactionError("Verdichten ist für Schalter nicht verfügbar")
+    interval = resolution_seconds(target_resolution)
+    if interval is None:
+        raise CompactionError(f"Ungültiges Verdichtungsziel: {target_resolution}")
+    return interval
+
+
+def preview_compact_raw_values(
+    data_dir: Path, index: Index, entity_id: str, start_ts: float, end_ts: float, target_resolution: str,
+    tz: ZoneInfo, now: datetime | None = None,
+) -> dict:
+    """Zeilenzahl vorher/geschätzt danach, OHNE etwas zu schreiben — für die
+    Vorschau im Bearbeitungsbereich, Reiter "Verdichten", bevor der Nutzer
+    bestätigt."""
+    now = now or datetime.now(tz)
+    entity = index.get_entity(entity_id)
+    if entity is None:
+        raise ValueError(f"Unbekannte Entität: {entity_id}")
+    interval = _validate_compaction_target(entity, target_resolution)
+    aggregation_type = entity["aggregation_type"]
+    current_month_start = datetime(now.year, now.month, 1, tzinfo=tz).timestamp()
+    archive_dir = entity_dir(data_dir, "archive", entity_id)
+
+    rows_before = 0
+    rows_after = 0
+    months = _compactable_months(
+        index, entity_id, aggregation_type, target_resolution, interval, archive_dir,
+        start_ts, end_ts, current_month_start, tz,
+    )
+    for _year, _month, archive_path in months:
+        rows = sorted(_read_archive_month_full(archive_path), key=lambda r: (r[0], r[1]))
+        if not rows:
+            continue
+        rows_before += len(rows)
+        rows_after += len(_compacted_rows_for_month(rows, aggregation_type, interval))
+    return {"rows_before": rows_before, "rows_after": rows_after, "months": len(months)}
+
+
+def remove_deleted_points_for_month(index: Index, entity_id: str, year: int, month: int, tz: ZoneInfo) -> int:
+    """Entfernt alle deleted_points-Markierungen einer Entität, deren
+    Zeitstempel in den angegebenen Kalendermonat fallen — für Vorgänge, die
+    einen kompletten Monat ersetzen oder entfernen (compact_raw_values(),
+    siehe dort, sowie retention.enforce_retention_for_entity() für per
+    Aufbewahrung gelöschte Monate): danach existieren die ursprünglichen
+    Rohzeitstempel des Monats nirgends mehr, eine Markierung dafür wäre
+    sonst dauerhaft verwaist ("Löschmarkierungen ohne passende
+    Rohdatenzeile" in der Bereinigungsvorschau). Auch von
+    remove_deleted_points_for_already_compacted_months() genutzt, für Monate,
+    die VOR diesem Fix verdichtet wurden. Gibt die Anzahl entfernter
+    Markierungen zurück."""
+    deleted = index.get_deleted_counts_for_entity(entity_id)
+    if not deleted:
+        return 0
+    target_month_key = f"{year:04d}-{month:02d}"
+    relevant = {ts: count for ts, count in deleted.items() if month_key(ts, tz) == target_month_key}
+    if not relevant:
+        return 0
+    timestamps = [ts for ts, count in relevant.items() for _ in range(count)]
+    index.remove_deleted_points(entity_id, timestamps)
+    return len(timestamps)
+
+
+def remove_deleted_points_for_already_compacted_months(index: Index, tz: ZoneInfo) -> int:
+    """Einmaliger Nachzieh-Lauf beim Start (siehe background.py
+    BackgroundService.start()): compact_raw_values() räumte deleted_points
+    bisher nicht auf (Fund vom 18.09.2026, Housekeeping → Speicherplatz →
+    "Löschmarkierungen ohne passende Rohdatenzeile") — für jeden VOR diesem
+    Fix bereits verdichteten Monat (compacted_months) können deshalb noch
+    verwaiste Markierungen übrig sein. Idempotent: findet bei jedem weiteren
+    Lauf nichts mehr, kostet dann nur einen Tabellen-Scan. Gibt die Anzahl
+    insgesamt entfernter Markierungen zurück."""
+    total = 0
+    for row in index.list_all_compacted_months():
+        total += remove_deleted_points_for_month(index, row["entity_id"], row["year"], row["month"], tz)
+    return total
+
+
+def remove_deleted_points_with_no_matching_row(
+    data_dir: Path, index: Index, tz: ZoneInfo, now: datetime | None = None
+) -> int:
+    """Einmaliger Nachzieh-Lauf beim Start (siehe background.py
+    BackgroundService.start()): retention.enforce_retention_for_entity()
+    räumte deleted_points bisher nicht auf, wenn die Aufbewahrungsfrist einen
+    kompletten Archiv-Monat löschte (Fund vom 18.09.2026, derselbe Befund wie
+    bei compact_raw_values() oben) — anders als dort gibt es für bereits VOR
+    diesem Fix per Aufbewahrung gelöschte Monate aber keine Tabelle, die
+    festhält, welche Monate das waren. Prüft deshalb stattdessen direkt gegen
+    die Realität, mit derselben Abgleichslogik wie preview_purge() (siehe
+    dort) — nur, dass hier tatsächlich entfernt statt nur gezählt wird, was
+    nirgends mehr eine passende Rohdatenzeile hat. Fängt dadurch nebenbei
+    jede andere, noch unbekannte Ursache für verwaiste Markierungen mit auf.
+    Idempotent: findet bei jedem weiteren Lauf nichts mehr. Gibt die Anzahl
+    insgesamt entfernter Markierungen zurück."""
+    now = now or datetime.now(tz)
+    total_removed = 0
+
+    def consume(timestamps: Iterable[float], remaining: dict[float, int]) -> None:
+        for ts in timestamps:
+            if remaining.get(ts, 0) > 0:
+                remaining[ts] -= 1
+
+    for entity in index.list_entities():
+        entity_id = entity["entity_id"]
+        deleted = index.get_deleted_counts_for_entity(entity_id)
+        if not deleted:
+            continue
+        remaining = dict(deleted)
+
+        hot_file = hot_path(data_dir, entity_id, now.timestamp(), tz)
+        if hot_file.exists():
+            consume((ts for ts, _ in read_rows(hot_file)), remaining)
+
+        archive_dir = entity_dir(data_dir, "archive", entity_id)
+        if archive_dir.exists():
+            remaining_by_month = _group_by_month(remaining, tz)
+            for path in sorted(archive_dir.glob("*.parquet")):
+                if path.stem not in remaining_by_month:
+                    continue
+                table = pq.read_table(path, columns=["ts"])
+                consume(table.column("ts").to_pylist(), remaining)
+
+        orphaned = [ts for ts, count in remaining.items() for _ in range(count)]
+        if orphaned:
+            index.remove_deleted_points(entity_id, orphaned)
+            total_removed += len(orphaned)
+    return total_removed
+
+
+def compact_raw_values(
+    data_dir: Path, index: Index, entity_id: str, start_ts: float, end_ts: float, target_resolution: str,
+    tz: ZoneInfo, now: datetime | None = None,
+) -> dict:
+    """Verdichtet bereits archivierte Monate im Zeitraum [start_ts, end_ts]
+    auf target_resolution — rückwirkend, im Gegensatz zur Live-Auflösung
+    (resolution.py). Nur Zähler und Standard (siehe CompactionError bei
+    Schalter); nur Monate, für die schon eine Archivdatei existiert — der
+    laufende, noch nicht rotierte Monat wird stillschweigend übersprungen,
+    nicht abgelehnt, sonst würde ein bis "heute" reichender Zeitraum komplett
+    scheitern statt die bereits archivierten Monate darin zu verdichten.
+
+    Schutz vor doppelter Verdichtung (compacted_months-Tabelle): Zähler
+    dürfen erneut auf ein GRÖBERES Ziel verdichtet werden (mathematisch
+    exakt — der letzte Wert im großen Bucket ist zwangsläufig auch der
+    letzte unter den bereits verdichteten kleineren Buckets), Standard-Monate
+    dagegen nie erneut (Ø aus bereits gemittelten Ø-Werten wäre ohne
+    mitgeführte Stichprobenanzahl verzerrt, siehe _compacted_rows_for_month()).
+
+    Locking ist Sache des Aufrufers (main.py, wie bei correct_raw_value()/
+    add_raw_value()/purge_*): diese Funktion nimmt selbst keine Sperre.
+
+    Räumt außerdem deleted_points-Markierungen im verdichteten Monat auf
+    (siehe remove_deleted_points_for_month()) — deren ursprüngliche
+    Rohzeitstempel existieren danach nicht mehr, sie blieben sonst dauerhaft
+    als "Löschmarkierungen ohne passende Rohdatenzeile" liegen.
+
+    Gibt rows_before/rows_after/months_compacted/stale_markers_removed zurück."""
+    now = now or datetime.now(tz)
+    entity = index.get_entity(entity_id)
+    if entity is None:
+        raise ValueError(f"Unbekannte Entität: {entity_id}")
+    interval = _validate_compaction_target(entity, target_resolution)
+    aggregation_type = entity["aggregation_type"]
+    hourly_rollup = bool(entity["hourly_rollup"])
+    current_month_start = datetime(now.year, now.month, 1, tzinfo=tz).timestamp()
+    archive_dir = entity_dir(data_dir, "archive", entity_id)
+
+    rows_before = 0
+    rows_after = 0
+    stale_markers_removed = 0
+    months_compacted: list[str] = []
+    months = _compactable_months(
+        index, entity_id, aggregation_type, target_resolution, interval, archive_dir,
+        start_ts, end_ts, current_month_start, tz,
+    )
+    for year, month, archive_path in months:
+        rows = sorted(_read_archive_month_full(archive_path), key=lambda r: (r[0], r[1]))
+        if not rows:
+            continue
+        new_rows = _compacted_rows_for_month(rows, aggregation_type, interval)
+        rows_before += len(rows)
+        rows_after += len(new_rows)
+        _rewrite_archive_month(
+            data_dir, index, entity_id, aggregation_type, new_rows, year, month, tz,
+            hourly_rollup=hourly_rollup,
+        )
+        index.add_row_count(entity_id, len(new_rows) - len(rows))
+        index.set_compacted_month(entity_id, year, month, target_resolution, now.timestamp())
+        months_compacted.append(f"{year:04d}-{month:02d}")
+        stale_markers_removed += remove_deleted_points_for_month(index, entity_id, year, month, tz)
+
+    return {
+        "rows_before": rows_before,
+        "rows_after": rows_after,
+        "months_compacted": months_compacted,
+        "stale_markers_removed": stale_markers_removed,
+    }

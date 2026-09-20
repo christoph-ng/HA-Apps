@@ -22,6 +22,7 @@ zu wissen, wer sie im Hintergrund pflegt.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -40,14 +41,25 @@ from . import notices as notices_mod
 from .backup_scheduler import parse_schedule_time
 from .formatting import (
     BACKUP_SCHEDULE_LABELS,
+    COMPACT_AUTO_LABELS,
+    COMPACT_MIN_AGE_MONTHS_LABELS,
+    COMPACT_TARGET_LABELS,
     DECIMALS_LABELS,
+    decimals_to_int,
+    DEFAULT_COMPACT_AUTO_ENABLED,
+    DEFAULT_COMPACT_MIN_AGE_MONTHS,
+    DEFAULT_PURGE_AUTO_ENABLED,
+    DEFAULT_PURGE_MIN_AGE_DAYS,
     DEMO_APPEND_INTERVAL_LABELS,
     GAP_THRESHOLD_LABELS,
     OUTLIER_THRESHOLD_LABELS,
+    PURGE_AUTO_LABELS,
+    PURGE_MIN_AGE_DAYS_LABELS,
     RESOLUTION_LABELS,
     RETENTION_LABELS,
     VALUE_FILTER_LABELS,
     entity_display_name,
+    format_compact_target,
     format_int,
     format_retention,
     format_size,
@@ -265,6 +277,200 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
     def _settings_rotation_context(result: str | None = None) -> dict:
         return {"stale_count": deps.count_stale_entities(), "result": result}
 
+    def _settings_compact_context(saved: bool = False) -> dict:
+        return {
+            "compact_auto_enabled": deps.index.get_setting("compact_auto_enabled", DEFAULT_COMPACT_AUTO_ENABLED),
+            "compact_min_age_months": deps.index.get_setting(
+                "compact_min_age_months", DEFAULT_COMPACT_MIN_AGE_MONTHS
+            ),
+            "compact_auto_options": list(COMPACT_AUTO_LABELS.items()),
+            "compact_min_age_options": list(COMPACT_MIN_AGE_MONTHS_LABELS.items()),
+            "saved": saved,
+        }
+
+    # Aktionstyp/Auslöser → Anzeigetext für Housekeeping → Aktivität. Lokal
+    # statt in formatting.py, dasselbe Muster wie status_labels in
+    # _settings_retention_context() — nur für diese eine Seite gebraucht.
+    _ACTIVITY_ACTION_LABELS = {
+        "add": "Hinzufügen", "correct": "Korrektur", "purge": "Bereinigen",
+        "compact": "Verdichten", "retention": "Aufbewahrung",
+    }
+    _ACTIVITY_STATUS_LABELS = {
+        "success": "Erfolgreich", "failed": "Fehlgeschlagen", "interrupted": "Abgebrochen",
+        # "queued"/"running"/"skipped" kommen nur von retention_jobs — entity_actions
+        # protokolliert ausschließlich bereits abgeschlossene ("success") Aktionen.
+        "queued": "Geplant", "running": "Läuft", "skipped": "Übersprungen",
+    }
+    # Filter-Dropdowns (Aktionstyp/Status/Zeitraum): erste Option ist immer der
+    # leere Wert = "kein Filter", genau wie bei den bestehenden dd-picker-
+    # Filtern (siehe _rows_filter_menu.html). Die Entität-Liste ist dynamisch
+    # (siehe _settings_activity_context) und deshalb kein Modulkonstante.
+    _ACTIVITY_ACTION_FILTER_OPTIONS = [("", "Alle")] + list(_ACTIVITY_ACTION_LABELS.items())
+    _ACTIVITY_STATUS_FILTER_OPTIONS = [("", "Alle")] + list(_ACTIVITY_STATUS_LABELS.items())
+    _ACTIVITY_DAYS_FILTER_OPTIONS = [("", "Alle"), ("7", "7 Tage"), ("30", "30 Tage"), ("90", "90 Tage")]
+
+    # Nur für die Monatsliste im Verdichten-Detail (unten) — dieselben Namen
+    # wie main.py:_MONTH_NAMES_DE, hier lokal statt geteilt, weil sonst nirgends
+    # in diesem Modul gebraucht.
+    _MONTH_NAMES_DE = (
+        "Januar", "Februar", "März", "April", "Mai", "Juni",
+        "Juli", "August", "September", "Oktober", "November", "Dezember",
+    )
+
+    def _month_year_label(month_key: str) -> str:
+        """"2023-10" -> "Oktober 2023". Ungültige/unerwartete Werte kommen
+        unverändert zurück, statt die ganze Detail-Zeile mit einem Fehler
+        abzubrechen — das JSON stammt aus einer früheren Verdichten-Zeile,
+        deren genaues Format sich in einer künftigen Version ändern könnte."""
+        try:
+            year_str, month_str = month_key.split("-")
+            return f"{_MONTH_NAMES_DE[int(month_str) - 1]} {year_str}"
+        except (ValueError, IndexError):
+            return month_key
+
+    def _activity_detail_label(action: str, detail_json: str | None) -> str:
+        """Liest das JSON-detail-Feld einer Verdichten- oder automatischen
+        Bereinigen-Zeile (main.py compact_rows/background.py
+        _run_automatic_compaction_if_due/_run_automatic_purge_if_due) für die
+        Anzeige aus. Die übrigen Aktionstypen (u. a. der manuelle Purge) füllen
+        detail bisher nicht — leerer String, keine Sonderbehandlung im
+        Template nötig (Zelle zeigt dann einfach „—")."""
+        if not detail_json or action not in ("compact", "purge"):
+            return ""
+        try:
+            detail = json.loads(detail_json)
+        except (TypeError, ValueError):
+            return ""
+        # Beschriftete Zeilen statt einer dicht mit "·" verketteten Zeile —
+        # zeigt jeden Wert mit eigenem Label, dank white-space:pre-line auf
+        # .confirm-message (app.css) auch als eigene Zeile im Popup.
+        if action == "compact":
+            months_list = sorted(detail.get("months_compacted") or [])
+            lines = [f"Zielauflösung: {format_compact_target(detail.get('target_resolution', ''))}"]
+            if months_list:
+                lines.append(f"Zeitraum: {', '.join(_month_year_label(m) for m in months_list)}")
+            rows_before, rows_after = detail.get("rows_before"), detail.get("rows_after")
+            if rows_before is not None and rows_after is not None:
+                lines.append(f"Zeilen: {format_int(rows_before)} → {format_int(rows_after)}")
+            stale_markers = detail.get("stale_markers_removed")
+            if stale_markers:
+                lines.append(
+                    f"Aufgeräumt: {format_int(stale_markers)} verwaiste Löschmarkierung{'en' if stale_markers != 1 else ''}"
+                )
+            return "\n".join(lines)
+        # action == "purge" — bisher nur vom automatischen Lauf gefüllt (siehe
+        # Docstring), der manuelle Button kennt kein Mindestalter.
+        min_age_label = PURGE_MIN_AGE_DAYS_LABELS.get(
+            str(detail.get("min_age_days", "")), f"{detail.get('min_age_days')} Tage"
+        )
+        lines = [f"Mindestalter der Markierung: {min_age_label}"]
+        months_purged = detail.get("months_purged")
+        if months_purged:
+            lines.append(f"Neu berechnete Monate: {format_int(months_purged)}")
+        return "\n".join(lines)
+
+    def _settings_activity_context(
+        limit: int = 100,
+        entity_filter: str = "",
+        action_filter: str = "",
+        status_filter: str = "",
+        days_filter: str = "",
+    ) -> dict:
+        """Housekeeping → Aktivität: vereint entity_actions (Korrektur/
+        Hinzufügen/Bereinigen/Verdichten — bisher spurlos) mit retention_jobs
+        (hatte schon eine eigene Historie, siehe _settings_retention_context)
+        zu EINER zeitlich sortierten Liste. Backup bleibt bewusst außen vor —
+        betrifft die ganze Installation, keine einzelnen Datensätze.
+
+        Die vier Filter (Entität/Aktionstyp/Status/Zeitraum) wirken serverseitig
+        auf den vollen Bestand beider Tabellen (bis zu deren Obergrenzen 500/100,
+        siehe Index.list_entity_actions/list_retention_jobs) — NICHT erst auf die
+        bereits auf `limit` gekürzte Anzeige, sonst würde ein Filter auf einen
+        länger zurückliegenden Treffer stumm leerlaufen. Die Entität-Filterliste
+        stammt bewusst nur aus entity_actions (retention_jobs betreffen per
+        Definition mehrere Entitäten, sind über den Entität-Filter also nie
+        gezielt erreichbar)."""
+        entity_options_map: dict[str, str] = {}
+        rows = []
+        for a in deps.index.list_entity_actions(500):
+            entity = deps.index.get_entity(a["entity_id"]) if a["entity_id"] else None
+            if entity is not None:
+                entity_label = entity_display_name(a["entity_id"], entity["friendly_name"], entity["custom_name"])
+                entity_options_map[a["entity_id"]] = entity_label
+            else:
+                entity_label = a["entity_id"] or "mehrere Entitäten"
+            rows.append({
+                "created_at": f"{format_timestamp(a['created_at'], deps.tz)} {format_time(a['created_at'], deps.tz)}",
+                "created_at_ts": a["created_at"],
+                "action_key": a["action"],
+                "action": _ACTIVITY_ACTION_LABELS.get(a["action"], a["action"]),
+                "entity_key": a["entity_id"] or "",
+                "entity_label": entity_label,
+                "trigger": "Automatisch" if a["trigger"] == "automatic" else "Manuell",
+                "rows_affected": format_int(a["rows_affected"]) if a["rows_affected"] is not None else "—",
+                "status": _ACTIVITY_STATUS_LABELS.get(a["status"], a["status"]),
+                "status_key": a["status"],
+                "error": a["error"],
+                "detail_label": _activity_detail_label(a["action"], a["detail"]),
+            })
+        for job in deps.index.list_retention_jobs(100):
+            rows.append({
+                "created_at": f"{format_timestamp(job['created_at'], deps.tz)} {format_time(job['created_at'], deps.tz)}",
+                "created_at_ts": job["created_at"],
+                "action_key": "retention",
+                "action": _ACTIVITY_ACTION_LABELS["retention"],
+                "entity_key": "",
+                "entity_label": (
+                    f"{job['entities_affected']} Entitäten" if job["entities_affected"] else "mehrere Entitäten"
+                ),
+                "trigger": "Automatisch" if job["trigger"] == "scheduled" else "Manuell",
+                "rows_affected": format_int(job["rows_deleted"]) if job["rows_deleted"] is not None else "—",
+                "status": _ACTIVITY_STATUS_LABELS.get(job["status"], job["status"]),
+                "status_key": job["status"],
+                "error": job["error"],
+                "detail_label": "",
+            })
+        rows.sort(key=lambda r: r["created_at_ts"], reverse=True)
+
+        if entity_filter:
+            rows = [r for r in rows if r["entity_key"] == entity_filter]
+        if action_filter:
+            rows = [r for r in rows if r["action_key"] == action_filter]
+        if status_filter:
+            rows = [r for r in rows if r["status_key"] == status_filter]
+        if days_filter:
+            cutoff = time.time() - int(days_filter) * 86400
+            rows = [r for r in rows if r["created_at_ts"] >= cutoff]
+
+        return {
+            "activity_rows": rows[:limit],
+            "activity_entity_filter": entity_filter,
+            "activity_action_filter": action_filter,
+            "activity_status_filter": status_filter,
+            "activity_days_filter": days_filter,
+            "activity_entity_options": [("", "Alle Entitäten")] + sorted(
+                entity_options_map.items(), key=lambda kv: kv[1]
+            ),
+            "activity_action_options": _ACTIVITY_ACTION_FILTER_OPTIONS,
+            "activity_status_options": _ACTIVITY_STATUS_FILTER_OPTIONS,
+            "activity_days_options": _ACTIVITY_DAYS_FILTER_OPTIONS,
+        }
+
+    @router.get("/housekeeping/activity", response_class=HTMLResponse)
+    def housekeeping_activity(
+        request: Request, entity: str = "", action: str = "", status: str = "", days: str = ""
+    ) -> HTMLResponse:
+        """Von #activity-filter-form (housekeeping.html) abgerufen, wenn einer der
+        vier Filter geändert wird — rendert wie housekeeping_stale_entities nur
+        die Tabelle neu, nicht die ganze Seite."""
+        return deps.templates.TemplateResponse(
+            request,
+            "_housekeeping_activity_form.html",
+            _settings_activity_context(
+                entity_filter=entity, action_filter=action, status_filter=status, days_filter=days
+            ),
+        )
+
     def _settings_storage_index_context(report: dict | None = None) -> dict:
         report = report if report is not None else deps.storage_reconcile_last()
         if report is None:
@@ -299,6 +505,15 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
         tatsächlichen Purge-Klick erzwingt settings_purge() zusätzlich eine
         sofortige Aktualisierung, damit das Ergebnis nicht die alten Zahlen zeigt."""
         return {"result": result, "purge_preview": deps.load_purge_preview()}
+
+    def _settings_purge_auto_context(saved: bool = False) -> dict:
+        return {
+            "purge_auto_enabled": deps.index.get_setting("purge_auto_enabled", DEFAULT_PURGE_AUTO_ENABLED),
+            "purge_min_age_days": deps.index.get_setting("purge_min_age_days", DEFAULT_PURGE_MIN_AGE_DAYS),
+            "purge_auto_options": list(PURGE_AUTO_LABELS.items()),
+            "purge_min_age_options": list(PURGE_MIN_AGE_DAYS_LABELS.items()),
+            "purge_auto_saved": saved,
+        }
 
     def _settings_retention_context(result: str | None = None) -> dict:
         limited_count = sum(1 for entity in deps.index.list_entities() if entity["retention"] != "unlimited")
@@ -518,8 +733,11 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
                 **_host_disk_usage_context(),
                 **_settings_storage_index_context(),
                 **_settings_purge_context(),
+                **_settings_purge_auto_context(),
                 **_settings_retention_context(),
                 **_settings_rotation_context(),
+                **_settings_compact_context(),
+                **_settings_activity_context(),
             },
         )
 
@@ -539,6 +757,7 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
             "default_value_filter": (form.get("default_value_filter"), VALUE_FILTER_LABELS, "Ungültiger Wertänderungsfilter"),
             "default_gap_threshold": (form.get("default_gap_threshold"), GAP_THRESHOLD_LABELS, "Ungültige Lücken-Erkennung"),
             "default_outlier_threshold": (form.get("default_outlier_threshold"), OUTLIER_THRESHOLD_LABELS, "Ungültige Ausreißer-Erkennung"),
+            "default_compact_target": (form.get("default_compact_target"), COMPACT_TARGET_LABELS, "Ungültiges Verdichtungsziel"),
         }
         for _key, (value, labels, error) in fields.items():
             if value is not None and value not in labels:
@@ -595,6 +814,50 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
         )
 
 
+    @router.post("/settings/compact", response_class=HTMLResponse)
+    async def settings_compact(request: Request) -> HTMLResponse:
+        """Speichert die globalen Verdichten-Einstellungen (Schalter +
+        Mindestalter) — die eigentliche Verdichtung läuft anschließend im
+        Wartungsplaner (background.py), nicht hier. Standardmäßig aus (siehe
+        DEFAULT_COMPACT_AUTO_ENABLED)."""
+        form = await request.form()
+        auto_enabled = form.get("compact_auto_enabled")
+        min_age_months = form.get("compact_min_age_months")
+        if auto_enabled is not None and auto_enabled not in COMPACT_AUTO_LABELS:
+            raise HTTPException(status_code=400, detail="Ungültiger Wert für Automatische Verdichtung")
+        if min_age_months is not None and min_age_months not in COMPACT_MIN_AGE_MONTHS_LABELS:
+            raise HTTPException(status_code=400, detail="Ungültiges Mindestalter")
+        if auto_enabled is not None:
+            deps.index.set_setting("compact_auto_enabled", auto_enabled)
+        if min_age_months is not None:
+            deps.index.set_setting("compact_min_age_months", min_age_months)
+        return deps.templates.TemplateResponse(
+            request, "_housekeeping_compact_form.html", _settings_compact_context(saved=True)
+        )
+
+
+    @router.post("/settings/purge-auto", response_class=HTMLResponse)
+    async def settings_purge_auto(request: Request) -> HTMLResponse:
+        """Speichert die globalen Einstellungen der automatischen Bereinigung
+        (Schalter + Mindestalter der Löschmarkierung) — der eigentliche Purge
+        läuft anschließend im Wartungsplaner (background.py), nicht hier.
+        Standardmäßig aus (siehe DEFAULT_PURGE_AUTO_ENABLED)."""
+        form = await request.form()
+        auto_enabled = form.get("purge_auto_enabled")
+        min_age_days = form.get("purge_min_age_days")
+        if auto_enabled is not None and auto_enabled not in PURGE_AUTO_LABELS:
+            raise HTTPException(status_code=400, detail="Ungültiger Wert für Automatische Bereinigung")
+        if min_age_days is not None and min_age_days not in PURGE_MIN_AGE_DAYS_LABELS:
+            raise HTTPException(status_code=400, detail="Ungültiges Mindestalter")
+        if auto_enabled is not None:
+            deps.index.set_setting("purge_auto_enabled", auto_enabled)
+        if min_age_days is not None:
+            deps.index.set_setting("purge_min_age_days", min_age_days)
+        return deps.templates.TemplateResponse(
+            request, "_settings_purge_auto_form.html", _settings_purge_auto_context(saved=True)
+        )
+
+
     @router.post("/settings/storage-index/check", response_class=HTMLResponse)
     def settings_storage_index_check(request: Request) -> HTMLResponse:
         """Erstellt eine rein lesende Vorschau möglicher Indexabweichungen."""
@@ -635,6 +898,7 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
             "Bereinigung läuft…",
             int(vorschau.get("totals", {}).get("archive_months", 0) or 0),
         )
+        started_at = time.time()
         with deps.coordinator.exclusive():
             hot_purged = cleanup.purge_hot_buffer(deps.data_dir, deps.index, deps.tz)
             archive_result = cleanup.purge_archived_months(
@@ -658,6 +922,10 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
             total_rows,
             months,
         )
+        if total_rows:
+            deps.index.log_entity_action(
+                None, "purge", "manual", started_at, time.time(), "success", rows_affected=total_rows
+            )
         deps.refresh_purge_preview_if_stale(force=True)
         return result
 
@@ -707,26 +975,71 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
 
 
     @router.get("/settings/purge/marked", response_class=HTMLResponse)
-    def settings_purge_marked(
+    def settings_purge_marked(request: Request, search: str = Query(default="", max_length=200)) -> HTMLResponse:
+        """Erste Ebene der "Markierte Datensätze"-Detailansicht: betroffene
+        Entitäten mit Anzahl markierter Vorkommen, nicht mehr die einzelnen
+        Zeilen direkt — bei einer einzelnen Entität mit hunderttausenden
+        Markierungen (siehe Endgültige Bereinigung, "Betroffene Entitäten")
+        wäre das eine endlose flache Liste ohne Orientierung. Klick auf eine
+        Entität lädt die zweite Ebene (settings_purge_marked_entity())."""
+        rows = deps.index.get_deleted_points_by_entity(search=search)
+        entities = [
+            {
+                "entity_id": row["entity_id"],
+                "friendly_name": row["friendly_name"],
+                "count": format_int(row["n"]),
+                "last_marked": (
+                    f"{format_timestamp(row['last_deleted_at'], deps.tz)} "
+                    f"{format_time(row['last_deleted_at'], deps.tz)}"
+                ),
+            }
+            for row in rows
+        ]
+        return deps.templates.TemplateResponse(
+            request, "_settings_marked_points.html", {"entities": entities, "search": search}
+        )
+
+    @router.get("/settings/purge/marked/{entity_id}", response_class=HTMLResponse)
+    def settings_purge_marked_entity(
         request: Request,
-        search: str = Query(default="", max_length=200),
+        entity_id: str,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=10, le=200),
     ) -> HTMLResponse:
-        """On-demand-Detailansicht der einzelnen Soft-Delete-Markierungen."""
-        result = deps.index.list_deleted_points(search=search, page=page, page_size=page_size)
+        """Zweite Ebene: einzelne Markierungen EINER Entität, inklusive ihres
+        Werts. Der Wert steht in deleted_points selbst nicht — ein weich
+        gelöschter Zeitstempel wird aus allen normalen Ansichten
+        rausgefiltert (cleanup.py-Modul-Docstring), deshalb liest
+        read_values_for_timestamps() ihn eigens aus Hot Buffer/Archiv nach,
+        beschränkt auf die aktuelle Seite (20-200 Zeitstempel), nicht die
+        komplette Historie der Entität."""
+        entity = deps.index.get_entity(entity_id)
+        if entity is None:
+            raise HTTPException(status_code=404, detail="Unbekannte Entität")
+        result = deps.index.list_deleted_points_for_entity(entity_id, page=page, page_size=page_size)
+        values = cleanup.read_values_for_timestamps(
+            deps.data_dir, entity_id, [row["ts"] for row in result["rows"]], deps.tz
+        )
+        decimals_int = decimals_to_int(entity["decimals"])
         rows = [
             {
                 **row,
-                "measured_at": datetime.fromtimestamp(row["ts"], deps.tz).strftime("%d.%m.%Y %H:%M:%S"),
-                "marked_at": datetime.fromtimestamp(row["deleted_at"], deps.tz).strftime("%d.%m.%Y %H:%M:%S"),
+                "measured_at": f"{format_timestamp(row['ts'], deps.tz)} {format_time(row['ts'], deps.tz)}",
+                "marked_at": f"{format_timestamp(row['deleted_at'], deps.tz)} {format_time(row['deleted_at'], deps.tz)}",
+                "value_label": format_value(values[row["ts"]], decimals_int) if row["ts"] in values else "—",
             }
             for row in result["rows"]
         ]
         return deps.templates.TemplateResponse(
             request,
-            "_settings_marked_points.html",
-            {"rows": rows, "pagination": result["pagination"]},
+            "_settings_marked_points_entity.html",
+            {
+                "entity_id": entity_id,
+                "entity_label": entity_display_name(entity_id, entity["friendly_name"], entity["custom_name"]),
+                "unit": entity["unit"],
+                "rows": rows,
+                "pagination": result["pagination"],
+            },
         )
 
 

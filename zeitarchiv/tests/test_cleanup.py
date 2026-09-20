@@ -9,11 +9,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
+import pytest
+
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from app.storage import cleanup, hotbuffer, query, rollup
+    from app.storage import cleanup, hotbuffer, query, resolution, rollup
     from app.storage.index import Index
 
     _PYARROW_AVAILABLE = True
@@ -392,6 +394,74 @@ def test_purge_hot_buffer_removes_soft_deleted_rows_from_current_month_only() ->
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_purge_hot_buffer_older_than_leaves_fresh_marks_untouched() -> None:
+    """Grundlage der automatischen Bereinigung (background.py): older_than
+    lässt eine gerade erst markierte Zeile stehen, obwohl sie physisch
+    entfernbar wäre — sonst liefe "Rückgängig" für sie ins Leere, bevor
+    jemand sie zurückholen konnte."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.leistung"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "W")
+
+        now = datetime(2024, 8, 15, 12, tzinfo=TZ)
+        old_ts, fresh_ts = _ts(2024, 8, 10, 8), _ts(2024, 8, 11, 9)
+        for ts, value in [(old_ts, 100.0), (fresh_ts, 110.0)]:
+            hotbuffer.append(tmp, entity_id, ts, value, TZ)
+            index.record_write(entity_id, ts)
+        # old_ts vor 40 Tagen markiert, fresh_ts gerade eben — nur old_ts hat
+        # ein übliches 30-Tage-Mindestalter schon erreicht.
+        index.mark_deleted(entity_id, [old_ts], deleted_at=now.timestamp() - 40 * 86400)
+        index.mark_deleted(entity_id, [fresh_ts], deleted_at=now.timestamp())
+
+        cutoff = now.timestamp() - 30 * 86400
+        purged = cleanup.purge_hot_buffer(tmp, index, TZ, now=now, older_than=cutoff)
+        assert purged == 1
+
+        hot_file = hotbuffer.hot_path(tmp, entity_id, now.timestamp(), TZ)
+        remaining = hotbuffer.read_rows(hot_file)
+        assert sorted(remaining) == [(fresh_ts, 110.0)]
+        assert index.get_deleted_points_count() == 1  # fresh_ts bleibt markiert
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_read_values_for_timestamps_reads_hot_buffer_and_archive() -> None:
+    """Grundlage der zweiten Ebene der "Markierte Datensätze"-Detailansicht
+    (Housekeeping → Speicherplatz): der Wert eines weich gelöschten
+    Zeitstempels steht sonst nirgends mehr, weil er aus allen normalen
+    Ansichten rausgefiltert wird — read_values_for_timestamps() holt ihn
+    gezielt aus Hot Buffer (laufender Monat) oder Archiv (älterer Monat)
+    nach, je nachdem wo der Zeitstempel liegt. Ein Zeitstempel ohne
+    Rohdaten-Treffer (hier: einer, der nie geschrieben wurde) fehlt im
+    Ergebnis statt mit None aufzutauchen."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        entity_id = "sensor.temp"
+        now = datetime(2024, 8, 15, 12, tzinfo=TZ)
+        hot_ts = _ts(2024, 8, 10, 8)
+        hotbuffer.append(tmp, entity_id, hot_ts, 21.5, TZ)
+
+        archive_ts = _ts(2024, 7, 5, 8)
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        pq.write_table(pa.table({"ts": [archive_ts], "value": [19.0]}), archive_dir / "2024-07.parquet")
+
+        missing_ts = _ts(2024, 6, 1, 8)  # nie geschrieben
+
+        values = cleanup.read_values_for_timestamps(
+            tmp, entity_id, [hot_ts, archive_ts, missing_ts], TZ, now=now
+        )
+
+        assert values == {hot_ts: 21.5, archive_ts: 19.0}
+        assert missing_ts not in values
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_preview_purge_reports_hot_archive_and_missing_without_changes() -> None:
     """Die Vorschau zählt exakt, bleibt aber vollständig schreibfrei."""
     tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
@@ -440,6 +510,48 @@ def test_preview_purge_reports_hot_archive_and_missing_without_changes() -> None
         assert index.get_deleted_points_count() == 3
         assert hot_file.read_bytes() == hot_before
         assert archive_path.read_bytes() == archive_before
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_remove_deleted_points_with_no_matching_row_cleans_up_only_orphans() -> None:
+    """Fund vom 18.09.2026: retention.enforce_retention_for_entity() räumte
+    deleted_points bisher nicht auf, wenn die Aufbewahrung einen kompletten
+    Archiv-Monat löschte — für bereits VOR diesem Fix so entstandene
+    Markierungen gibt es (anders als bei compact_raw_values(), siehe
+    compacted_months oben) keine Tabelle, die festhält, welche Monate das
+    waren. Dieser Nachzieh-Lauf prüft deshalb direkt gegen die Realität und
+    entfernt nur, was nirgends mehr eine passende Rohdatenzeile hat — eine
+    noch nicht purgte Markierung in Hot Buffer oder Archiv bleibt
+    unangetastet."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+        now = datetime(2024, 8, 15, 12, tzinfo=TZ)
+        hot_ts = _ts(2024, 8, 10, 8)
+        archive_ts = _ts(2024, 7, 5, 8)
+        orphaned_ts = _ts(2024, 6, 1, 8)  # z. B. per Aufbewahrung gelöschter Monat
+
+        hotbuffer.append(tmp, entity_id, hot_ts, 21.0, TZ)
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table({"ts": [archive_ts], "value": [19.5]}), archive_dir / "2024-07.parquet"
+        )
+        cleanup.soft_delete(index, entity_id, [hot_ts, archive_ts, orphaned_ts])
+        assert index.get_deleted_points_count() == 3
+
+        removed_first = cleanup.remove_deleted_points_with_no_matching_row(tmp, index, TZ, now=now)
+        assert removed_first == 1
+        remaining = index.get_deleted_counts_for_entity(entity_id)
+        assert remaining == {hot_ts: 1, archive_ts: 1}
+
+        removed_second = cleanup.remove_deleted_points_with_no_matching_row(tmp, index, TZ, now=now)
+        assert removed_second == 0  # idempotent, nichts mehr zu tun
 
         index.close()
     finally:
@@ -532,6 +644,42 @@ def test_purge_archived_months_rewrites_file_and_recomputes_rollup() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_purge_archived_months_older_than_leaves_fresh_marks_untouched() -> None:
+    """Wie test_purge_hot_buffer_older_than_leaves_fresh_marks_untouched, nur
+    für einen bereits archivierten Monat: die frisch markierte Zeile bleibt in
+    der Parquet-Datei stehen, nur die alte wird tatsächlich entfernt."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        old_ts, fresh_ts = _ts(2024, 7, 5, 8), _ts(2024, 7, 20, 8)
+        rows = [(old_ts, 20.0), (fresh_ts, 25.0)]
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(pa.table({"ts": [r[0] for r in rows], "value": [r[1] for r in rows]}), archive_path)
+        index.add_row_count(entity_id, len(rows))
+        index.set_first_ts(entity_id, old_ts)
+
+        now = datetime(2024, 8, 15, tzinfo=TZ)
+        index.mark_deleted(entity_id, [old_ts], deleted_at=now.timestamp() - 40 * 86400)
+        index.mark_deleted(entity_id, [fresh_ts], deleted_at=now.timestamp())
+
+        cutoff = now.timestamp() - 30 * 86400
+        result = cleanup.purge_archived_months(tmp, index, TZ, now=now, older_than=cutoff)
+
+        assert result == {"rows_purged": 1, "months_purged": 1}
+        remaining = pq.read_table(archive_path).to_pylist()
+        assert [(r["ts"], r["value"]) for r in remaining] == [(fresh_ts, 25.0)]
+        assert index.get_deleted_points_count() == 1  # fresh_ts bleibt markiert
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_purge_archived_months_removes_entirely_emptied_month_and_updates_first_ts() -> None:
     """Wenn JEDER Rohwert eines archivierten Monats weich gelöscht war, muss
     der Purge die Datei UND die Rollup-Zeilen dieses Monats komplett entfernen
@@ -582,6 +730,132 @@ def test_purge_archived_months_is_noop_when_nothing_soft_deleted() -> None:
 
         assert result == {"rows_purged": 0, "months_purged": 0}
         assert path.exists()
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_purge_archived_months_preserves_min_max_of_untouched_resolution_rows() -> None:
+    """Ein archivierter Monat kann Zeilen enthalten, die die Standard-
+    Live-Auflösung (resolution.py) als Ø mehrerer Rohwerte geschrieben hat
+    (min_value/max_value gesetzt). Ein Purge, der eine ANDERE Zeile dieses
+    Monats entfernt, darf diese Spalten bei den unberührten Zeilen nicht
+    stillschweigend verwerfen."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        dup_ts = _ts(2024, 7, 5, 8)
+        resolved_ts = _ts(2024, 7, 5, 9)
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({
+                "ts": [dup_ts, dup_ts, resolved_ts],
+                "value": [20.0, 20.0, 21.85],
+                "min_value": [None, None, 21.0],
+                "max_value": [None, None, 24.8],
+            }),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 3)
+        index.set_first_ts(entity_id, dup_ts)
+        cleanup.soft_delete(index, entity_id, [dup_ts])  # nur EIN Vorkommen
+
+        result = cleanup.purge_archived_months(tmp, index, TZ, now=datetime(2024, 8, 15, tzinfo=TZ))
+
+        assert result == {"rows_purged": 1, "months_purged": 1}
+        remaining = {r["ts"]: r for r in pq.read_table(archive_path).to_pylist()}
+        assert remaining[resolved_ts]["min_value"] == 21.0
+        assert remaining[resolved_ts]["max_value"] == 24.8
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_correct_raw_value_clears_min_max_only_on_the_corrected_row() -> None:
+    """correct_raw_value() darf die Ø/Min/Max-Spalte einer per Auflösung
+    zusammengefassten Zeile nur bei der WIRKLICH korrigierten Zeile löschen
+    (der neue Wert ist kein Ø mehr) — alle anderen Zeilen desselben Archiv-
+    Monats müssen ihre Min/Max-Werte behalten."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        wrong_ts = _ts(2024, 7, 5, 8)
+        untouched_ts = _ts(2024, 7, 5, 9)
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({
+                "ts": [wrong_ts, untouched_ts],
+                "value": [999.0, 21.85],
+                "min_value": [20.5, 21.0],
+                "max_value": [21.5, 24.8],
+            }),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 2)
+        index.set_first_ts(entity_id, wrong_ts)
+
+        changed = cleanup.correct_raw_value(
+            tmp, index, entity_id, wrong_ts, 999.0, 21.2, TZ, now=datetime(2024, 8, 15, tzinfo=TZ)
+        )
+
+        assert changed is True
+        remaining = {r["ts"]: r for r in pq.read_table(archive_path).to_pylist()}
+        assert remaining[wrong_ts]["value"] == 21.2
+        assert remaining[wrong_ts]["min_value"] is None
+        assert remaining[wrong_ts]["max_value"] is None
+        assert remaining[untouched_ts]["min_value"] == 21.0
+        assert remaining[untouched_ts]["max_value"] == 24.8
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_add_raw_value_preserves_min_max_of_existing_archive_rows() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        existing_ts = _ts(2024, 7, 5, 8)
+        new_ts = _ts(2024, 7, 5, 9)
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({
+                "ts": [existing_ts],
+                "value": [21.85],
+                "min_value": [21.0],
+                "max_value": [24.8],
+            }),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 1)
+        index.set_first_ts(entity_id, existing_ts)
+
+        cleanup.add_raw_value(
+            tmp, index, entity_id, new_ts, 19.5, TZ, now=datetime(2024, 8, 15, tzinfo=TZ)
+        )
+
+        remaining = {r["ts"]: r for r in pq.read_table(archive_path).to_pylist()}
+        assert remaining[existing_ts]["min_value"] == 21.0
+        assert remaining[existing_ts]["max_value"] == 24.8
+        assert remaining[new_ts]["value"] == 19.5
+        assert remaining[new_ts]["min_value"] is None
 
         index.close()
     finally:
@@ -655,6 +929,364 @@ def test_get_raw_values_for_timestamps_reads_across_hot_buffer_and_archive() -> 
         # zur Kontrolle: list_raw_rows filtert dieselben Zeitstempel tatsächlich raus
         visible = cleanup.list_raw_rows(tmp, index, entity_id, archived_ts - 1, with_now_ts + 1, TZ, now=with_now)
         assert visible == []
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_compact_raw_values_counter_keeps_last_value_per_bucket_and_marks_reset_separately() -> None:
+    """Zähler: letzter Wert je Bucket (Teleskopsumme bleibt exakt korrekt),
+    plus Reset-Zeitpunkte (detect_counter_decreases) zusätzlich als eigene
+    Rohzeile — unabhängig vom Raster, sonst würde ein echter Zählerrücksprung
+    im Bucket-Mittendrin verschluckt."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.counter"
+        index.get_or_create_entity(entity_id, "sensor", "total_increasing", "kWh")
+
+        # "+ 1": 08:00:00 selbst liegt zufällig exakt auf einer 5-Minuten-
+        # Rastergrenze (bucket_end(300, t) == t dort) — ein Sekunde später
+        # garantiert, dass alle vier Zeitstempel im SELBEN Fenster liegen.
+        base = _ts(2024, 7, 5, 8) + 1
+        t0, t1, t2, t3 = base, base + 10, base + 20, base + 30
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({
+                "ts": [t0, t1, t2, t3],
+                "value": [10.0, 20.0, 5.0, 8.0],  # t2 ist ein Rücksprung (5 < 20)
+                "min_value": [None, None, None, None],
+                "max_value": [None, None, None, None],
+            }),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 4)
+        index.set_first_ts(entity_id, t0)
+
+        # Vorbedingung: alle vier Zeitstempel liegen im selben 5-Minuten-Fenster
+        # — unabhängig von der Epoch-Phase, deshalb über die echte Funktion
+        # geprüft statt angenommen.
+        bucket_ts = resolution.bucket_end(300, t3)
+        assert resolution.bucket_end(300, t0) == bucket_ts
+
+        result = cleanup.compact_raw_values(
+            tmp, index, entity_id, t0, t3, "5min", TZ, now=datetime(2024, 8, 15, tzinfo=TZ)
+        )
+
+        assert result == {
+            "rows_before": 4, "rows_after": 2, "months_compacted": ["2024-07"], "stale_markers_removed": 0,
+        }
+        rows = {r["ts"]: r for r in pq.read_table(archive_path).to_pylist()}
+        assert set(rows) == {bucket_ts, t2}
+        assert rows[bucket_ts]["value"] == 8.0  # letzter Wert im Fenster
+        assert rows[t2]["value"] == 5.0  # Reset-Punkt, unangetastet
+
+        marker = index.get_compacted_month(entity_id, 2024, 7)
+        assert marker["target_resolution"] == "5min"
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_compact_raw_values_standard_averages_values_and_composes_min_max() -> None:
+    """Standard: Ø der Bucket-Werte, Min/Max über value UND ggf. bereits
+    vorhandene min_value/max_value (Zeilen, die die Live-Auflösung schon
+    vor-aggregiert hat)."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        # "+ 1", siehe test_compact_raw_values_counter_keeps_last_value_per_bucket…
+        base = _ts(2024, 7, 5, 8) + 1
+        t0, t1, t2 = base, base + 10, base + 20
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({
+                "ts": [t0, t1, t2],
+                "value": [20.0, 22.0, 24.0],
+                "min_value": [None, 18.0, None],  # t1 schon Ø einer Auflösungs-Zeile
+                "max_value": [None, 26.0, None],
+            }),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 3)
+        index.set_first_ts(entity_id, t0)
+
+        bucket_ts = resolution.bucket_end(300, t2)
+        assert resolution.bucket_end(300, t0) == bucket_ts
+
+        result = cleanup.compact_raw_values(
+            tmp, index, entity_id, t0, t2, "5min", TZ, now=datetime(2024, 8, 15, tzinfo=TZ)
+        )
+
+        assert result == {
+            "rows_before": 3, "rows_after": 1, "months_compacted": ["2024-07"], "stale_markers_removed": 0,
+        }
+        rows = {r["ts"]: r for r in pq.read_table(archive_path).to_pylist()}
+        assert rows[bucket_ts]["value"] == sum([20.0, 22.0, 24.0]) / 3
+        assert rows[bucket_ts]["min_value"] == 18.0
+        assert rows[bucket_ts]["max_value"] == 26.0
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_compact_raw_values_removes_stale_markers_in_the_compacted_month_only() -> None:
+    """Fund vom 18.09.2026: eine Löschmarkierung für einen Zeitstempel, der
+    gerade verdichtet wird, existiert danach für keine Rohdatenzeile mehr
+    (weder alt noch neu) — compact_raw_values() muss sie deshalb selbst
+    aufräumen, sonst bliebe sie für immer als "Löschmarkierung ohne passende
+    Rohdatenzeile" liegen. Eine Markierung in einem ANDEREN, nicht
+    verdichteten Monat bleibt dagegen unangetastet."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        base = _ts(2024, 7, 5, 8) + 1
+        t0, t1, t2 = base, base + 10, base + 20
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({"ts": [t0, t1, t2], "value": [20.0, 22.0, 24.0]}),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 3)
+        index.set_first_ts(entity_id, t0)
+        # t1 liegt im zu verdichtenden Juli, außerdem noch nicht bereinigt
+        # markiert — und ein zweiter Marker in einem GANZ ANDEREN Monat
+        # (Juni), der von dieser Verdichtung nicht betroffen sein darf.
+        june_ts = _ts(2024, 6, 1, 8)
+        index.mark_deleted(entity_id, [t1, june_ts])
+        assert index.get_deleted_points_count() == 2
+
+        result = cleanup.compact_raw_values(
+            tmp, index, entity_id, t0, t2, "5min", TZ, now=datetime(2024, 8, 15, tzinfo=TZ)
+        )
+
+        assert result["stale_markers_removed"] == 1
+        assert index.get_deleted_points_count() == 1
+        assert index.get_deleted_counts_for_entity(entity_id) == {june_ts: 1}
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_remove_deleted_points_for_already_compacted_months_is_a_retroactive_backfill() -> None:
+    """Für Installationen, die schon VOR dem obigen Fix verdichtet haben:
+    der einmalige Nachzieh-Lauf (background.py BackgroundService.start())
+    räumt verwaiste Markierungen anhand der compacted_months-Tabelle auf,
+    ohne erneut zu verdichten — und ist beim zweiten Lauf ein No-op."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        already_compacted_ts = _ts(2024, 5, 10, 8)  # Mai bereits früher verdichtet
+        untouched_ts = _ts(2024, 6, 10, 8)  # Juni nie verdichtet
+        index.mark_deleted(entity_id, [already_compacted_ts, untouched_ts])
+        index.set_compacted_month(entity_id, 2024, 5, "1h", already_compacted_ts)
+
+        removed_first = cleanup.remove_deleted_points_for_already_compacted_months(index, TZ)
+        assert removed_first == 1
+        assert index.get_deleted_counts_for_entity(entity_id) == {untouched_ts: 1}
+
+        removed_second = cleanup.remove_deleted_points_for_already_compacted_months(index, TZ)
+        assert removed_second == 0  # idempotent, nichts mehr zu tun
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_compact_raw_values_standard_month_is_never_compacted_twice() -> None:
+    """Doppel-Verdichtung-Schutz: ein Standard-Monat wird nie erneut
+    verdichtet (Ø aus bereits gemittelten Ø-Werten wäre ohne mitgeführte
+    Stichprobenanzahl verzerrt) — der zweite Aufruf ist ein vollständiges No-op."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        base = _ts(2024, 7, 5, 8)
+        t0, t1 = base, base + 10
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({"ts": [t0, t1], "value": [20.0, 22.0], "min_value": [None, None], "max_value": [None, None]}),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 2)
+        index.set_first_ts(entity_id, t0)
+        now = datetime(2024, 8, 15, tzinfo=TZ)
+
+        first = cleanup.compact_raw_values(tmp, index, entity_id, t0, t1, "5min", TZ, now=now)
+        assert first["months_compacted"] == ["2024-07"]
+        rows_after_first = pq.read_table(archive_path).to_pylist()
+
+        second = cleanup.compact_raw_values(tmp, index, entity_id, t0, t1, "1h", TZ, now=now)
+        assert second == {
+            "rows_before": 0, "rows_after": 0, "months_compacted": [], "stale_markers_removed": 0,
+        }
+        assert pq.read_table(archive_path).to_pylist() == rows_after_first
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_compact_raw_values_counter_month_allows_coarser_recompaction_but_not_finer() -> None:
+    """Doppel-Verdichtung-Schutz bei Zählern: ein gröberes Ziel danach ist
+    mathematisch exakt (letzter Wert im großen Bucket ist zwangsläufig auch
+    der letzte unter den bereits verdichteten kleineren Buckets) und deshalb
+    erlaubt — dasselbe oder ein feineres Ziel ist es nicht."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.counter"
+        index.get_or_create_entity(entity_id, "sensor", "total_increasing", "kWh")
+
+        base = _ts(2024, 7, 5, 8)
+        timestamps = [base + i * 20 for i in range(6)]
+        values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({
+                "ts": timestamps, "value": values,
+                "min_value": [None] * 6, "max_value": [None] * 6,
+            }),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 6)
+        index.set_first_ts(entity_id, timestamps[0])
+        now = datetime(2024, 8, 15, tzinfo=TZ)
+
+        first = cleanup.compact_raw_values(tmp, index, entity_id, timestamps[0], timestamps[-1], "1min", TZ, now=now)
+        assert first["months_compacted"] == ["2024-07"]
+        rows_after_first = len(pq.read_table(archive_path).to_pylist())
+        assert index.get_compacted_month(entity_id, 2024, 7)["target_resolution"] == "1min"
+
+        same_target = cleanup.compact_raw_values(
+            tmp, index, entity_id, timestamps[0], timestamps[-1], "1min", TZ, now=now
+        )
+        assert same_target == {
+            "rows_before": 0, "rows_after": 0, "months_compacted": [], "stale_markers_removed": 0,
+        }
+
+        coarser = cleanup.compact_raw_values(
+            tmp, index, entity_id, timestamps[0], timestamps[-1], "5min", TZ, now=now
+        )
+        assert coarser["months_compacted"] == ["2024-07"]
+        assert coarser["rows_before"] == rows_after_first
+        assert index.get_compacted_month(entity_id, 2024, 7)["target_resolution"] == "5min"
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_compact_raw_values_rejects_switch_entities() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "binary_sensor.online"
+        index.get_or_create_entity(entity_id, "binary_sensor", None, None)
+
+        with pytest.raises(cleanup.CompactionError):
+            cleanup.compact_raw_values(tmp, index, entity_id, 0.0, 1e12, "5min", TZ)
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_compact_raw_values_never_touches_the_current_month_even_if_archived() -> None:
+    """Der laufende Monat wird stillschweigend übersprungen, nicht abgelehnt —
+    ein bis "heute" reichender Zeitraum soll nur die bereits archivierten
+    Monate darin verdichten. (Eine Archivdatei für den laufenden Monat ist ein
+    künstlicher Randfall hier, um genau diese Schutzregel isoliert zu prüfen.)"""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.counter"
+        index.get_or_create_entity(entity_id, "sensor", "total_increasing", "kWh")
+
+        current_month_ts = _ts(2024, 8, 5, 8)
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table({
+                "ts": [current_month_ts], "value": [10.0],
+                "min_value": [None], "max_value": [None],
+            }),
+            archive_dir / "2024-08.parquet",
+        )
+        index.add_row_count(entity_id, 1)
+        index.set_first_ts(entity_id, current_month_ts)
+
+        result = cleanup.compact_raw_values(
+            tmp, index, entity_id, current_month_ts, current_month_ts + 3600, "5min", TZ,
+            now=datetime(2024, 8, 15, tzinfo=TZ),
+        )
+
+        assert result == {
+            "rows_before": 0, "rows_after": 0, "months_compacted": [], "stale_markers_removed": 0,
+        }
+        assert index.get_compacted_month(entity_id, 2024, 8) is None
+
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_preview_compact_raw_values_matches_the_actual_run() -> None:
+    """Die Vorschau (rein lesend) muss exakt vorhersagen, was der tatsächliche
+    Lauf schreibt — beide teilen sich dieselbe Bucketing-Logik
+    (_compacted_rows_for_month)."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        entity_id = "sensor.temp"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+
+        base = _ts(2024, 7, 5, 8)
+        t0, t1, t2 = base, base + 10, base + 20
+        archive_dir = tmp / "archive" / entity_id
+        archive_dir.mkdir(parents=True)
+        archive_path = archive_dir / "2024-07.parquet"
+        pq.write_table(
+            pa.table({
+                "ts": [t0, t1, t2], "value": [20.0, 22.0, 24.0],
+                "min_value": [None, None, None], "max_value": [None, None, None],
+            }),
+            archive_path,
+        )
+        index.add_row_count(entity_id, 3)
+        index.set_first_ts(entity_id, t0)
+        now = datetime(2024, 8, 15, tzinfo=TZ)
+
+        preview = cleanup.preview_compact_raw_values(tmp, index, entity_id, t0, t2, "5min", TZ, now=now)
+        result = cleanup.compact_raw_values(tmp, index, entity_id, t0, t2, "5min", TZ, now=now)
+
+        assert preview == {"rows_before": result["rows_before"], "rows_after": result["rows_after"], "months": 1}
+        assert len(result["months_compacted"]) == 1
 
         index.close()
     finally:

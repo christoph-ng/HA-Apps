@@ -50,6 +50,12 @@ from . import notices as notices_mod
 from . import supervisor_stats
 from . import version_check
 from .backup_scheduler import next_scheduled_run
+from .formatting import (
+    DEFAULT_COMPACT_AUTO_ENABLED,
+    DEFAULT_COMPACT_MIN_AGE_MONTHS,
+    DEFAULT_PURGE_AUTO_ENABLED,
+    DEFAULT_PURGE_MIN_AGE_DAYS,
+)
 from .energiedashboard_routes import (
     process_pending_hourly_backfill,
     refresh_heatmap_weekday_cache_if_stale,
@@ -57,10 +63,11 @@ from .energiedashboard_routes import (
 )
 from .limits import MAX_UI_ANALYSIS_ROWS
 from .progress import JobBusy, JobProgress
-from .storage import backup, cleanup, reconcile
+from .storage import backup, cleanup, hotbuffer, reconcile
+from .storage import resolution as resolution_mod
 from .storage import retention as retention_mod
 from .storage.coordinator import StorageCoordinator
-from .storage.index import Index
+from .storage.index import Index, resolution_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +142,13 @@ class BackgroundService:
         self.tz = deps.tz
         self.index = deps.index
         self.coordinator = deps.coordinator
+        # Sicherheitsnetz für die Standard-Live-Auflösung (resolution.py) —
+        # rein in-memory, kein Settings-Wert: geht beim Neustart auf 0
+        # zurück, was höchstens einen zusätzlichen Lauf beim nächsten Tick
+        # bedeutet, keinen verlorenen.
+        self._resolution_flush_last_run = 0.0
+        self._compact_last_run = 0.0
+        self._purge_last_run = 0.0
         self.base_dir = deps.base_dir
         self.demo_mode_active = deps.demo_mode_active
         self.backups_dir = deps.backups_dir
@@ -796,6 +810,134 @@ class BackgroundService:
             self.data_dir, self.index, self.tz, entity, datetime.now(self.tz), force=True
         )
 
+    def _flush_stale_resolution_windows(self, now: datetime) -> None:
+        """Sicherheitsnetz für die Standard-Live-Auflösung (resolution.py):
+        schließt Zeitfenster ab, die nie durch das nächste Live-Event
+        abgeschlossen wurden, weil die Entity währenddessen verstummt ist
+        (WLAN-Ausfall, abgeschaltet). Alle 5 Minuten statt bei jedem
+        30s-Tick, weil dafür jede betroffene Hotbuffer-Datei gelesen werden
+        muss — Datenverlust entsteht dadurch nicht, die Rohwerte liegen ja
+        längst sicher im Hotbuffer, nur das Zusammenfassen verzögert sich."""
+        now_ts = now.timestamp()
+        if now_ts - self._resolution_flush_last_run < 300:
+            return
+        self._resolution_flush_last_run = now_ts
+        for entity in self.index.list_entities():
+            if entity["aggregation_type"] != "standard":
+                continue
+            interval = resolution_seconds(entity["resolution"])
+            if interval is None:
+                continue
+            entity_id = entity["entity_id"]
+            with self.coordinator.entity(entity_id):
+                path = hotbuffer.hot_path(self.data_dir, entity_id, now_ts, self.tz)
+                pending_end = resolution_mod.pending_bucket_end(path, interval)
+                if pending_end is not None and now_ts >= pending_end:
+                    resolution_mod.collapse_pending_window(path, interval)
+
+    def _run_automatic_compaction_if_due(self, now: datetime) -> None:
+        """Automatische Verdichtung (Housekeeping → Verdichten) — standardmäßig
+        AUS (siehe DEFAULT_COMPACT_AUTO_ENABLED), muss bewusst aktiviert
+        werden, bevor sie in bereits archivierte Daten eingreift. Läuft
+        höchstens einmal täglich statt bei jedem 30s-Tick: anders als die
+        Live-Auflösung (die aktiv offene Fenster abschließen muss) ist die
+        rückwirkende Verdichtung nicht zeitkritisch — ein archivierter Monat
+        wartet notfalls einen Tag länger.
+
+        Verdichtet je Entität alles bis zum Mindestalter-Stichtag in einem
+        Rutsch (compact_raw_values() selbst überspringt bereits verdichtete/
+        noch nicht archivierte Monate) — kein eigener Fortschritts-Zustand
+        nötig, weil die Funktion selbst idempotent und pro Aufruf begrenzt
+        auf tatsächlich fällige Monate ist."""
+        now_ts = now.timestamp()
+        if now_ts - self._compact_last_run < 86400:
+            return
+        self._compact_last_run = now_ts
+        if self.index.get_setting("compact_auto_enabled", DEFAULT_COMPACT_AUTO_ENABLED) != "on":
+            return
+        min_age_months = int(
+            self.index.get_setting("compact_min_age_months", DEFAULT_COMPACT_MIN_AGE_MONTHS)
+        )
+        # Letzter noch ZULÄSSIGER Monat (Mindestalter erreicht), nicht der
+        # erste unzulässige — als end_ts an compact_raw_values() übergeben,
+        # dessen Monats-Iteration (_months_between) den Endmonat einschließt.
+        total_months = now.year * 12 + (now.month - 1) - min_age_months
+        cutoff_year, cutoff_month = divmod(total_months, 12)
+        cutoff_month += 1
+        cutoff_ts = datetime(cutoff_year, cutoff_month, 1, tzinfo=self.tz).timestamp()
+        for entity in self.index.list_entities():
+            if entity["aggregation_type"] == "switch" or entity["compact_target"] == "off":
+                continue
+            entity_id = entity["entity_id"]
+            started_at = time.time()
+            with self.coordinator.entity(entity_id):
+                try:
+                    result = cleanup.compact_raw_values(
+                        self.data_dir, self.index, entity_id, 0.0, cutoff_ts,
+                        entity["compact_target"], self.tz, now=now,
+                    )
+                except cleanup.CompactionError:
+                    # z. B. Ziel nicht mehr gültig zwischen zwei Läufen —
+                    # kein Grund, die übrigen Entitäten zu überspringen.
+                    continue
+            if result["months_compacted"]:
+                self.index.log_entity_action(
+                    entity_id, "compact", "automatic", started_at, time.time(), "success",
+                    rows_affected=result["rows_before"] - result["rows_after"],
+                    detail=json.dumps({
+                        "target_resolution": entity["compact_target"],
+                        "months_compacted": result["months_compacted"],
+                        "rows_before": result["rows_before"],
+                        "rows_after": result["rows_after"],
+                        "stale_markers_removed": result["stale_markers_removed"],
+                    }),
+                )
+
+    def _run_automatic_purge_if_due(self, now: datetime) -> None:
+        """Automatische Bereinigung (Housekeeping → Speicherplatz) — standardmäßig
+        AUS (siehe DEFAULT_PURGE_AUTO_ENABLED), läuft höchstens einmal täglich wie
+        die automatische Verdichtung: physisches Entfernen ist nicht zeitkritisch.
+
+        Das Mindestalter bezieht sich auf deleted_points.deleted_at (wann eine
+        Zeile zur Löschung markiert wurde), NICHT auf ihren eigenen Zeitstempel —
+        sonst liefe "Rückgängig" (undo_last_deleted_batch(), macht nur die
+        zuletzt markierte Charge rückgängig) regelmäßig ins Leere, weil die
+        Automatik genau diese Charge schon wieder physisch entfernt hätte, bevor
+        jemand sie zurückholen konnte.
+
+        Anders als die Verdichten-Automatik (Sperre je Entität) braucht das hier
+        dieselbe globale Sperre wie der manuelle Button (purge_archived_months()
+        schreibt echte Archivdateien um) — läuft deshalb synchron im
+        Wartungsplaner-Tick statt in einem eigenen Thread wie die geplante
+        Aufbewahrung, die zusätzlich eine Live-Fortschrittsanzeige für einen
+        manuell ausgelösten Lauf bedienen muss. Hier schaut niemand zu; das
+        Ergebnis erscheint danach nur in Housekeeping → Aktivität."""
+        now_ts = now.timestamp()
+        if now_ts - self._purge_last_run < 86400:
+            return
+        self._purge_last_run = now_ts
+        if self.index.get_setting("purge_auto_enabled", DEFAULT_PURGE_AUTO_ENABLED) != "on":
+            return
+        min_age_days = int(self.index.get_setting("purge_min_age_days", DEFAULT_PURGE_MIN_AGE_DAYS))
+        cutoff_ts = now_ts - min_age_days * 86400
+        started_at = time.time()
+        with self.coordinator.exclusive():
+            hot_purged = cleanup.purge_hot_buffer(self.data_dir, self.index, self.tz, now=now, older_than=cutoff_ts)
+            archive_result = cleanup.purge_archived_months(
+                self.data_dir, self.index, self.tz, now=now, older_than=cutoff_ts
+            )
+        total_rows = hot_purged + archive_result["rows_purged"]
+        if total_rows:
+            self.index.log_entity_action(
+                None, "purge", "automatic", started_at, time.time(), "success",
+                rows_affected=total_rows,
+                detail=json.dumps({
+                    "min_age_days": min_age_days,
+                    "months_purged": archive_result["months_purged"],
+                }),
+            )
+            self.refresh_purge_preview_if_stale(force=True)
+
     def _maintenance_scheduler_loop(self) -> None:
         """Prüft interne Zeitpläne und schreibt Statistikpunkte ohne UI-Aufruf."""
         while not self._maintenance_scheduler_stop.is_set():
@@ -821,6 +963,9 @@ class BackgroundService:
                 self._run_retention_enforcement_if_due(datetime.now(self.tz))
                 self._refresh_demo_dir_info_if_stale()
                 self._run_demo_append_if_due(datetime.now(self.tz))
+                self._flush_stale_resolution_windows(datetime.now(self.tz))
+                self._run_automatic_compaction_if_due(datetime.now(self.tz))
+                self._run_automatic_purge_if_due(datetime.now(self.tz))
             except Exception:
                 logger.exception(
                     "Wartungsplaner konnte den nächsten Lauf nicht prüfen · "
@@ -835,6 +980,45 @@ class BackgroundService:
         # bräuchte jede bestehende Installation ein manuelles erneutes Speichern
         # des Setup-Formulars, damit der rückwirkende Backfill überhaupt anläuft.
         sync_hourly_rollup_flags_for_current_config(self.energiedashboard_service)
+        # Einmalig beim Start: compact_raw_values() räumte deleted_points bisher
+        # nicht auf (Fund vom 18.09.2026) — für jeden VOR diesem Fix bereits
+        # verdichteten Monat holt das die seither verwaisten Markierungen nach.
+        # Idempotent (siehe dort), kostet ab dem zweiten Lauf nur einen
+        # Tabellen-Scan über compacted_months.
+        try:
+            removed = cleanup.remove_deleted_points_for_already_compacted_months(self.index, self.tz)
+            if removed:
+                logger.info(
+                    "Verwaiste Löschmarkierungen bereits verdichteter Monate aufgeräumt · "
+                    "event=stale_deleted_points_backfill_completed removed=%d",
+                    removed,
+                )
+        except Exception:
+            logger.exception(
+                "Verwaiste Löschmarkierungen konnten nicht aufgeräumt werden · "
+                "event=stale_deleted_points_backfill_failed"
+            )
+        # Einmalig beim Start: retention.enforce_retention_for_entity() räumte
+        # deleted_points ebenfalls nicht auf, wenn die Aufbewahrung einen
+        # kompletten Archiv-Monat löschte (derselbe Fund, 18.09.2026) — anders
+        # als beim Verdichten gibt es dafür keine Tabelle mit den betroffenen
+        # Monaten, deshalb prüft dieser Lauf direkt gegen die Realität statt
+        # gegen eine Monatsliste (siehe cleanup.remove_deleted_points_with_no_
+        # matching_row()). Idempotent, deckt nebenbei jede andere, noch
+        # unbekannte Ursache für verwaiste Markierungen mit ab.
+        try:
+            removed = cleanup.remove_deleted_points_with_no_matching_row(self.data_dir, self.index, self.tz)
+            if removed:
+                logger.info(
+                    "Löschmarkierungen ohne passende Rohdatenzeile aufgeräumt · "
+                    "event=orphaned_deleted_points_backfill_completed removed=%d",
+                    removed,
+                )
+        except Exception:
+            logger.exception(
+                "Löschmarkierungen ohne passende Rohdatenzeile konnten nicht aufgeräumt werden · "
+                "event=orphaned_deleted_points_backfill_failed"
+            )
         # Einmal vorab, damit die erste Seite nach dem Start nicht 30s lang
         # fälschlich "0 ausstehende Rotationen" meldet — zu diesem Zeitpunkt hält
         # noch niemand Entitäts-Sperren, der Aufruf ist hier ungefährlich.

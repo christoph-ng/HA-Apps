@@ -1,5 +1,87 @@
 # Changelog
 
+## 0.98.0 - 2026-09-18
+
+### Neu
+
+- **Verdichten**: archivierte Monate lassen sich jetzt nachträglich auf eine
+  gröbere Auflösung reduzieren — manuell mit Vorschau im Bearbeitungsbereich
+  einer Entität, oder automatisch über ein neues Mindestalter in
+  Housekeeping → Verdichten (standardmäßig aus). Bewusst getrennt von der
+  laufenden „Auflösung", damit sich Rohdaten live flexibel halten und
+  trotzdem irgendwann Archivvolumen reduzieren lässt. Zugehörige
+  Löschmarkierungen bleiben dabei automatisch konsistent, statt als
+  „Löschmarkierung ohne passende Rohdatenzeile" liegen zu bleiben.
+- **Auflösung** bei „Standard"-Entitäten (Temperatur, Feuchte, Leistung …)
+  arbeitet jetzt grundlegend anders: bisher lief hier dieselbe Drossel wie
+  bei Zählern und Schaltern (siehe „Behoben" unten) — ein beliebiger
+  Rohwert je Zeitfenster blieb erhalten, der Rest wurde ersatzlos
+  verworfen. Jetzt werden **alle** Rohwerte eines Fensters zu einer Zeile
+  zusammengefasst, mit Durchschnitt **plus Min/Max** — eine kurze
+  Temperaturspitze zwischen zwei Speicherpunkten geht dadurch nicht mehr
+  komplett verloren, sondern bleibt als Min/Max-Wert der betroffenen Zeile
+  sichtbar, auch wenn der Durchschnitt sie glättet.
+- Neuer Housekeeping-Tab **Aktivität**: listet Korrekturen, hinzugefügte
+  Werte, Bereinigungen und Verdichtungen, filterbar nach Entität,
+  Aktionstyp, Status und Zeitraum; ein Klick auf Verdichten-/Bereinigen-
+  Zeilen zeigt Details (Zielauflösung, betroffener Zeitraum, Zeilen vorher/
+  nachher).
+- **Automatische Bereinigung** (Housekeeping → Speicherplatz): entfernt
+  markierte (gelöschte) Datensätze automatisch nach einem einstellbaren
+  Mindestalter (1 Woche bis 3 Monate), standardmäßig aus — lässt dabei ein
+  Sicherheitsfenster, damit „Rückgängig" frisch markierte Datensätze noch
+  zurückholen kann.
+- **Markierte Datensätze** (Housekeeping → Speicherplatz) zeigt jetzt erst
+  die betroffenen Entitäten, dann per Klick deren einzelne Markierungen
+  inklusive Wert — bisher eine unübersichtliche, endlos lange Liste aller
+  Einzelmarkierungen.
+
+### Geändert
+
+- Ausreißer-Hinweistext im Konfigurationsformular gekürzt (ausführliche
+  Erklärung steht im Handbuch).
+
+### Behoben
+
+- Charts-Seite: Balken-Diagramme begannen bei aktiver „Dynamische Y-Achse"
+  nicht immer bei 0 — anders als auf Dashboard-Kacheln und der
+  Entitätsseite.
+- Charts-Seite: ein aktiver Periodenvergleich wurde beim Umschalten auf
+  Rohwerte/Gestapelt/Zeitstrahl/Donut/„Auflösung: Voll" stillschweigend
+  abgeschaltet, statt Vorrang zu behalten.
+- Versorgungsanteile: ein Speicher mit eigenem Ertrag (z. B. eine
+  Solarbank) zählte mit seinem vollen Ertrag statt seiner Netto-Nutzung
+  (Entladen minus Laden) — ein Teil davon erschien dadurch doppelt als
+  „Versorgung", obwohl er noch im Speicher steckte.
+- Auflösung: das Zeitfenster, das bei Zählern und Schaltern zu dichte Werte
+  filtert, maß den Mindestabstand bisher relativ zum zuletzt gespeicherten
+  Wert statt zu einem festen Uhrzeit-Punkt — nach jedem Neustart oder
+  Verbindungsaussetzer begann das Fenster dadurch neu und verschob sich auf
+  einen zufälligen Phasenwert (z. B. „:02, :07, :12" statt „:00, :05,
+  :10"). Zwei Entitäten mit derselben Auflösung landeten dadurch praktisch
+  nie auf denselben Zeitstempeln, und nach jeder weiteren Unterbrechung
+  driftete die Phase weiter, ohne sich je wieder einzupendeln. Arbeitet
+  jetzt für beide Typen auf einem festen, an der Uhrzeit ausgerichteten
+  Raster statt relativ zum letzten Wert.
+- Auflösung: bei Schalter-Entitäten kam durch dasselbe Zeitfenster ein
+  zweites, schwerwiegenderes Problem hinzu — es konnte einen echten
+  Zustandswechsel (AN→AUS oder umgekehrt) verwerfen, wenn er innerhalb
+  desselben Fensters wie der vorherige Wert eintraf. Anders als bei einem
+  Messwert ist bei einem Schalter genau dieser Wechsel der eigentlich
+  interessante Datenpunkt — ein Fenster reicht hier also nicht als Fix,
+  die Auflösung ist bei Schalter-Entitäten deshalb jetzt fest auf
+  „Rohdaten" gesperrt (Auswahlfeld im Formular deaktiviert). Duplikate
+  (unveränderter Zustand) filtert weiterhin unabhängig davon der
+  Wertänderungsfilter.
+- Aufbewahrung: löschte beim endgültigen Entfernen eines abgelaufenen
+  Archiv-Monats dessen Löschmarkierungen nicht mit — eine bereits als
+  gelöscht markierte Zeile, deren Monat komplett wegfiel, blieb dadurch
+  dauerhaft als „Löschmarkierung ohne passende Rohdatenzeile" liegen
+  (derselbe Fund wie beim Verdichten oben, hier aber schon länger
+  bestehend, weil die betroffene Rohdatenzeile durch die Aufbewahrung
+  ebenso unwiederbringlich verschwindet). Ein einmaliger Nachzieh-Lauf beim
+  nächsten Start räumt auch den bereits vorhandenen Bestand auf.
+
 ## 0.97.0 - 2026-09-16
 
 ### Neu

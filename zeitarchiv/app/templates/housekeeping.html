@@ -212,6 +212,12 @@
             {% include "_settings_purge_form.html" %}
           </div>
         </div>
+        <div class="settings-subsection">
+          <h3 class="settings-subsection-title">Automatische Bereinigung</h3>
+          <div id="purge-auto-form">
+            {% include "_settings_purge_auto_form.html" %}
+          </div>
+        </div>
         <dialog id="marked-points-dialog" class="detail-dialog" aria-labelledby="marked-points-title">
           <div class="detail-dialog-header">
             <div>
@@ -234,6 +240,22 @@
         <h2 class="settings-section-title">Aufbewahrung</h2>
         <div id="retention-form">
           {% include "_settings_retention_form.html" %}
+        </div>
+      </section>
+
+      <section id="verdichten" class="settings-section">
+        <h2 class="settings-section-title">Verdichten {{ hint_button('Verdichten') }}</h2>
+        {% call hint_body('settings-section-description') %}Verdichtet bereits archivierte Monate automatisch auf das je Entität eingestellte Verdichtungsziel (Konfiguration), sobald sie das Mindestalter erreicht haben. Betrifft nur Entitäten, deren Verdichtungsziel nicht „Aus“ ist.{% endcall %}
+        <div id="compact-form">
+          {% include "_housekeeping_compact_form.html" %}
+        </div>
+      </section>
+
+      <section id="aktivitaet" class="settings-section">
+        <h2 class="settings-section-title">Aktivität {{ hint_button('Aktivität') }}</h2>
+        {% call hint_body('settings-section-description') %}Korrektur, Hinzufügen, Bereinigen, Verdichten und Aufbewahrung, jeweils Datensatz-verändernd. Backup bleibt außen vor, es betrifft die ganze Installation statt einzelner Datensätze.{% endcall %}
+        <div id="activity-body">
+          {% include "_housekeeping_activity_form.html" %}
         </div>
       </section>
 

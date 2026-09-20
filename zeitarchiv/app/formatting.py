@@ -173,6 +173,37 @@ RESOLUTION_LABELS = {
     "15min": "15 Min.",
     "1h": "1 Std.",
 }
+COMPACT_TARGET_LABELS = {
+    "off": "Aus",
+    "30s": "30 Sek.",
+    "1min": "1 Min.",
+    "5min": "5 Min.",
+    "15min": "15 Min.",
+    "1h": "1 Std.",
+}
+# Housekeeping → Verdichten: globaler Schalter für die automatische
+# (Wartungsplaner-)Verdichtung, standardmäßig AUS — anders als die manuelle
+# Aktion (immer verfügbar) greift die Automatik erst nach bewusster Aktivierung
+# in fremde, bereits archivierte Daten ein.
+COMPACT_AUTO_LABELS = {"off": "Aus", "on": "An"}
+DEFAULT_COMPACT_AUTO_ENABLED = "off"
+# Wie lange ein archivierter Monat unangetastet bleibt, bevor die Automatik
+# ihn verdichtet — siehe compact_raw_values()/background.py.
+COMPACT_MIN_AGE_MONTHS_LABELS = {"3": "3 Monate", "6": "6 Monate", "12": "12 Monate"}
+DEFAULT_COMPACT_MIN_AGE_MONTHS = "3"
+# Housekeeping → Speicherplatz: globaler Schalter für die automatische
+# (Wartungsplaner-)Bereinigung, standardmäßig AUS — dasselbe Muster wie bei
+# der Verdichten-Automatik oben.
+PURGE_AUTO_LABELS = {"off": "Aus", "on": "An"}
+DEFAULT_PURGE_AUTO_ENABLED = "off"
+# Wie lange eine Löschmarkierung (deleted_points.deleted_at) unangetastet
+# bleibt, bevor die Automatik sie physisch entfernt — in Tagen statt Monaten
+# wie beim Verdichten-Pendant, weil "Rückgängig" (undo_last_deleted_batch())
+# nur die zuletzt markierte Charge zurückholen kann und dafür ein kurzes statt
+# ein monatelanges Zeitfenster braucht. Siehe purge_hot_buffer()/
+# purge_archived_months() (cleanup.py) und background.py.
+PURGE_MIN_AGE_DAYS_LABELS = {"7": "1 Woche", "14": "2 Wochen", "30": "1 Monat", "90": "3 Monate"}
+DEFAULT_PURGE_MIN_AGE_DAYS = "30"
 RETENTION_LABELS = {
     "unlimited": "Unbegrenzt",
     "30d": "30 Tage",
@@ -229,6 +260,25 @@ OUTLIER_BLOCKED_REASONS = {
         "die Erkennung würde nie etwas markieren."
     ),
 }
+# Warum die Auflösung für diesen Typ fest auf "Rohdaten" steht — die Bedingung
+# selbst steht in main.py (update_entity_config). Anders als bei
+# OUTLIER_BLOCKED_REASONS kein reines "würde nichts bringen": ein Zeitfenster
+# könnte hier einen echten Zustandswechsel verwerfen, deshalb ist das Feld
+# nicht nur wirkungslos, sondern potenziell irreführend.
+RESOLUTION_BLOCKED_REASONS = {
+    "switch": (
+        "Für Schalter fest auf „Rohdaten“: Ein Zeitfenster könnte sonst einen "
+        "echten Zustandswechsel (AN/AUS) verwerfen."
+    ),
+}
+# Aus demselben Grund wie RESOLUTION_BLOCKED_REASONS: eine rückwirkende
+# Verdichtung könnte einen echten Zustandswechsel wegkomprimieren.
+COMPACT_TARGET_BLOCKED_REASONS = {
+    "switch": (
+        "Für Schalter nicht verfügbar: Eine rückwirkende Verdichtung könnte "
+        "einen echten Zustandswechsel (AN/AUS) wegkomprimieren."
+    ),
+}
 BACKUP_SCHEDULE_LABELS = {
     "off": "Aus",
     "daily": "Täglich",
@@ -273,3 +323,7 @@ def format_resolution(value: str) -> str:
 
 def format_retention(value: str) -> str:
     return RETENTION_LABELS.get(value, value)
+
+
+def format_compact_target(value: str) -> str:
+    return COMPACT_TARGET_LABELS.get(value, value)
