@@ -281,6 +281,8 @@
         style: {...DEFAULT_STYLE, ...INITIAL_STYLE},
         values: {},  // col.uid -> row.uid -> {value, unit, error} | null
         windowStarts: {},  // col.uid -> tatsächlich aufgelöster Fensterbeginn (Sekunden) | null
+        windowEnds: {},  // col.uid -> tatsächlich aufgelöstes (ggf. gedecktes) Fensterende (Sekunden) | null
+        isCurrent: {},  // col.uid -> offset===0 (siehe currentPeriodNote() in table-compute.js)
         elapsedSeconds: {},  // col.uid -> same_elapsed-Kappung ab windowStarts[uid] (Sekunden) | null
         loading: false,
         saving: false,
@@ -416,7 +418,7 @@
           const cols = this.columns.filter(c => !c.hidden);
           const csvEscape = s => `"${String(s).replace(/"/g, '""')}"`;
           const lines = [];
-          lines.push(['', ...cols.map(c => csvEscape(this.renderedColumnLabel(c)))].join(';'));
+          lines.push(['', ...cols.map(c => csvEscape(this.columnExportLabel(c)))].join(';'));
           this.rows.forEach(row => {
             if (row.row_type === 'separator' || !this.rowVisible(row)) return;
             const cells = cols.map(col => {
@@ -577,6 +579,19 @@
           if (!raw) return suggestColumnLabel(col);
           return TableCompute.resolveLabel(raw, this.windowStarts[col.uid]);
         },
+        // Tooltip für die Kopfzelle einer noch laufenden (unvollständigen)
+        // Woche/Monat/Jahr-Spalte — z. B. "im laufenden Jahr · bis 21.09."
+        // statt stillschweigend "Jahr" zu zeigen, obwohl erst ein Teil des
+        // Jahres vorliegt (Konzept "laufendes Jahr"). null (kein Tooltip)
+        // bei einer abgeschlossenen Vor-Spalte oder bei Stunde/Tag.
+        columnPeriodTooltip(col) {
+          return TableCompute.currentPeriodNote(col, this.isCurrent[col.uid], this.windowEnds[col.uid]);
+        },
+        // Dieselbe Kennzeichnung wie columnPeriodTooltip(), aber als
+        // Klartext-Zusatz für den CSV-Export (kein Hover verfügbar).
+        columnExportLabel(col) {
+          return this.renderedColumnLabel(col) + TableCompute.currentPeriodShortSuffix(col, this.isCurrent[col.uid], this.windowEnds[col.uid]);
+        },
         suggestFormulaUnit(row) {
           for (const col of this.columns) {
             const cell = this.values[col.uid] && this.values[col.uid][row.uid];
@@ -725,7 +740,7 @@
           const comparisonValueStr = TableCompute.comparisonValueText(comparisonCell, comparisonCol.decimals);
           if (!comparisonValueStr) return `Gegenüber ${comparisonLabel}`;
           const comparisonTimeStr = TableCompute.comparisonElapsedTimeText(
-            this.windowStarts[comparisonCol.uid], this.elapsedSeconds[comparisonCol.uid]);
+            this.windowStarts[comparisonCol.uid], this.elapsedSeconds[comparisonCol.uid], comparisonCol.range_key);
           return `Gegenüber ${comparisonLabel}${comparisonTimeStr ? ` bis ${comparisonTimeStr}` : ''}: ${comparisonValueStr}`;
         },
 
@@ -736,7 +751,10 @@
         // hier nur die Umwandlung dorthin und die Ergebnisse zurück in
         // this.values[col.uid][row.uid].
         async load() {
-          if (!this.columns.length || !this.rows.length) { this.values = {}; this.windowStarts = {}; this.elapsedSeconds = {}; return; }
+          if (!this.columns.length || !this.rows.length) {
+            this.values = {}; this.windowStarts = {}; this.windowEnds = {}; this.isCurrent = {}; this.elapsedSeconds = {};
+            return;
+          }
           const requestId = ++this._loadSeq;
           this.loading = true;
           const plainColumns = this.columns.map(c => ({range_key: c.range_key, offset: c.offset, year_over_year: c.year_over_year}));
@@ -744,19 +762,26 @@
             row_type: r.row_type, entity_ids: r.entity_ids, formula: r.formula,
             formula_unit: r.formula_unit || '', aggregation: r.aggregation || 'auto',
           }));
-          const {values: computed, windowStarts, elapsedSeconds} = await TableCompute.computeValues(BASE, plainColumns, plainRows);
+          const {values: computed, windowStarts, windowEnds, isCurrent, elapsedSeconds} =
+            await TableCompute.computeValues(BASE, plainColumns, plainRows);
           if (requestId !== this._loadSeq) return;  // überholt von einer neueren Anfrage
           const newValues = {};
           const newWindowStarts = {};
+          const newWindowEnds = {};
+          const newIsCurrent = {};
           const newElapsedSeconds = {};
           this.columns.forEach((col, ci) => {
             newValues[col.uid] = {};
             this.rows.forEach((row, ri) => { newValues[col.uid][row.uid] = computed[ci][ri]; });
             newWindowStarts[col.uid] = windowStarts[ci];
+            newWindowEnds[col.uid] = windowEnds[ci];
+            newIsCurrent[col.uid] = isCurrent[ci];
             newElapsedSeconds[col.uid] = elapsedSeconds[ci];
           });
           this.values = newValues;
           this.windowStarts = newWindowStarts;
+          this.windowEnds = newWindowEnds;
+          this.isCurrent = newIsCurrent;
           this.elapsedSeconds = newElapsedSeconds;
           this.loading = false;
         },

@@ -3036,13 +3036,27 @@ class EnergieDashboardService:
                 round(eigenverbrauch_cur - eigenverbrauch_prev, 1)
                 if eigenverbrauch_cur is not None and eigenverbrauch_prev is not None else None
             )
-            window_start, _window_end, natural_end = query_mod._window(  # noqa: SLF001 — siehe Modul-Docstring
+            window_start, window_end, natural_end = query_mod._window(  # noqa: SLF001 — siehe Modul-Docstring
                 range, now.astimezone(self.deps.tz), offset,
             )
-            display_end = natural_end - timedelta(days=1)
+            # Für die noch laufende (aktuelle) Periode ist window_end auf
+            # "jetzt" gedeckelt (siehe _window()-Docstring), natural_end aber
+            # weiterhin die volle Kalendergrenze (31.12./Monatsletzter) — ohne
+            # diese Unterscheidung behauptete der Berichtstext Daten bis zum
+            # Jahres-/Monatsende, obwohl current (compute_flow() oben) nur bis
+            # heute reicht. Eine bereits abgeschlossene Periode (offset < 0)
+            # ist davon nicht betroffen: dort ist window_end ohnehin schon
+            # identisch mit natural_end (_cap() greift nur, wenn "jetzt" noch
+            # innerhalb der Periode liegt).
+            display_end = window_end if offset == 0 else natural_end - timedelta(days=1)
             if range == "year":
                 period_title = f"Jahr {window_start.year}"
-                period_range_text = f"1. Januar – 31. Dezember {window_start.year}"
+                if offset == 0:
+                    period_range_text = (
+                        f"1. Januar – {display_end.day}. {_MONTH_NAMES_DE[display_end.month - 1]} {display_end.year}"
+                    )
+                else:
+                    period_range_text = f"1. Januar – 31. Dezember {window_start.year}"
                 monatsverlauf = self._monatsverlauf_for_year(config, window_start.year, now, read_cache)
                 anomalien_report = self._anomalien_for_months(config, window_start.year, now, read_cache)
             else:

@@ -3698,6 +3698,13 @@ def _tile_metric_context(pin, aggregation_type: str | None = None) -> dict:
         m for m in (pin["stats_metrics"] or "").split(",")
         if m and m != primary and m in verfuegbar
     ]
+    # Eigener Ein-/Ausschalter (Konzept "laufendes Jahr" — Nutzer-Wunsch nach
+    # einer Kachel, deren "Jahr"-Etikett ohne Datumszusatz einfach ganz weg
+    # soll statt es zu erklären), unabhängig von der Herleitung unten.
+    # "in pin.keys()" statt direkter Indizierung: pin ist hier teils ein von
+    # Hand gebautes Test-/Vorschau-Dict ohne jede Spalte (siehe Docstring
+    # oben, "fehlertolerant") — fehlt die Spalte, gilt der DB-Default (an).
+    show_period = bool(pin["show_period"]) if "show_period" in pin.keys() else True
     return {
         "range_key": range_key,
         "continuous": bool(pin["continuous"]),
@@ -3708,12 +3715,13 @@ def _tile_metric_context(pin, aggregation_type: str | None = None) -> dict:
         # damit dasselbe Σ/+ nicht an vier Stellen einzeln entschieden wird.
         "metric_labels": labels,
         "stats_metrics": metrics,
+        "show_period": show_period,
         # Der Zeitraum steht genau einmal auf der Kachel: in der
         # Kennzahlen-Zeile, wenn es sie gibt, sonst im Wert-Bereich an der
         # Stelle des Alters. Bei einem Hauptwert, der kein Momentanwert ist,
         # sagt das Alter des letzten Rohpunkts ohnehin nichts über einen
         # Monatsdurchschnitt aus — dort tritt der Zeitraum an seine Stelle.
-        "show_period_in_value_row": not metrics and primary != "last",
+        "show_period_in_value_row": show_period and not metrics and primary != "last",
         # Fürs Kachelmenü: nicht anwendbare Kennzahlen werden durchgestrichen
         # gezeigt statt weggelassen (siehe _tile_available_metrics()).
         "available_metrics": verfuegbar,
@@ -4169,6 +4177,37 @@ def dashboard_entity_show_age(body: _ShowAgeDashboardTileBody) -> dict:
     if not index.set_dashboard_entity_pin_show_age(body.dashboard_id, body.entity_id, body.show_age):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return {"ok": True, "show_age": body.show_age}
+
+
+class _ShowPeriodDashboardTileBody(BaseModel):
+    dashboard_id: int = 1
+    entity_id: str
+    show_period: bool
+
+
+@app.post("/dashboard/entity-show-period")
+def dashboard_entity_show_period(body: _ShowPeriodDashboardTileBody) -> dict:
+    _require_dashboard_unlocked(body.dashboard_id)
+    if not index.set_dashboard_entity_pin_show_period(body.dashboard_id, body.entity_id, body.show_period):
+        raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
+    # Voller Kachel-Kontext statt nur {"show_period": ...} zurück: anders als
+    # show_age (rein additiv, eigenes <span>) wirkt show_period auf dieselbe
+    # Stelle wie Zeitraum/Hauptwert/Kennzahlen-Zeile (Kennzahlen-Zeile ODER
+    # Wert-Bereich, siehe _tile_metric_context()) — der Browser kann das
+    # deshalb mit derselben uebernehmen(ctx)-Logik anwenden wie
+    # /dashboard/entity-metrics, statt eine dritte Variante zu bauen.
+    pin = next(
+        (p for p in index.list_dashboard_pins(body.dashboard_id)
+         if p["item_type"] == "entity" and p["item_entity_id"] == body.entity_id),
+        None,
+    )
+    if pin is None:
+        raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
+    entity = index.get_entity(body.entity_id)
+    return {
+        "ok": True,
+        **_tile_metric_context(pin, entity["aggregation_type"] if entity else None),
+    }
 
 
 class _DecimalsDashboardTileBody(BaseModel):

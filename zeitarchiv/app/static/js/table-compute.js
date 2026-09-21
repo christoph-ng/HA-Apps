@@ -275,6 +275,17 @@ window.TableCompute = (() => {
     const allEntityIds = [...new Set(entityRows.flatMap(r => r.entity_ids))];
     const values = columns.map(() => new Array(rows.length).fill(null));
     const windowStarts = columns.map(() => null);
+    // Tatsächlich aufgelöstes (ggf. auf "jetzt" gedecktes) Fensterende, siehe
+    // window_end in query_series()/api_routes.py — Grundlage für
+    // currentPeriodNote() unten (Enddatum einer noch laufenden Spalte).
+    const windowEnds = columns.map(() => null);
+    // offset === 0 (siehe is_current in query_series()) — bei einer
+    // Vorjahresvergleichs-Spalte (year_over_year) bezieht sich das auf deren
+    // EIGENEN offset vor der Jahresverschiebung, nicht auf das verschobene
+    // Zieljahr: eine year_over_year-Spalte mit offset 0 ist also ebenfalls
+    // "aktuell" in diesem Sinn, weil ihr Fenster aus demselben, gerade erst
+    // gedeckelten Basis-Fenster gebaut ist (siehe currentPeriodNote()).
+    const isCurrent = columns.map(() => false);
     // Sekunden seit windowStarts[colIndex], auf die ein same_elapsed-Vergleich
     // gekappt wurde (siehe elapsed_seconds in query_series()/api_routes.py) —
     // Grundlage für comparisonElapsedTimeText() unten (Uhrzeit-Anzeige im
@@ -315,6 +326,8 @@ window.TableCompute = (() => {
     columns.forEach((col, ci) => {
       const data = columnData[ci] || {series: []};
       windowStarts[ci] = data.window_start ?? null;
+      windowEnds[ci] = data.window_end ?? null;
+      isCurrent[ci] = !!data.is_current;
       elapsedSeconds[ci] = data.elapsed_seconds ?? null;
       const byEntity = {};
       (data.series || []).forEach(s => { byEntity[s.entity_id] = s; });
@@ -394,17 +407,75 @@ window.TableCompute = (() => {
       });
     });
 
-    return {values, windowStarts, elapsedSeconds};
+    return {values, windowStarts, windowEnds, isCurrent, elapsedSeconds};
   }
 
   // Uhrzeit-Text für den fairen Vergleichswert einer same_elapsed-Spalte
   // (z. B. "bis 12:16 Uhr", siehe elapsed_seconds oben) — der tatsächliche
   // Bezugszeitpunkt ist windowStart + elapsedSeconds derselben Spalte. null,
   // wenn die Spalte keinen elapsed-Wert hat (kein same_elapsed-Vergleich).
-  function comparisonElapsedTimeText(windowStart, elapsedSeconds) {
+  // Bei Stunde/Tag identifiziert die Uhrzeit allein den Cutoff bereits
+  // eindeutig (derselbe Kalendertag wie die Basis-Spalte). Bei Woche/Monat/
+  // Jahr liegt der Cutoff dagegen auf einem ANDEREN Tag als der Perioden-
+  // anfang — "bis 18:43 Uhr" allein sagt dann nicht, welcher Tag im Vormonat/
+  // Vorjahr gemeint ist, deshalb zusätzlich das Datum davor.
+  function comparisonElapsedTimeText(windowStart, elapsedSeconds, rangeKey) {
     if (windowStart == null || elapsedSeconds == null) return null;
     const cutoff = new Date((windowStart + elapsedSeconds) * 1000);
-    return `${cutoff.toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit'})} Uhr`;
+    const timeText = `${cutoff.toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit'})} Uhr`;
+    if (rangeKey === 'hour' || rangeKey === 'day') return timeText;
+    const dateText = cutoff.toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'});
+    return `${dateText}, ${timeText}`;
+  }
+
+  // Kurzform "TT.MM." (bewusst ohne Jahr — die Spaltenbeschriftung nennt das
+  // Jahr bereits) für den Cutoff einer noch laufenden Spalte, siehe
+  // currentPeriodNote() unten.
+  function shortDateText(epochSeconds) {
+    if (epochSeconds == null) return null;
+    return new Date(epochSeconds * 1000).toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'});
+  }
+
+  // Ausgeschriebene Zeitraum-Phrase für eine noch laufende BASIS-Spalte
+  // (kein Vorjahresvergleich) — dieselbe Wortwahl wie TILE_RANGE_WINDOW in
+  // dashboard-tiles.js (eigene, unabhängige Kopie: andere Stelle, gleiche
+  // Formulierung fürs Wiedererkennen). Stunde/Tag fehlen absichtlich: deren
+  // eigenes Datum identifiziert den Zeitraum bereits eindeutig, "im
+  // laufenden Tag" wäre nur Rauschen.
+  const CURRENT_PERIOD_PHRASE = {
+    week: 'in der laufenden Kalenderwoche', month: 'im laufenden Monat', year: 'im laufenden Jahr',
+  };
+
+  // Erklärender Hinweis für eine Spalte, deren Wert (noch) nicht den ganzen
+  // Zeitraum abdeckt — weder an der Kopfzeile noch im CSV-Export sonst
+  // irgendwo erkennbar (siehe Konzept "laufendes Jahr"):
+  // * Basis-Spalte (offset 0, kein Vorjahresvergleich): zeigt die noch
+  //   laufende, nicht abgeschlossene Periode — Text nennt Zeitraumart UND
+  //   Enddatum ("im laufenden Jahr · bis 21.09.").
+  // * Vorjahresvergleichs-Spalte (year_over_year): ihr Fenster ist aus
+  //   genau demselben, bereits gedeckelten Basis-Fenster gebaut, nur um ein
+  //   Jahr verschoben (siehe query.py `_window()`/year_over_year) — fair
+  //   für den Vergleich, aber ebenso keine vollständige Periode. Die eigene
+  //   Beschriftung sagt bereits "Vorjahr" o. ä., hier nur das Enddatum.
+  // null, wenn nichts davon zutrifft: eine abgeschlossene Vor-Spalte
+  // (offset < 0 ohne year_over_year) zeigt immer den vollständigen
+  // Zeitraum (siehe _cap() in query.py) und braucht keinen Hinweis, ebenso
+  // Stunde/Tag (siehe CURRENT_PERIOD_PHRASE oben).
+  function currentPeriodNote(col, isCurrentCol, windowEnd) {
+    if (!isCurrentCol) return null;
+    const date = shortDateText(windowEnd);
+    if (!date) return null;
+    if (col.year_over_year) return `bis ${date}`;
+    const phrase = CURRENT_PERIOD_PHRASE[col.range_key];
+    return phrase ? `${phrase} · bis ${date}` : null;
+  }
+
+  // Dieselbe Bedingung wie currentPeriodNote() (über deren Rückgabe geprüft,
+  // statt sie zu duplizieren), als knapper Klartext-Zusatz für Stellen ohne
+  // Hover (CSV-Export) statt des ausgeschriebenen Tooltips.
+  function currentPeriodShortSuffix(col, isCurrentCol, windowEnd) {
+    if (!currentPeriodNote(col, isCurrentCol, windowEnd)) return '';
+    return ` (bis ${shortDateText(windowEnd)})`;
   }
 
   // Monatsnamen/-kürzel für resolveLabel() unten — dieselbe Wortwahl wie der
@@ -507,7 +578,7 @@ window.TableCompute = (() => {
   return {
     evalFormula, inheritedFormulaUnit, fmtNum, cellValueText, cellUnit, cellNumberParts, cellText,
     isComparisonColumn, comparisonIndexForBase, deviationText, comparisonValueText, comparisonElapsedTimeText, percentOfTotalCell, heatmapStyle,
-    rowLetters, computeValues, styleClasses,
+    rowLetters, computeValues, styleClasses, currentPeriodNote, currentPeriodShortSuffix,
     resolveLabel, LABEL_VARIABLES,
   };
 })();

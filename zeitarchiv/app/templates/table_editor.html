@@ -388,7 +388,7 @@
                   <span class="tbl-col-resize-handle" x-show="editing" @mousedown.stop.prevent="startLabelColResize($event)" @dblclick.stop.prevent="style.label_col_width = null" data-tooltip="Ziehen zum Verändern der Breite, Doppelklick für automatische Breite"></span>
                 </th>
                 <template x-for="col in columns" :key="col.uid">
-                  <th x-show="!col.hidden" :class="{'tbl-comparison-col': isComparisonColumn(col)}" :style="colWidthStyle(col)">
+                  <th x-show="!col.hidden" :class="{'tbl-comparison-col': isComparisonColumn(col)}" :style="colWidthStyle(col)" :data-tooltip-fixed="columnPeriodTooltip(col)">
                     <span x-text="renderedColumnLabel(col)"></span>
                     <span class="tbl-col-resize-handle" x-show="editing" @mousedown.stop.prevent="startColResize($event, col)" @dblclick.stop.prevent="col.width = null" data-tooltip="Ziehen zum Verändern der Breite, Doppelklick für automatische Breite"></span>
                   </th>

@@ -1664,6 +1664,7 @@
       const sparklineCheckbox = control.querySelector('.dtile-sparkline-checkbox');
       const sparklineResolutionCells = Array.from(control.querySelectorAll('.dtile-sparkline-resolution-cell'));
       const showAgeCheckbox = control.querySelector('.dtile-show-age-checkbox');
+      const showPeriodCheckbox = control.querySelector('.dtile-show-period-checkbox');
       const legendCheckbox = control.querySelector('.dtile-legend-checkbox');
       const dtileBody = tile.querySelector('.dtile-body');
 
@@ -1952,17 +1953,24 @@
               stat.querySelector('.k').textContent = kuerzel[metric] || metric;
               zeile.appendChild(stat);
             });
-            const periode = document.createElement('span');
-            periode.className = 'dtile-entity-period';
-            periode.textContent = ctx.range_label;
-            zeile.appendChild(periode);
+            if (ctx.show_period) {
+              const periode = document.createElement('span');
+              periode.className = 'dtile-entity-period';
+              periode.textContent = ctx.range_label;
+              zeile.appendChild(periode);
+            }
             body.querySelector('.dtile-entity-sparkline')
               ? body.insertBefore(zeile, body.querySelector('.dtile-entity-sparkline'))
               : body.appendChild(zeile);
           }
 
           // Der Zeitraum steht genau einmal — in der Wert-Zeile nur dann,
-          // wenn es keine Kennzahlen-Zeile gibt, die ihn trägt.
+          // wenn es keine Kennzahlen-Zeile gibt, die ihn trägt. Alter nur
+          // bei echtem Momentanwert (primary_metric 'last', siehe
+          // gleichlautender Kommentar in _dashboard_tiles.html) — sonst
+          // bliebe die Zeile bei abgeschaltetem show_period leer statt
+          // einen für einen Aggregations-Hauptwert irreführenden
+          // Alterswert zu zeigen.
           const wertZeile = body.querySelector('.dtile-entity-value');
           wertZeile?.querySelector('.dtile-entity-period')?.remove();
           const alter = wertZeile?.querySelector('.dtile-entity-age');
@@ -1973,7 +1981,7 @@
             periode.textContent = ctx.range_label;
             wertZeile?.appendChild(periode);
           } else if (alter) {
-            alter.hidden = body.dataset.showAge !== 'true';
+            alter.hidden = body.dataset.showAge !== 'true' || ctx.primary_metric !== 'last';
           }
 
           // Popup-Zustand nachziehen: der Hauptwert sperrt seinen Eintrag in
@@ -2010,6 +2018,33 @@
             trigger.title = 'Kennzahlen konnten nicht gespeichert werden';
           }
         };
+
+        // Eigener Endpunkt (nicht über senden()/entity-metrics, siehe
+        // Kommentar dort), aber dieselbe uebernehmen()-Anwendung: show_period
+        // wirkt auf dieselbe Stelle (Kennzahlen-Zeile ODER Wert-Bereich) wie
+        // Zeitraum/Hauptwert/Kennzahlen-Zeile.
+        if (showPeriodCheckbox) {
+          showPeriodCheckbox.addEventListener('change', async () => {
+            const showPeriod = showPeriodCheckbox.checked;
+            showPeriodCheckbox.disabled = true;
+            try {
+              const response = await fetch(`${base}/dashboard/entity-show-period`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                  dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, show_period: showPeriod,
+                }),
+              });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              uebernehmen(await response.json());
+            } catch (e) {
+              showPeriodCheckbox.checked = !showPeriod;
+              trigger.title = 'Zeitraum-Anzeige konnte nicht gespeichert werden';
+            } finally {
+              showPeriodCheckbox.disabled = false;
+            }
+          });
+        }
 
         rangeCells.forEach(c => c.addEventListener('click', () => senden({range_key: c.dataset.range})));
         continuousCells.forEach(c => c.addEventListener('click', () => senden({continuous: c.dataset.continuous === 'true'})));
