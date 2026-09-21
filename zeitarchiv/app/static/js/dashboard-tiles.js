@@ -1080,9 +1080,9 @@
       return;
     }
     const base = el.closest('#dashboard-grid')?.dataset.appRoot || '';
-    let values, windowStarts, elapsedSeconds;
+    let values, windowStarts, windowEnds, isCurrent, elapsedSeconds;
     try {
-      ({values, windowStarts, elapsedSeconds} = await TableCompute.computeValues(base, visibleCols, visibleRows));
+      ({values, windowStarts, windowEnds, isCurrent, elapsedSeconds} = await TableCompute.computeValues(base, visibleCols, visibleRows));
     } catch (e) {
       previewEl.innerHTML = '<div class="dtile-loading">Fehler beim Laden</div>';
       return;
@@ -1239,7 +1239,14 @@
     // Wert zeigen statt sich mit der Zeit automatisch zu aktualisieren.
     visibleCols.forEach((c, ci) => {
       const comparisonClass = TableCompute.isComparisonColumn(c) ? ' class="tbl-comparison-col"' : '';
-      html += `<th${comparisonClass}${colWidthAttr(c.width)}>${escapeHtml(TableCompute.resolveLabel(c.label, windowStarts[ci]))}</th>`;
+      // Hinweis auf eine noch laufende (unvollständige) Woche/Monat/Jahr-
+      // Spalte, dieselbe Kennzeichnung wie in table_editor.html —
+      // data-tooltip-fixed (nicht das gewöhnliche data-tooltip), weil
+      // .dtile-table-preview überläuft/scrollt und einen normalen
+      // CSS-::after-Tooltip abschneiden würde (siehe fixed-tooltip.js).
+      const periodNote = TableCompute.currentPeriodNote(c, isCurrent[ci], windowEnds[ci]);
+      const periodTooltipAttr = periodNote ? ` data-tooltip-fixed="${escapeHtml(periodNote)}"` : '';
+      html += `<th${comparisonClass}${colWidthAttr(c.width)}${periodTooltipAttr}>${escapeHtml(TableCompute.resolveLabel(c.label, windowStarts[ci]))}</th>`;
     });
     html += '</tr></thead><tbody>';
     let dataRowIndex = 0;
@@ -1282,7 +1289,9 @@
         const comparisonValueStr = comparisonIndex >= 0
           ? TableCompute.comparisonValueText(comparisonCell, visibleCols[comparisonIndex].decimals) : '';
         const comparisonTimeStr = comparisonIndex >= 0
-          ? TableCompute.comparisonElapsedTimeText(windowStarts[comparisonIndex], elapsedSeconds[comparisonIndex]) : null;
+          ? TableCompute.comparisonElapsedTimeText(
+              windowStarts[comparisonIndex], elapsedSeconds[comparisonIndex], visibleCols[comparisonIndex].range_key)
+          : null;
         const deviationTitle = comparisonIndex < 0 ? '' : comparisonValueStr
           ? `Gegenüber ${comparisonLabel}${comparisonTimeStr ? ` bis ${comparisonTimeStr}` : ''}: ${comparisonValueStr}`
           : `Gegenüber ${comparisonLabel}`;
@@ -1411,16 +1420,32 @@
   // beim Scrollen ihre eigene Gruppe.
   const pendingEntityTiles = new Set();
   let entityFlushScheduled = false;
+  let entityFlushPromise = null;
 
   function renderEntityTile(el) {
     pendingEntityTiles.add(el);
-    if (entityFlushScheduled) return;
+    if (entityFlushScheduled) return entityFlushPromise;
     entityFlushScheduled = true;
     // setTimeout(0) statt eines Microtasks: der IntersectionObserver liefert
     // zwar alle gleichzeitig sichtbaren Kacheln in EINEM Callback, der
     // Auto-Refresh ruft aber je Kachel einzeln in einer forEach-Schleife.
     // Beide Fälle landen so im selben Sammelfenster.
-    setTimeout(flushEntityTiles, 0);
+    // Das zurückgegebene Promise löst sich erst nach dem eigentlichen Fetch
+    // auf (flushEntityTiles() ist async) — mehrere Menü-Handler hängen ein
+    // `await renderEntityTile(...)` dran, um nach dem Speichern sofort den
+    // frischen Wert zu zeigen, statt bis zum nächsten Auto-Refresh zu warten.
+    entityFlushPromise = new Promise(resolve => {
+      setTimeout(() => resolve(flushEntityTiles()), 0);
+    });
+    return entityFlushPromise;
+  }
+
+  function tileNeedsAggregates(el) {
+    // Aggregate braucht es nicht nur für die Kennzahlen-Zeile, sondern auch,
+    // wenn der Hauptwert selbst eine Aggregation ist (Min/Ø/Max/Σ) — sonst
+    // bleibt applyEntityTile() ohne serie.aggregates und rührt den Hauptwert
+    // gar nicht an (Kachel bleibt leer, bis die Kennzahlen-Zeile aktiviert wird).
+    return !!el.dataset.statsMetrics || (el.dataset.primaryMetric && el.dataset.primaryMetric !== 'last');
   }
 
   function tileGroupKey(el) {
@@ -1428,7 +1453,7 @@
       el.dataset.range || 'day',
       el.dataset.continuous === 'true' ? '1' : '0',
       el.dataset.sparklineResolution || 'raw',
-      el.dataset.statsMetrics ? '1' : '0',
+      tileNeedsAggregates(el) ? '1' : '0',
     ].join('|');
   }
 
@@ -1453,7 +1478,7 @@
       range: erste.dataset.range || 'day',
       continuous: erste.dataset.continuous === 'true' ? 'true' : 'false',
       resolution: erste.dataset.sparklineResolution || 'raw',
-      stats: erste.dataset.statsMetrics ? 'true' : 'false',
+      stats: tileNeedsAggregates(erste) ? 'true' : 'false',
     });
     // MAX_MULTI_QUERY_ENTITIES (25, siehe limits.py) — ein großes Dashboard
     // überschreitet das sonst und bekäme statt Daten eine 413.
@@ -2278,6 +2303,43 @@
     setup();
     applySectionCollapseState(document);
   }
+  // Jeder #dashboard-grid-weite Swap (Sektion umbenennen/entfernen, Chart/
+  // Tabelle/Entität anpinnen …) baut ALLE Kachelmenüs aus ihrem x-data neu
+  // auf — ein gerade offenes Bearbeiten-Popup einer ANDEREN Kachel (der
+  // Nutzer tippt dort z.B. gerade an den Einstellungen, während irgendwo
+  // sonst auf der Seite eine dieser Aktionen feuert) verschwindet dabei
+  // kommentarlos, weil der Server dessen offenen Zustand nicht kennt (nur
+  // die eigene Kachel des jeweiligen Endpunkts kennt `auto_open_entity_id`,
+  // siehe _dashboard_tile_menu.html). Deshalb hier vor jedem solchen Swap
+  // merken, welche Kachel-Menüs offen waren (Kachel-Identität überlebt den
+  // Swap: data-item-type + data-item-id/-item-entity-id), und sie danach
+  // wieder öffnen.
+  function tileIdentity(dtileEl) {
+    if (!dtileEl) return null;
+    const type = dtileEl.dataset.itemType;
+    return type === 'entity'
+      ? {type, entityId: dtileEl.dataset.itemEntityId}
+      : {type, id: dtileEl.dataset.itemId};
+  }
+
+  function findTileByIdentity(identity) {
+    if (!identity) return null;
+    const grid = document.getElementById('dashboard-grid');
+    if (!grid) return null;
+    return identity.type === 'entity'
+      ? grid.querySelector(`.dtile[data-item-type="entity"][data-item-entity-id="${CSS.escape(identity.entityId || '')}"]`)
+      : grid.querySelector(`.dtile[data-item-type="${identity.type}"][data-item-id="${CSS.escape(identity.id || '')}"]`);
+  }
+
+  let openMenusBeforeSwap = [];
+
+  document.body.addEventListener('htmx:beforeRequest', (e) => {
+    if (e.detail?.target?.id !== 'dashboard-grid') return;
+    openMenusBeforeSwap = [...document.querySelectorAll('#dashboard-grid .dtile-menu.is-open')]
+      .map(menu => tileIdentity(menu.closest('.dtile')))
+      .filter(Boolean);
+  });
+
   // Nach Pin/Unpin ersetzt htmx #dashboard-grid komplett (outerHTML) — alte
   // ECharts-Instanzen zeigen dann auf längst entfernte DOM-Knoten, deshalb
   // hier verwerfen statt sie weiter zu behalten; neue Kacheln bekommen beim
@@ -2288,6 +2350,14 @@
       instances.clear();
       setup();
       applySectionCollapseState(document);
+      // Die entfernte Kachel (falls die ausgelöste Aktion selbst ein
+      // "Vom Dashboard entfernen" war) findet findTileByIdentity() nicht
+      // mehr — dann bleibt ihr Menü zu Recht zu, statt sich neu zu öffnen.
+      openMenusBeforeSwap.forEach(identity => {
+        const menu = findTileByIdentity(identity)?.querySelector('.dtile-menu');
+        if (menu && typeof Alpine !== 'undefined') Alpine.$data(menu).menuOpen = true;
+      });
+      openMenusBeforeSwap = [];
     }
   });
 })();
