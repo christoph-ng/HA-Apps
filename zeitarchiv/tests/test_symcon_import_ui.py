@@ -65,9 +65,9 @@ def test_mapping_can_be_cleared_and_reselected_in_both_importers() -> None:
     assert "function clearMapping(button)" in IMPORT
     assert "input.showPicker()" in IMPORT
     assert IMPORT.count('class="map-clear"') == 1
-    assert CSV_SECTION.count('class="map-clear"') == 1
     assert "onfocus=\"selectMappingValue(this)\"" in IMPORT
-    assert "onfocus=\"selectMappingValue(this)\"" in CSV_SECTION
+    assert 'class="dd-picker-clear"' in CSV_SECTION
+    assert "@click.stop=\"clearSelection()\"" in CSV_SECTION
 
 
 def test_period_uses_german_date_and_regular_table_font() -> None:

@@ -94,6 +94,14 @@
                 title="Nicht lesbare Zeilen ein-/ausblenden">{{ unreadable_count }} nicht lesbar</button>
         {% endif %}
         <span class="count-chip" id="marked-count">0 markiert</span>
+        {# Rechtsbündige Gruppe am Ende der Toolbar, wie beim HA-Import
+           (.toolbar-right in app.css, siehe auch entity_detail.html/
+           chart_editor.html) — beide Knöpfe in EINEM Behälter, nicht
+           margin-left:auto auf dem ersten. #}
+        <div class="toolbar-right">
+          <button type="button" class="btn" hx-post="import/dry-run" hx-include="#import-form" hx-target="#import-output" hx-swap="innerHTML" hx-disabled-elt="this">Vorschau (Dry Run)</button>
+          <button type="button" class="btn primary" hx-post="import/start" hx-include="#import-form" hx-target="#import-output" hx-swap="innerHTML" hx-disabled-elt="this">Import starten</button>
+        </div>
       </div>
 
       {% if rows %}
@@ -178,11 +186,6 @@
            per list="entity-datalist" referenziert, damit sie auch verfügbar ist,
            wenn dieser Reiter gar keine Zeilen zeigt (leerer/Scan-Zustand). -->
 
-      <div class="actionbar">
-        <button type="button" class="btn" hx-post="import/dry-run" hx-include="#import-form" hx-target="#import-output" hx-swap="innerHTML" hx-disabled-elt="this">Vorschau (Dry Run)</button>
-        <button type="button" class="btn primary" hx-post="import/start" hx-include="#import-form" hx-target="#import-output" hx-swap="innerHTML" hx-disabled-elt="this">Import starten</button>
-        <span>Nur ausgefüllte Zuordnungen werden berücksichtigt.</span>
-      </div>
       <div id="import-output" hx-get="import/progress" hx-trigger="load" hx-swap="innerHTML"></div>
       {% else %}
       <div class="empty">Keine Symcon-Variablen im hochgeladenen Archiv gefunden.</div>
@@ -232,6 +235,13 @@
   <script src="{{ asset('js/number-format.js') }}"></script>
   <script src="{{ asset('js/dd-picker.js') }}"></script>
   <script src="{{ asset('js/map-entity-picker.js') }}"></script>
+  {# entityPicker() (siehe entity-picker.js) — nur für das Ziel-Entität-Feld
+     im CSV-Import (_csv_import_section.html, "app-Standard"-Picker wie
+     table_editor.html/entity_migrate.html). Die Symcon-Zeilen (bis zu
+     mehrere hundert) und die gemeinsame #entity-datalist bleiben bei
+     map-entity-picker.js/dd-picker.js — ein eigenes Alpine-Popover je Zeile
+     wäre dort unnötig teuer. #}
+  <script src="{{ asset('js/entity-picker.js') }}"></script>
   <script src="{{ asset('js/table-cards.js') }}"></script>
   <script>
     // Aktuelle Seite der Report-Liste. Steht nur hier — das Formularfeld

@@ -141,7 +141,7 @@ class ReportService:
 
         matched.sort(key=sort_value, reverse=direction == "desc")
         reports, pagination = self._paginate(matched, page, page_size)
-        columns = [{
+        report_columns = [{
             "key": key, "label": label,
             "next_dir": "asc" if sort == key and direction == "desc" else "desc",
             "active": sort == key,
@@ -153,7 +153,17 @@ class ReportService:
             "counts": {key: sum(r.get("status") == key for r in all_reports) for key in STATUS_LABELS},
             "source": source, "status": status, "search": search,
             "date_from": date_from, "date_to": date_to, "sort": sort,
-            "direction": direction, "columns": columns, "pagination": pagination,
+            # "report_columns", nicht "columns": /import rendert Reports- und
+            # CSV-Tab in EINEM gemeinsamen Kontext-Dict (import_routes.py,
+            # {**_import_page_context(), **_csv_import_context(),
+            # **common_context} — common_context enthält reports_context()).
+            # "columns" kollidierte dort mit _csv_import_context()s
+            # gleichnamigem Feld (die echten CSV-Spaltennamen) — da
+            # common_context zuletzt gespreadet wird, gewannen still die
+            # Report-Sortier-Header, und die CSV-Spalten-Dropdowns
+            # (Zeitstempel-/Wert-Spalte) zeigten deren repr() statt der
+            # Spaltennamen.
+            "direction": direction, "report_columns": report_columns, "pagination": pagination,
             "status_options": STATUS_LABELS,
         }
 

@@ -53,11 +53,22 @@
           </div>
         </div>
 
-        <div class="entity-names-field" x-show="editing && selectedCount > 0">
+        <div class="entity-names-field" x-show="editing && orderableEntityIds.length > 0">
           <label>Angezeigte Namen &amp; Reihenfolge (optional)</label>
           <p class="sub" style="margin:4px 0 0;">Bestimmt Legenden-, Statistik- und Farbreihenfolge im Chart. Per Ziehen oder über die Pfeile neu anordnen.</p>
           <div class="entity-names-list" id="entity-names-list">
-            <template x-for="(id, idx) in selectedEntityIds" :key="id">
+            <!-- orderableEntityIds statt selectedEntityIds: die Soll-Entität
+                 (falls gewählt) hat keine eigene Legendenzeile/Reihenfolge —
+                 nur die eine gepunktete Ziel-Linie (renderYearsCompare()),
+                 da gibt es nichts zu sortieren/umzubenennen. Bleibt trotzdem
+                 ganz normal in selectedEntityIds (siehe orderableEntityIds-
+                 Kommentar in chart_editor.js). Der Farbpunkt nutzt deshalb
+                 colorIndexFor(id) statt des lokalen idx — der ist hier nur
+                 noch die Position in der GEFILTERTEN Liste und würde sonst,
+                 sobald Soll irgendwo dazwischensteht, nicht mehr zur
+                 tatsächlichen (auf selectedEntityIds basierenden) Chart-Farbe
+                 passen. -->
+            <template x-for="(id, idx) in orderableEntityIds" :key="id">
               <div class="entity-name-row" draggable="true" :data-entity-id="id"
                    :class="{'entity-name-row-hidden': hiddenEntityIds.includes(id)}">
                 <span class="drag-handle" title="Ziehen zum Verschieben" aria-hidden="true"></span>
@@ -66,7 +77,7 @@
                      chart_editor.js), der Punkt verbindet den Eintrag damit sichtbar mit
                      Legende und Kurve. -->
                 <span class="entity-name-dot" aria-hidden="true"
-                      :style="'--dot:var(--chart-' + (idx % 8 + 1) + ')'"></span>
+                      :style="'--dot:var(--chart-' + (colorIndexFor(id) % 8 + 1) + ')'"></span>
                 <span class="entity-name-default" x-text="labelFor(id)"></span>
                 <input type="text" :placeholder="labelFor(id)" x-model="entityNames[id]" @input="render()">
                 <span class="entity-name-right">
@@ -78,7 +89,7 @@
                   </button>
                   <span class="entity-name-move">
                     <button type="button" title="Nach oben" :disabled="idx === 0" @click="moveEntity(id, -1)">↑</button>
-                    <button type="button" title="Nach unten" :disabled="idx === selectedEntityIds.length - 1" @click="moveEntity(id, 1)">↓</button>
+                    <button type="button" title="Nach unten" :disabled="idx === orderableEntityIds.length - 1" @click="moveEntity(id, 1)">↓</button>
                   </span>
                 </span>
               </div>
@@ -425,7 +436,75 @@
           </div>
         </div>
 
-        <span class="period-label" x-text="periodLabel"></span>
+        <!-- Zeitraumanzeige links, Laufsumme/Soll Entität rechtsbündig in
+             DERSELBEN Zeile — dieselbe .chart-title-row-Geste wie oben bei
+             "Chart bearbeiten"/CSV+Anpassen (siehe app.css/chart_editor.css),
+             hier aber mit chart-title-row-end (chart_editor.css): die Felder
+             stapeln Beschriftung über Bedienelement (siehe .toolbar-field
+             unten) und sind dadurch höher als der einzeilige Zeitraumtext —
+             mit align-items:center (Basisregel) hing dieser dadurch mittig
+             zwischen Beschriftungs- und Bedienelement-Zeile der Felder statt
+             sauber auf einer der beiden Zeilen zu stehen (gemessen). end
+             richtet ihn stattdessen an der Bedienelement-Zeile aus, wie ein
+             Formular-Label seinen Wert.
+             Nicht im Vergleichen-Popover (siehe setCompareMode()): keine
+             eigene Vergleichsoption mehr (das frühere "Jahre" gab es hier
+             früher als dritte Popover-Zeile mit frei wählbaren Jahren, siehe
+             Git-Historie), sondern eine Erweiterung von "Vorjahr" bei
+             range='year': Vorjahr bleibt für ALLE Zeiträume die gewohnte
+             Schattenlinie, außer hier kommt zusätzlich Laufsumme und/oder
+             eine Soll-Entität dazu (siehe yearsCompareActive/render()/
+             renderYearsCompare() in chart_editor.js) — beide schalten
+             unabhängig voneinander auf die Balkenpaare um.
+             Label-über-Wert wie .menu-section-label (app.css), keine neuen
+             Farben. -->
+        <div class="chart-title-row chart-title-row-end">
+          <span class="period-label" x-text="periodLabel"></span>
+          <template x-if="compare && compareMode === 'previous' && range === 'year'">
+            <span style="display:flex;gap:16px;">
+              <!-- Reine Render-Einstellung, keine neue Abfrage (Laufsumme wird
+                   client-seitig aus den schon geladenen Monatswerten gebildet,
+                   siehe cumulate() in chart_editor.js) — deshalb render() statt
+                   load(). Wirkt jetzt auch ohne Soll-Entität (siehe
+                   yearsCompareActive). -->
+              <span class="toolbar-field">
+                <span class="toolbar-field-label">Laufsumme</span>
+                <div class="seg">
+                  <button type="button" :class="{active: !compareCumsum}" @click="compareCumsum = false; render()">Aus</button>
+                  <button type="button" :class="{active: compareCumsum}" @click="compareCumsum = true; render()">Ein</button>
+                </div>
+              </span>
+              <!-- Soll Entität ist keine Sonderfunktion, sondern schlicht eine
+                   normale Entität (siehe compareSollEntityId-Kommentar in
+                   chart_editor.js) — dieses Feld ist nur eine bequemere Art,
+                   sie auszuwählen, als sie in der langen Entitätenliste oben
+                   zu suchen. entityPicker() (entity-picker.js) ist derselbe
+                   App-Standard-Einzel-Entität-Picker wie im CSV-Import/
+                   Tabellen-Editor; .soll-entity-picker (chart_editor.css)
+                   gibt ihm dieselbe feste Standardbreite wie dort
+                   (.csv-entity-picker) statt der reinen Inhaltsbreite des
+                   Knopftexts, die sonst mit jeder Auswahl neu ausgemessen
+                   würde. -->
+              <span class="toolbar-field">
+                <span class="toolbar-field-label">Soll Entität</span>
+                <span class="dd-picker-wrap soll-entity-picker" x-data="entityPicker(ENTITY_OPTIONS, compareSollEntityId, (id) => setSollEntity(id))" @click.outside="open = false">
+                  <button type="button" class="btn" :class="{'dd-picker-btn-clearable': entityId}" @click="toggleOpen($refs.sollEntitySearch)">
+                    <span x-text="entityId ? label(entityId) : 'Entität wählen …'"></span>
+                  </button>
+                  <button type="button" class="dd-picker-clear" x-show="entityId" x-cloak @click.stop="clearSelection()" title="Auswahl leeren" aria-label="Auswahl leeren">✕</button>
+                  <div class="dd-picker-popover dd-picker-popover-alpine" x-show="open" x-cloak style="max-height:260px;overflow-y:auto;">
+                    <input type="search" class="dd-picker-popover-search" x-ref="sollEntitySearch" x-model="search" placeholder="Suchen …">
+                    <template x-for="opt in filtered()" :key="opt.entity_id">
+                      <div class="dd-picker-row" :class="{active: entityId === opt.entity_id}" @click="select(opt.entity_id)">
+                        <span x-text="opt.label"></span>
+                      </div>
+                    </template>
+                  </div>
+                </span>
+              </span>
+            </span>
+          </template>
+        </div>
 
         <div class="card">
           <div id="chart" x-show="hasData"></div>
@@ -438,7 +517,13 @@
              aktivem "Statistik in Legende" zeigt jeder Chip zusätzlich
              Min/Max/Ø derselben Entität — eine Zeile, zwei Zwecke, statt
              Legende und Statistik-Kacheln getrennt untereinander. -->
-        <div class="chart-legend" x-show="hasData && (legendStyle === 'chips' || !chartStats)">
+        <!-- Der Soll-Balkenvergleich (yearsCompareActive) bekommt einen
+             eigenen, nicht umschaltbaren Chip-Block darunter (yearsSeriesStats)
+             statt hier eingeflochten zu werden — seriesStats liefert dafür
+             keine sinnvollen Einträge (zwei eigenständige Jahresserien statt
+             einer gedämpften Vergleichs-Nebenserie), deshalb zusätzlich
+             ausgeblendet statt nur per hasData. -->
+        <div class="chart-legend" x-show="hasData && !yearsCompareActive && (legendStyle === 'chips' || !chartStats)">
           <template x-for="stat in seriesStats" :key="stat.entityId">
             <button type="button" class="chart-legend-item" :class="{inactive: legendHiddenIds.includes(stat.entityId)}"
                     @click="toggleLegendItem(stat.entityId, stat.name)"
@@ -470,6 +555,27 @@
             </button>
           </template>
         </div>
+        <!-- Eigene Legende für den Soll-Balkenvergleich (yearsCompareActive)
+             — ein Chip je (Entität, Jahr) statt je Entität, weil
+             renderYearsCompare() daraus echte, unabhängig benannte Serien
+             macht (siehe yearsSeriesStats). .static: kein Serien-Umschalter
+             in diesem ersten Schritt (siehe Kommentar bei yearsSeriesStats),
+             deshalb ohne @click/toggleLegendItem(). -->
+        <div class="chart-legend" x-show="hasData && yearsCompareActive">
+          <template x-for="stat in yearsSeriesStats" :key="stat.key">
+            <span class="chart-legend-item static">
+              <span class="dot" :style="{background: stat.color}"></span>
+              <span class="name" x-text="stat.name"></span>
+              <span class="values" x-show="chartStats">
+                <span x-show="legendMetrics.includes('last')">Aktuell <strong x-text="stat.last"></strong></span>
+                <span x-show="legendMetrics.includes('min')">Min <strong x-text="stat.min"></strong></span>
+                <span x-show="legendMetrics.includes('max')">Max <strong x-text="stat.max"></strong></span>
+                <span x-show="legendMetrics.includes('average')">Ø <strong x-text="stat.average"></strong></span>
+                <span x-show="legendMetrics.includes('sum') && stat.sum !== null">Σ <strong x-text="stat.sum"></strong></span>
+              </span>
+            </span>
+          </template>
+        </div>
         <!-- Alternative Legenden-Darstellung als Tabelle (Optionen-Menü, "Legenden-
              Stil") — dieselben Serien-Statistiken wie die Chips oben, nur als
              Spalten statt als Zeile pro Chip; bei vielen Serien/Kennzahlen besser
@@ -478,7 +584,11 @@
              gegenüber den (auch als Serien-Umschalter nutzbaren) Chips. Zeilen
              sind wie die Chips klickbare Serien-Umschalter (dieselbe
              toggleLegendItem()-Action). -->
-        <div class="tbl-wrap chart-legend-table-wrap" x-show="hasData && chartStats && legendStyle === 'table'">
+        <!-- Der Soll-Balkenvergleich bewusst außen vor (siehe !yearsCompareActive
+             oben bei der Chip-Legende) — die Tabellen-Variante kennt
+             yearsSeriesStats noch nicht, zeigt deshalb immer die Chip-Legende,
+             egal welcher Legenden-Stil eingestellt ist (Folgeschritt). -->
+        <div class="tbl-wrap chart-legend-table-wrap" x-show="hasData && chartStats && legendStyle === 'table' && !yearsCompareActive">
           <table class="dt compact chart-legend-table">
             <thead>
               <tr>
@@ -547,6 +657,9 @@
 
   <script src="{{ asset('vendor/echarts.min.js') }}"></script>
   <script src="{{ asset('js/confirm-dialog.js') }}"></script>
+  <!-- entityPicker() für das Soll-Feld im "Jahre"-Vergleich, App-Standard-
+       Einzel-Entität-Picker (siehe _csv_import_section.html/table_editor.html). -->
+  <script src="{{ asset('js/entity-picker.js') }}"></script>
   <script src="{{ asset('js/number-format.js') }}"></script>
   <script src="{{ asset('js/dynamic-back-link.js') }}"></script>
   <script src="{{ asset('js/menu-popover-clamp.js') }}"></script>

@@ -2655,6 +2655,22 @@ class Index:
                 (dashboard_id, entity_id),
             )
 
+    def list_entity_pin_dashboards(self, entity_id: str) -> list[dict]:
+        """Dashboards, auf denen eine Werte-Kachel dieser Entität liegt — wie
+        list_item_dashboards() für Chart/Tabelle, aber über item_entity_id
+        (siehe pin_entity_to_dashboard()). Von entity_migration.py genutzt, um
+        beim Verschieben jede gefundene Kachel auf die Ziel-Entität
+        umzuhängen."""
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT d.id, d.name, d.is_default "
+                "FROM dashboard_pins p JOIN dashboards d ON d.id = p.dashboard_id "
+                "WHERE p.item_type = 'entity' AND p.item_entity_id = ? "
+                "ORDER BY d.is_default DESC, d.name COLLATE NOCASE ASC, d.id ASC",
+                (entity_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def set_dashboard_entity_pin_size(
         self, dashboard_id: int, entity_id: str, grid_cols: int, grid_rows: int, max_size: int = 6
     ) -> bool:

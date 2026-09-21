@@ -71,8 +71,15 @@
         statusEl.textContent = 'Bitte Zeitraum angeben.';
         return;
       }
-      const startTs = new Date(startStr).getTime() / 1000;
-      const endTs = new Date(`${endStr}T23:59:59`).getTime() / 1000;
+      // Verdichtung arbeitet ausschließlich auf ganzen Kalendermonaten
+      // (siehe _months_between() in cleanup.py) — die Felder sind deshalb
+      // <input type="month">, nicht type="date"; ein Tag innerhalb des
+      // Monats hätte ohnehin keinen Einfluss darauf, welche Archivdatei(en)
+      // verdichtet werden.
+      const [startYear, startMonth] = startStr.split('-').map(Number);
+      const [endYear, endMonth] = endStr.split('-').map(Number);
+      const startTs = new Date(startYear, startMonth - 1, 1).getTime() / 1000;
+      const endTs = new Date(endYear, endMonth, 0, 23, 59, 59).getTime() / 1000;
       if (endTs <= startTs) {
         statusEl.className = 'add-value-status err';
         statusEl.textContent = '"Bis" muss nach "Von" liegen.';

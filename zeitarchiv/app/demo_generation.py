@@ -191,6 +191,26 @@ DEMO_ENTITIES = [
                "device_tracker", None, None),
     DemoEntity("binary_sensor.demo_regensensor", "Demo Regensensor",
                "binary_sensor", None, None),
+    # Migrationstest-Paar (Konzept-Erweiterung "Datensätze migrieren",
+    # entity_migration.py) — kein Teil der eigentlichen Haushaltssimulation,
+    # sondern gezielt für diese Funktion: eine "alte" Entität, die vor einigen
+    # Wochen aufgehört hat zu senden, und eine "neue" mit identischem Typ und
+    # Einheit, die kurz davor zu senden begonnen hat — der typische Auslöser
+    # (Home Assistant hat ein Gerät ersetzt). Siehe gen_migration_old_counter()/
+    # gen_migration_new_counter() für das bewusste Überlappungsfenster.
+    DemoEntity("sensor.demo_migration_alt_stromverbrauch", "Demo Migrationstest (alt) Stromverbrauch",
+               "sensor", "total_increasing", "kWh"),
+    DemoEntity("sensor.demo_migration_stromverbrauch", "Demo Migrationstest Stromverbrauch",
+               "sensor", "total_increasing", "kWh"),
+    # Zweites Migrationstest-Paar, diesmal MIT Einheiten-Unterschied (kWh vs.
+    # Wh) — testet den Umrechnungsfaktor im Migrations-Assistenten (Schritt
+    # 2, nur sichtbar bei plan.unit_mismatch), den das erste Paar (beide kWh)
+    # nie zeigt. Sonst identischer Aufbau/Zeitversatz wie oben, siehe
+    # gen_migration2_old_counter()/gen_migration2_new_counter().
+    DemoEntity("sensor.demo_migration2_alt_stromverbrauch", "Demo Migrationstest 2 (alt) Stromverbrauch",
+               "sensor", "total_increasing", "kWh"),
+    DemoEntity("sensor.demo_migration2_stromverbrauch", "Demo Migrationstest 2 Stromverbrauch",
+               "sensor", "total_increasing", "Wh"),
 ]
 
 
@@ -986,6 +1006,111 @@ def gen_water_counter(start: datetime, end: datetime, rng: random.Random, start_
     return rows
 
 
+# Bewusst relativ zu "jetzt" statt zu einem festen Kalenderdatum — bei jedem
+# Neuaufbau (auch Monate später) soll die Alt-Entität weiterhin "vor kurzem
+# aufgehört" wirken, nicht irgendwann in der fernen Vergangenheit stecken
+# bleiben. 15 Tage Überlappung, damit die Migrations-Vorschau ("bereits im
+# Ziel vorhanden") an einer frischen Demo-Instanz sofort etwas zu zeigen hat.
+MIGRATION_OLD_STOP_DAYS_BEFORE_NOW = 45
+MIGRATION_NEW_START_DAYS_BEFORE_NOW = 60
+
+# Nachträgliches Befüllen bei --append: run_generation() übergibt den
+# Generatoren unten normalerweise den knappen Ergänzungszeitraum (start liegt
+# dann selbst schon nahe "jetzt") — zu knapp für die Migrationstest-Paare,
+# die einige Jahre Vorgeschichte zeigen sollen. run_generation() übergibt
+# ihnen deshalb bei JEDEM --append-Lauf stattdessen diesen weit
+# zurückliegenden Start (siehe dort: die Paare werden davor komplett
+# zurückgesetzt, kein einmaliger Sonderfall mehr, sondern jedes Mal).
+MIGRATION_BACKFILL_DAYS = 1095
+
+# Beide Migrationstest-Paare (siehe DEMO_ENTITIES) — run_generation() setzt
+# genau diese Entitäten bei jedem --append-Lauf komplett zurück, statt sie
+# (wie den Rest der Demo-Daten) nur zu ergänzen; siehe dort für den Grund
+# (wiederholtes Testen der Migrations-Funktion, ohne einen vollen --clean-
+# Lauf zu brauchen).
+MIGRATION_TEST_ENTITY_IDS = (
+    "sensor.demo_migration_alt_stromverbrauch",
+    "sensor.demo_migration_stromverbrauch",
+    "sensor.demo_migration2_alt_stromverbrauch",
+    "sensor.demo_migration2_stromverbrauch",
+)
+
+
+def gen_migration_old_counter(start: datetime, now: datetime, rng: random.Random) -> list[Row]:
+    """Zählerstand der "alten" Migrationstest-Entität — läuft von start bis
+    MIGRATION_OLD_STOP_DAYS_BEFORE_NOW vor now, dann nie wieder. Braucht keinen
+    Startwert-Seed wie gen_water_counter(): bei einem --append-Lauf liegt der
+    übergebene start bereits nach diesem Stichtag, die Funktion liefert dann
+    von selbst eine leere Liste — genau das gewünschte Verhalten für ein Gerät,
+    das aufgehört hat zu senden."""
+    stop = now - timedelta(days=MIGRATION_OLD_STOP_DAYS_BEFORE_NOW)
+    if stop <= start:
+        return []
+    rows: list[Row] = []
+    total = 0.0
+    for dt in _time_range(start, stop, COUNTER_STEP_MINUTES):
+        total += rng.uniform(0.05, 0.35)
+        rows.append((dt.timestamp(), round(total, 3)))
+    return rows
+
+
+def gen_migration_new_counter(
+    start: datetime, now: datetime, rng: random.Random, start_total: float | None = None
+) -> list[Row]:
+    """Zählerstand der "neuen" Migrationstest-Entität — beginnt
+    MIGRATION_NEW_START_DAYS_BEFORE_NOW vor now (überlappt die alte Entität
+    bewusst um 15 Tage) und läuft seither durchgehend bis now weiter."""
+    activation = now - timedelta(days=MIGRATION_NEW_START_DAYS_BEFORE_NOW)
+    range_start = max(start, activation)
+    if range_start >= now:
+        return []
+    rows: list[Row] = []
+    total = start_total if start_total is not None else 0.0
+    for dt in _time_range(range_start, now, COUNTER_STEP_MINUTES):
+        total += rng.uniform(0.05, 0.35)
+        rows.append((dt.timestamp(), round(total, 3)))
+    return rows
+
+
+def gen_migration2_old_counter(start: datetime, now: datetime, rng: random.Random) -> list[Row]:
+    """Wie gen_migration_old_counter(), für das zweite Migrationstest-Paar
+    (kWh vs. Wh, siehe DEMO_ENTITIES) — dieselbe Zeitlogik in eigener
+    Funktion statt eines Parameters an der bestehenden, weil künftige
+    Anpassungen an einem der beiden Paare (z. B. andere Werte-Größenordnung)
+    sonst leicht versehentlich auch das jeweils andere träfen."""
+    stop = now - timedelta(days=MIGRATION_OLD_STOP_DAYS_BEFORE_NOW)
+    if stop <= start:
+        return []
+    rows: list[Row] = []
+    total = 0.0
+    for dt in _time_range(start, stop, COUNTER_STEP_MINUTES):
+        total += rng.uniform(0.05, 0.35)
+        rows.append((dt.timestamp(), round(total, 3)))
+    return rows
+
+
+def gen_migration2_new_counter(
+    start: datetime, now: datetime, rng: random.Random, start_total: float | None = None
+) -> list[Row]:
+    """Wie gen_migration_new_counter(), aber in Wh statt kWh — ×1000 größere
+    Schrittweite, damit die Zahlen zur deklarierten Einheit passen (ein
+    Zähler zeigt in Wh vierstellige, nicht einstellige Werte), nicht nur ein
+    anderes Einheiten-Label an identischen kleinen Zahlen. Genau dieses
+    Verhältnis macht den Umrechnungsfaktor beim Migrieren dieses Paars
+    testbar (kWh → Wh entspricht Faktor 1000, siehe migrate-factor-input in
+    _entity_migrate_preview.html)."""
+    activation = now - timedelta(days=MIGRATION_NEW_START_DAYS_BEFORE_NOW)
+    range_start = max(start, activation)
+    if range_start >= now:
+        return []
+    rows: list[Row] = []
+    total = start_total if start_total is not None else 0.0
+    for dt in _time_range(range_start, now, COUNTER_STEP_MINUTES):
+        total += rng.uniform(50.0, 350.0)
+        rows.append((dt.timestamp(), round(total, 1)))
+    return rows
+
+
 def gen_presence(start: datetime, end: datetime, rng: random.Random, start_state: float | None = None) -> list[Row]:
     def prob_home(hour: int) -> float:
         if 0 <= hour < 7:
@@ -1380,6 +1505,27 @@ def run_generation(
     else:
         start = now - timedelta(days=months * 30)
 
+    # Migrationstest-Entitäten (siehe DEMO_ENTITIES-Kommentar) sind reine
+    # Testvorrichtung für "Datensätze migrieren" (entity_migration.py), kein
+    # Teil der Haushaltssimulation — anders als der Rest der Demo-Daten
+    # sollen sie bei JEDEM --append-Lauf komplett neu aufgesetzt werden statt
+    # nur ergänzt. Ohne diesen Reset würde ein ausprobierter post_action=
+    # "delete" die Alt-Entität dauerhaft verschwinden lassen, und jeder
+    # weitere --append-Klick würde das Überlappungsfenster mit zusätzlichen,
+    # leicht verschobenen Zeitstempeln verwässern statt ein sauberes, immer
+    # gleich aussehendes Testszenario zu liefern — beides macht wiederholtes
+    # Testen der Funktion unbrauchbar, ohne einen kompletten "Neu erzeugen"-
+    # Lauf (--clean). Ein normaler Vollaufbau (append=False, z. B. Erststart
+    # oder --months ohne --append) respektiert dagegen weiterhin den
+    # gewünschten start unverändert — kein vorgesehener Pfad läuft append=False
+    # wiederholt gegen ein bereits befülltes Verzeichnis (dafür gibt es
+    # --append bzw. --clean), ein Reset ist dort also nicht nötig.
+    if append:
+        for entity_id in MIGRATION_TEST_ENTITY_IDS:
+            if index.get_entity(entity_id) is not None:
+                delete_all_values(data_dir, index, entity_id)
+    migration_start = now - timedelta(days=MIGRATION_BACKFILL_DAYS) if append else start
+
     weather = WeatherContext(start, now, rng)
     schedules = build_appliance_schedules(start, now, rng)
     rain_schedule = build_rain_schedule(start, now, weather, rng)
@@ -1460,6 +1606,14 @@ def run_generation(
         "binary_sensor.demo_praesenz_wohnzimmer": gen_presence(start, now, rng, start_state=presence_seed),
         "device_tracker.demo_smartphone": gen_presence(start, now, rng, start_state=device_presence_seed),
         "binary_sensor.demo_regensensor": household["regensensor"],
+        # Kein start_total-Seed für die Neu-Entitäten beider Paare — anders
+        # als beim Rest der Demo-Daten werden diese vier Entitäten bei jedem
+        # --append-Lauf komplett zurückgesetzt (siehe MIGRATION_TEST_ENTITY_IDS
+        # oben), es gibt also nie einen fortzusetzenden Vorwert.
+        "sensor.demo_migration_alt_stromverbrauch": gen_migration_old_counter(migration_start, now, rng),
+        "sensor.demo_migration_stromverbrauch": gen_migration_new_counter(migration_start, now, rng),
+        "sensor.demo_migration2_alt_stromverbrauch": gen_migration2_old_counter(migration_start, now, rng),
+        "sensor.demo_migration2_stromverbrauch": gen_migration2_new_counter(migration_start, now, rng),
     }
 
     month_boundary_ts = month_start(now).timestamp()

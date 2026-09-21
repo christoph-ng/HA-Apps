@@ -192,7 +192,7 @@ def test_full_import_ui_uses_existing_app_typography_and_controls() -> None:
     assert "data-tooltip=" not in section
     assert "Betroffene Monatsarchive und Rollups werden anschließend neu aufgebaut" in section
     assert section.index("Archivlücken füllen") < section.index("Verfügbarkeit prüfen")
-    actionbar = section.split('<div class="actionbar">', 1)[1].split("</div>", 1)[0]
+    actionbar = section.split('<div class="toolbar-right">', 1)[1].split("</div>", 1)[0]
     assert 'name="include_existing_months"' not in actionbar
     assert 'class="ha-import-select"' in section
     assert 'class="btn primary"' in section

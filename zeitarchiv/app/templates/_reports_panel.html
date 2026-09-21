@@ -90,7 +90,7 @@
 </div>
 {% if reports %}
 <div class="tbl-wrap"><table class="dt report-table"><tr>
-  {% for col in columns %}
+  {% for col in report_columns %}
   <th><a href="import?tab=reports&amp;sort={{ col.key }}&amp;dir={{ col.next_dir }}&amp;source={{ source | urlencode }}&amp;status={{ status | urlencode }}&amp;page_size={{ pagination.page_size }}"
          class="{{ 'active' if col.active else '' }}">{{ col.label }}{% if col.active %} {{ col.arrow }}{% endif %}</a></th>
   {% endfor %}

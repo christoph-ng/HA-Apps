@@ -600,13 +600,78 @@ def test_kwh_angabe_entfaellt_wenn_eine_kapazitaet_fehlt(monkeypatch, tmp: Path)
 def test_vertauschte_lade_und_entladerolle_wird_gemeldet(monkeypatch, tmp: Path) -> None:
     """Über einen längeren Zeitraum kann nicht mehr entladen als geladen worden
     sein. Ohne diese Prüfung geht das Diagramm scheinbar sauber auf, obwohl die
-    beiden Sensoren vertauscht zugeordnet sind."""
+    beiden Sensoren vertauscht zugeordnet sind.
+
+    Range "month" statt "day": ohne SOC-Sensor läuft die Prüfung nur noch für
+    Monat/Jahr, siehe test_kurzes_fenster_ohne_soc_wird_nicht_geprueft unten —
+    bei "Stunde"/"Tag" wäre ein normaler, noch nicht abgeschlossener
+    Lade-/Entladezyklus (z. B. Restladung vom Vortag) sonst nicht von einer
+    vertauschten Zuordnung zu unterscheiden. Als abgeschlossener Archiv-Monat
+    (Februar 2024, offset -1 von NOW) angelegt statt über hotbuffer.append wie
+    beim Tagesfenster oben — eine Monatsabfrage für einen bereits
+    vergangenen Monat liest aus Archiv/Rollup, nicht aus dem Hot-Buffer
+    (gleiches Muster wie _anomalie_anlage())."""
     a, config = _mit_speicher(tmp, [{
         "name": "Verdreht",
         "laden_entity_id": "sensor.wenig", "entladen_entity_id": "sensor.viel",
     }])
+    for entity_id, start, ende in (("sensor.wenig", 10.0, 11.0), ("sensor.viel", 20.0, 29.0)):
+        a.index.get_or_create_entity(entity_id, "sensor", "total_increasing", "kWh")
+        erster = _dt.datetime(2024, 2, 1, 6, tzinfo=TZ)
+        letzter = _dt.datetime(2024, 2, 28, 18, tzinfo=TZ)
+        tabelle = pa.table({"ts": [erster.timestamp(), letzter.timestamp()], "value": [start, ende]})
+        archiv = tmp / "archive" / entity_id
+        archiv.mkdir(parents=True, exist_ok=True)
+        pq.write_table(tabelle, archiv / "2024-02.parquet")
+        rollup.append_completed_month(tmp, entity_id, "counter", tabelle, 2024, 2, TZ)
+        a.index.record_write(entity_id, letzter.timestamp())
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    try:
+        flow = a.service.compute_flow(config, "month", -1)
+        pruefung = next(c for c in flow["quality"]["checks"]
+                        if c["label"] == "Speicher-Wirkungsgrad plausibel")
+        assert pruefung["ok"] is False
+        assert "Verdreht" in pruefung["detail"]
+        assert flow["quality"]["plausible"] is False
+    finally:
+        a.close()
+
+
+def test_kurzes_fenster_ohne_soc_wird_nicht_geprueft(monkeypatch, tmp: Path) -> None:
+    """Der ursprüngliche Bug-Report: morgens, vor der ersten Ladung des Tages,
+    übersteigt die Entladung (aus dem Vortag-Ladestand) die Ladung im
+    Tagesfenster — ganz normal, nichts vertauscht. Ohne SOC-Sensor fehlt die
+    Korrekturgröße dafür, deshalb wird die Prüfung bei "Tag" (und "Stunde")
+    komplett ausgesetzt statt einen Fehlalarm zu zeigen. Dieselben Zahlen wie
+    beim echten Tausch oben, hier aber im Tagesfenster (range "day")."""
+    a, config = _mit_speicher(tmp, [{
+        "name": "Heimspeicher",
+        "laden_entity_id": "sensor.wenig", "entladen_entity_id": "sensor.viel",
+    }])
+    a.zaehler("sensor.wenig", (0, 10.0), (23, 11.0))   # +1 geladen
+    a.zaehler("sensor.viel", (0, 20.0), (23, 29.0))    # +9 entladen (Vortag-Restladung)
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    try:
+        flow = a.service.compute_flow(config, "day", -1)
+        labels = [c["label"] for c in flow["quality"]["checks"]]
+        assert "Speicher-Wirkungsgrad plausibel" not in labels
+        assert flow["quality"]["plausible"] is True
+    finally:
+        a.close()
+
+
+def test_soc_korrektur_erkennt_echten_tausch_trotzdem(monkeypatch, tmp: Path) -> None:
+    """Mit SOC-Sensor + Kapazität greift die Prüfung auch im Tagesfenster
+    wieder — hier bleibt der Ladestand über den Tag UNVERÄNDERT (Anfang und
+    Ende gleich), es gibt also nichts zu korrigieren: ein echter Tausch fällt
+    weiterhin auf."""
+    a, config = _mit_speicher(tmp, [{
+        "name": "Verdreht", "soc_entity_id": "sensor.soc", "capacity_kwh": 20.0,
+        "laden_entity_id": "sensor.wenig", "entladen_entity_id": "sensor.viel",
+    }])
     a.zaehler("sensor.wenig", (0, 10.0), (23, 11.0))   # +1 "geladen"
     a.zaehler("sensor.viel", (0, 20.0), (23, 29.0))    # +9 "entladen"
+    _gauge(a, "sensor.soc", "%", (0, 50.0), (23, 50.0))
     monkeypatch.setattr(ed, "datetime", _FesteUhr)
     try:
         flow = a.service.compute_flow(config, "day", -1)
@@ -614,7 +679,28 @@ def test_vertauschte_lade_und_entladerolle_wird_gemeldet(monkeypatch, tmp: Path)
                         if c["label"] == "Speicher-Wirkungsgrad plausibel")
         assert pruefung["ok"] is False
         assert "Verdreht" in pruefung["detail"]
-        assert flow["quality"]["plausible"] is False
+    finally:
+        a.close()
+
+
+def test_soc_korrektur_verhindert_fehlalarm_bei_ladestand_rueckgang(monkeypatch, tmp: Path) -> None:
+    """Derselbe Zahlen-Fall wie oben (Entladung übersteigt Ladung deutlich),
+    aber diesmal korrekt zugeordnet UND durch einen echten Ladestand-Rückgang
+    im Fenster erklärt (90 % -> 10 % bei 20 kWh Kapazität = 16 kWh Reserve) —
+    weit mehr, als die 9 kWh Entladung braucht. Keine Auffälligkeit."""
+    a, config = _mit_speicher(tmp, [{
+        "name": "Heimspeicher", "soc_entity_id": "sensor.soc", "capacity_kwh": 20.0,
+        "laden_entity_id": "sensor.wenig", "entladen_entity_id": "sensor.viel",
+    }])
+    a.zaehler("sensor.wenig", (0, 10.0), (23, 11.0))   # +1 geladen
+    a.zaehler("sensor.viel", (0, 20.0), (23, 29.0))    # +9 entladen
+    _gauge(a, "sensor.soc", "%", (0, 90.0), (23, 10.0))
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    try:
+        flow = a.service.compute_flow(config, "day", -1)
+        labels = [c["label"] for c in flow["quality"]["checks"]]
+        assert "Speicher-Wirkungsgrad plausibel" not in labels
+        assert flow["quality"]["plausible"] is True
     finally:
         a.close()
 

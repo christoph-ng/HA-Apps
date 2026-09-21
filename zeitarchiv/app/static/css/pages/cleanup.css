@@ -73,6 +73,12 @@
        die Vorlage zu setzen. */
     box-shadow:var(--shadow);
   }
+  /* Dieselbe --surface-alt-Füllung wie die Leiste selbst — ein Knopf mit der
+     .btn-Standardfüllung (ebenfalls --surface-alt) verschwindet darin
+     optisch. "Löschen" (.btn-danger) hatte das nie (eigene --surface-Regel),
+     "Duplikate automatisch entfernen"/"Wiederholungen verdichten"
+     (.btn-danger-outline) aber schon — hier einheitlich weiß dagegen. */
+  .rows-actionbar .btn{background:var(--surface);}
   /* Die Tabelle darunter gibt ihre oberen Ecken ab — beide zusammen ergeben
      einen Rahmen. Geschwister-Selektor statt einer eigenen Klasse an der
      .tbl-wrap, weil die Leiste im Korrigieren-Modus dieselbe bleibt. */

@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.99.0 - 2026-09-20
+
+### Neu
+
+- **Migrations-Assistent** (Entität → Konfiguration → „Datensätze in andere
+  Entität übertragen"): überträgt den kompletten archivierten Verlauf einer
+  Entität in eine andere — typischer Anwendungsfall: Home Assistant hat ein
+  Gerät ersetzt oder umbenannt. Erkennt Einheiten-Unterschiede automatisch
+  und schlägt einen passenden Umrechnungsfaktor vor (z. B. kWh ↔ Wh).
+- **Chart-Editor**: der Jahresvergleich („Vorjahr") lässt sich jetzt um eine
+  Laufsumme und eine frei wählbare Soll-Entität (Ziellinie fürs aktuelle
+  Jahr) erweitern — beide unabhängig voneinander zuschaltbar.
+
+### Geändert
+
+- CSV-Import: Layout gestrafft — Dateiname und „Quelldaten löschen" in einer
+  Zeile, Spalten-Einstellungen (Trennzeichen, Kopfzeile, Zeitstempel-/
+  Wert-Spalte, Zeitformat) zusammengeführt, Ziel-Entität über den
+  Standard-Entitäts-Picker mit Suche wählbar.
+- Symcon-Import: Vorschau-/Import-Knöpfe direkt in die Suchzeile verschoben,
+  Suchfeld auf Standardbreite.
+- HA-Import: Vorschau-/Vollimport-Knöpfe ebenfalls in die Suchzeile
+  verschoben, statt unterhalb der (bei vielen Entitäten langen) Tabelle.
+- Manuelles Verdichten: „Von"/„Bis" jetzt als Monatsauswahl statt
+  Tagesfeldern — Verdichtung arbeitet ohnehin nur auf ganzen
+  Kalendermonaten.
+
+### Behoben
+
+- CSV-Import: „Zeitstempel-Spalte"/„Wert-Spalte" zeigten teils rohe
+  Python-Werte statt der Spaltennamen.
+- Energiedashboard: die Speicher-Wirkungsgrad-Prüfung meldete bei kurzen
+  Zeiträumen (Stunde/Tag) fälschlich „Ladung/Entladung vertauscht?", z. B.
+  morgens vor der ersten Ladung des Tages.
+
 ## 0.98.0 - 2026-09-18
 
 ### Neu

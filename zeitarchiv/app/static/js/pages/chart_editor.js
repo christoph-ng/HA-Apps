@@ -31,6 +31,20 @@
       getComputedStyle(document.documentElement).getPropertyValue(`--chart-${i + 1}`).trim()
     );
     const UI_FONT_SCALE = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale')) || 1;
+    // Blasse Vorperiode-/Vorjahr-Nebenserien blendeten bisher per
+    // itemStyle/lineStyle.opacity ab, statt die Deckkraft in die Farbe selbst
+    // einzurechnen — der Tooltip-Marker (sowohl ECharts' eigener bei
+    // trigger:'axis' ohne Formatter als auch p.marker im eigenen HTML-
+    // Formatter unten) übernimmt NUR itemStyle/lineStyle.color, ignoriert
+    // opacity dabei komplett. Ergebnis: Haupt- und Vorperiode-Zeile zeigten
+    // im Tooltip denselben satten Farbpunkt, obwohl der Balken/die Linie im
+    // Chart selbst sichtbar blasser ist (gemessen). Eine echte rgba-Farbe
+    // löst das an der Wurzel, für Canvas-Rendering UND Marker identisch —
+    // alpha-Multiplikation ist in beiden Fällen dieselbe Rechnung.
+    const withOpacity = (hex, opacity) => {
+      const n = parseInt(hex.replace('#', ''), 16);
+      return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${opacity})`;
+    };
 
     // Zentral in static/js/number-format.js (window.NumberFormat) — dieselbe
     // Formatierung wie überall sonst in der Oberfläche, siehe Kommentar dort.
@@ -322,6 +336,49 @@
       }).filter(point => Number.isFinite(point.value));
     }
 
+    // Gruppiert Punkte EINES Kalenderjahres nach tatsächlichem Kalendermonat
+    // (0=Jan…11=Dez) statt nach fortlaufender Bucket-Breite wie
+    // resamplePoints() — für renderYearsCompare() müssen aktuelles Jahr und
+    // Vorjahr je Monat an DERSELBEN Kategorie-Position landen, damit Balken
+    // nebeneinander stehen. resamplePoints()s Bucket-Sekunden sind dafür
+    // ungeeignet: RESOLUTION_SECONDS.year.medium ist ein grob gerundetes
+    // 30-Tage-Fenster (siehe Kommentar dort), das über ein volles Jahr
+    // gegenüber echten Kalendermonatsgrenzen zunehmend abdriftet. Dieselbe
+    // Aggregation wie dort (Durchschnitt bei "standard", sonst Summe).
+    function monthlyBuckets(points, aggregationType) {
+      const groups = Array.from({length: 12}, () => []);
+      points.forEach(point => {
+        if (!Number.isFinite(point.value)) return;
+        groups[new Date(point.ts * 1000).getMonth()].push(point.value);
+      });
+      return groups.map(values => {
+        if (!values.length) return null;
+        const sum = values.reduce((total, v) => total + v, 0);
+        return aggregationType === 'standard' ? sum / values.length : sum;
+      });
+    }
+
+    // Laufsumme über monthlyBuckets()-Werte. Zwei verschiedene Sorten Lücke,
+    // zwei verschiedene Antworten: eine Lücke MITTEN im Jahr (Sensor kurz
+    // offline) hält die bisherige Summe und läuft mit den nächsten echten
+    // Monaten weiter — ein einzelner fehlender Monat soll den Rest des
+    // Jahres nicht auf 0 zurückwerfen. Monate NACH dem letzten echten Wert
+    // (das laufende, noch nicht abgeschlossene Jahr) geben dagegen null
+    // zurück: dieselbe Zusage wie überall sonst im Chart, nie in die Zukunft
+    // fortzuschreiben (siehe windowEnd-Kommentar bei load()) — die Balken
+    // brechen dort ohnehin ab, eine bis Dezember flach weiterlaufende Linie
+    // daneben sähe wie ein Widerspruch auf demselben Chart aus.
+    function cumulate(values) {
+      let lastReal = -1;
+      values.forEach((v, i) => { if (v != null) lastReal = i; });
+      let sum = 0;
+      return values.map((v, i) => {
+        if (i > lastReal) return null;
+        if (v != null) sum += v;
+        return sum;
+      });
+    }
+
     // Bewusst außerhalb von x-data (siehe entity_detail.html: ECharts verlässt
     // sich auf `this` als echtes Objekt, nicht Alpines reaktiven Proxy).
     let chartInstance = null;
@@ -436,6 +493,30 @@
         // im Menü keine Zeile aktiv und der Knopf zeigte ein Wort, das nirgends
         // mehr auswählbar ist.
         compareMode: compareYearAvailable(RANGE_KEY) ? COMPARE_MODE : 'previous',
+        // Laufsumme/Soll — Erweiterungen von "Vorjahr" bei range='year',
+        // keine eigene Vergleichsoption (siehe render()) — reine Laufzeit-
+        // Ansichtseinstellungen, nie mit dem Chart gespeichert (wie compare/
+        // compareMode selbst auch nicht, siehe COMPARE/COMPARE_MODE oben).
+        // compareSollEntityId braucht KEINE eigene Backend-Anbindung: die
+        // Soll-Entität ist ganz normal Teil von selectedEntityIds (wird über
+        // denselben entityPicker() ausgewählt, der sie bei Bedarf mit
+        // toggleEntity() hinzufügt) und läuft durch dieselbe /api/query-multi-
+        // Abfrage wie jede andere Entität — renderYearsCompare() zeichnet nur
+        // GENAU DIESE eine als gepunktete Ziel-Linie statt als Balkenpaar.
+        // '' bedeutet "keine Soll-Entität gewählt" — render() wechselt für
+        // range='year' von der gewohnten Vorjahres-Schattenlinie auf die
+        // Balkenpaare mit eigener Legende (siehe dort), sobald Soll ODER
+        // Laufsumme aktiv ist (yearsCompareActive) — die kalendermonatsweise
+        // Kumulierung (monthlyBuckets()/cumulate()) läuft ohnehin nur dort,
+        // die Schattenlinie kennt keine Monats-Buckets.
+        compareSollEntityId: '',
+        compareCumsum: false,
+        // true, solange die aktuelle compareSollEntityId NUR deshalb in
+        // selectedEntityIds steckt, weil setSollEntity() sie dort hinein
+        // genommen hat (nicht, weil sie schon vorher regulär gewählt war)
+        // — entscheidet, ob clearSollEntity() sie beim Leeren des Feldes
+        // wieder entfernen darf (siehe dort).
+        sollAutoAdded: false,
         showPoints: false,
         showValues: SHOW_VALUES,
         averageLine: AVERAGE_LINE,
@@ -649,6 +730,51 @@
             };
           });
         },
+        // Eigene, nicht umschaltbare Legende für den Balken-Renderpfad bei
+        // "Vorjahr" + range='year' + gewählter Soll-Entität (chart_editor.html,
+        // eigener Block neben der normalen .chart-legend) — anders als
+        // seriesStats oben (ein Eintrag je Entität) liefert dieser Getter für
+        // jede "echte" Entität ZWEI (aktuelles Jahr + Vorjahr), weil
+        // renderYearsCompare() daraus echte, unabhängig benannte Serien
+        // macht statt einer gedämpften Vergleichs-Nebenserie. Die Jahreszahl
+        // selbst kommt nicht vom Server (anders als beim früheren, inzwischen
+        // wieder entfernten "Jahre"-Modus mit frei wählbaren Kalenderjahren)
+        // — bei "Vorjahr" ist es immer "das Kalenderjahr von windowStart" und
+        // exakt ein Jahr davor. toggleLegendItem() (Serien-Ausblenden) ist
+        // hier bewusst nicht angebunden — "welches Jahr einer Entität"
+        // bräuchte eine eigene Ausblend-ID-Konvention, für den ersten Wurf
+        // dieser Funktion nicht eingebaut (siehe CHANGELOG_INTERNAL.md).
+        get yearsSeriesStats() {
+          const out = [];
+          const currentYear = this.windowStart ? new Date(this.windowStart * 1000).getFullYear() : new Date().getFullYear();
+          const previousYear = currentYear - 1;
+          this.series.forEach(s => {
+            if (!s.compare_points) return;
+            const color = PALETTE[this.colorIndexFor(s.entity_id) % PALETTE.length];
+            const name = this.entityNames[s.entity_id] || s.friendly_name;
+            // Die Soll-Entität bekommt EINEN Eintrag ohne Jahreszahl (siehe
+            // renderYearsCompare(): sie ist eine einzelne Ziel-Linie, kein
+            // Jahresvergleich mit sich selbst) — das aktuelle Jahr, dasselbe,
+            // das dort auch gezeichnet wird.
+            if (s.entity_id === this.compareSollEntityId) {
+              out.push({key: s.entity_id, color, name, ...this.seriesStatsFor(s, s.points, this.windowEnd)});
+              return;
+            }
+            out.push({
+              key: `${s.entity_id}-${previousYear}`,
+              color,
+              name: `${name} (${previousYear})`,
+              ...this.seriesStatsFor(s, s.compare_points, s.compare_window_end),
+            });
+            out.push({
+              key: `${s.entity_id}-${currentYear}`,
+              color,
+              name: `${name} (${currentYear})`,
+              ...this.seriesStatsFor(s, s.points, this.windowEnd),
+            });
+          });
+          return out;
+        },
         get periodLabel() {
           return formatPeriodLabel(this.range, this.continuous, this.windowStart, this.windowEnd, this.isCurrent);
         },
@@ -675,23 +801,91 @@
           if (!this.compare) return 'Vergleichen';
           return this.compareMode === 'year' ? this.compareYearLabel : this.comparePreviousLabel;
         },
+        // EIN Ort für "zeichnet render() gerade über renderYearsCompare()"
+        // (siehe dort) statt derselben Bedingung an mehreren Stellen in
+        // chart_editor.html — sonst driftet eine Kopie irgendwann auseinander
+        // (z. B. eine vergessene compareCumsum-Prüfung). Soll ODER Laufsumme
+        // reicht schon aus: beide brauchen die Kalendermonats-Buckets aus
+        // renderYearsCompare() (monthlyBuckets()/cumulate()), die gewohnte
+        // Schattenlinie kennt keine Monats-Buckets. Laufsumme allein zeichnet
+        // dann Balkenpaare ohne Ziel-Linie, aber MIT der kumulierten Achse.
+        get yearsCompareActive() {
+          return this.compare && this.compareMode === 'previous' && this.range === 'year'
+            && (this.compareCumsum || !!this.compareSollEntityId);
+        },
 
         toggleEntity(entityId, checked) {
           const idx = this.selectedEntityIds.indexOf(entityId);
           if (checked) { if (idx === -1) this.selectedEntityIds.push(entityId); }
           else if (idx !== -1) this.selectedEntityIds.splice(idx, 1);
+          // Eine abgewählte Entität bleibt sonst als tote Referenz im
+          // Soll-Feld stehen — ohne Daten zu render, aber weiter mit Namen
+          // im Knopf sichtbar.
+          if (!checked && entityId === this.compareSollEntityId) {
+            this.compareSollEntityId = '';
+            this.sollAutoAdded = false;
+          }
           this.load();
+        },
+        // Callback des Soll-Entität-Felds (entityPicker() in chart_editor.html)
+        // — sowohl für eine neue Wahl als auch fürs Leeren (id === '', Klick
+        // auf die ✕). Anders als schlichtes toggleEntity(id, true) beim Wählen
+        // + Stehenlassen beim Leeren: eine per Soll NEU hinzugefügte Entität
+        // (sollAutoAdded) wird beim Leeren wieder ENTFERNT statt als
+        // gewöhnliche Balkenpaar-Serie (inkl. eigener Kumuliert-Achse) im
+        // Chart hängen zu bleiben — gemessen mit Außentemperatur als Soll:
+        // nach dem Leeren tauchte sie plötzlich als eigenes Balkenpaar samt
+        // "°C"/"°C kumuliert"-Achsen auf, obwohl sie nur als Ziel-Linie
+        // gedacht war. War die Entität dagegen schon VOR der Soll-Wahl reguär
+        // ausgewählt, bleibt sie beim Leeren unangetastet — sie gehört dann
+        // nicht dem Soll-Feld, sondern der normalen Auswahl.
+        setSollEntity(id) {
+          if (id) {
+            this.compareSollEntityId = id;
+            if (!this.selectedEntityIds.includes(id)) {
+              this.sollAutoAdded = true;
+              this.toggleEntity(id, true);
+            } else {
+              this.sollAutoAdded = false;
+              this.render();
+            }
+            return;
+          }
+          const previous = this.compareSollEntityId;
+          const autoAdded = this.sollAutoAdded;
+          this.compareSollEntityId = '';
+          this.sollAutoAdded = false;
+          if (autoAdded && previous) this.toggleEntity(previous, false);
+          else this.render();
+        },
+        // Für "Angezeigte Namen & Reihenfolge" (Template): die Soll-Entität
+        // ist dort keine Zeile zum Umbenennen/Verschieben/Ausblenden — sie
+        // hat keine eigene Legendenzeile/Reihenfolge, nur die eine gepunktete
+        // Ziel-Linie (siehe renderYearsCompare()), da gibt es nichts zu
+        // sortieren. Bleibt trotzdem ganz normal Teil von selectedEntityIds
+        // (Abfrage/Farbzuordnung, siehe compareSollEntityId-Kommentar).
+        get orderableEntityIds() {
+          return this.compareSollEntityId
+            ? this.selectedEntityIds.filter(id => id !== this.compareSollEntityId)
+            : this.selectedEntityIds;
         },
         // Verschiebt eine Entität in der Anzeige-/Abfragereihenfolge (bestimmt
         // Legenden-, Statistik- und Farbreihenfolge sowie die gespeicherte
-        // Reihenfolge) um eine Position nach oben (-1) oder unten (+1) — dieselbe
-        // Splice-Logik wie moveRow() in table_editor.html.
+        // Reihenfolge) um eine Position nach oben (-1) oder unten (+1) —
+        // innerhalb von orderableEntityIds (s. o.) ermittelt, NICHT per
+        // rohem Index+Delta in selectedEntityIds wie früher: sonst würde ein
+        // "Runter" ausgerechnet an der (unsichtbaren) Soll-Entität vorbei-
+        // bzw. mit ihr vertauschen, sobald sie irgendwo dazwischen im rohen
+        // Array steht, statt mit der visuell nächsten Zeile zu tauschen.
         moveEntity(entityId, delta) {
-          const idx = this.selectedEntityIds.indexOf(entityId);
-          const target = idx + delta;
-          if (idx === -1 || target < 0 || target >= this.selectedEntityIds.length) return;
-          const [id] = this.selectedEntityIds.splice(idx, 1);
-          this.selectedEntityIds.splice(target, 0, id);
+          const order = this.orderableEntityIds;
+          const orderIdx = order.indexOf(entityId);
+          const targetOrderIdx = orderIdx + delta;
+          if (orderIdx === -1 || targetOrderIdx < 0 || targetOrderIdx >= order.length) return;
+          const neighborId = order[targetOrderIdx];
+          const idxA = this.selectedEntityIds.indexOf(entityId);
+          const idxB = this.selectedEntityIds.indexOf(neighborId);
+          [this.selectedEntityIds[idxA], this.selectedEntityIds[idxB]] = [this.selectedEntityIds[idxB], this.selectedEntityIds[idxA]];
           this.load();
         },
         setRange(key) {
@@ -767,6 +961,11 @@
         setCompareMode(mode) {
           this.compare = true;
           this.compareMode = mode;
+          // Popover bleibt reine Auswahl (Aus/Vorjahr/Jahre) und schließt bei
+          // jeder Wahl sofort, wie die übrigen Menüs auch — Jahr A/B stehen
+          // als eigene Zeile unter der Toolbar (siehe chart_editor.html),
+          // nicht mehr als weitere Popover-Zeilen, und sind dadurch dauerhaft
+          // sichtbar statt an ein offengehaltenes Menü gebunden.
           this.compareMenuOpen = false;
           this.raw = false;
           this.stacked = false;
@@ -923,6 +1122,22 @@
         render() {
           if (!chartInstance) chartInstance = echarts.init(document.getElementById('chart'));
           if (!this.hasData) { chartInstance.clear(); return; }
+          // Vorjahresvergleich bei range='year' MIT Soll-Entität ODER
+          // Laufsumme bekommt einen eigenen Renderpfad wie Donut/Zeitstrahl
+          // (siehe timeline/donut-Zweige unten) statt eines weiteren Zweigs
+          // in der allgemeinen Zeitachsen-Logik hier — Stacking, Prozent-
+          // Normierung, gleitender Durchschnitt und singleBucket setzen alle
+          // GENAU EINE Serie je Entität voraus, dieser Pfad macht daraus zwei
+          // gleichwertige (aktuelles Jahr + Vorjahr als Balkenpaare statt der
+          // gewohnten Schattenlinie), gebucketet auf echte Kalendermonate
+          // (monthlyBuckets()) statt der Bucket-Sekunden-Logik unten — genau
+          // das braucht auch die Laufsumme (cumulate()), unabhängig von Soll.
+          // OHNE beides bleibt "Vorjahr" für JEDEN Zeitraum — auch 'year' —
+          // die gewohnte Schattenlinie unten in render().
+          if (this.yearsCompareActive) {
+            this.renderYearsCompare();
+            return;
+          }
           // Aus den TATSÄCHLICH ANGEZEIGTEN (resamplePoints()-) Punkten
           // ermittelt, nicht aus den rohen Server-Punkten wie
           // computeAutoResolutionLabel(): bei manuell gesetzter Auflösung
@@ -1366,8 +1581,8 @@
                 type: chartType,
                 yAxisIndex: units.indexOf(axisKey(s)),
                 data: compareData,
-                lineStyle: {width: 1.5, color, type: 'dashed', opacity: 0.5},
-                itemStyle: {color, opacity: 0.5},
+                lineStyle: {width: 1.5, color: withOpacity(color, 0.5), type: 'dashed'},
+                itemStyle: {color: withOpacity(color, 0.5)},
                 barMaxWidth: 48,
                 clip: chartType !== 'bar',
               };
@@ -1376,7 +1591,7 @@
                 if (!this.showPoints) cmp.symbol = 'none';
                 // Niedrigere Deckkraft als die Hauptserie (main, s. o.) — die
                 // Vergleichs-Nebenserie ist ohnehin schon gestrichelt/blasser
-                // (lineStyle.opacity 0.5 oben), zwei überlagerte Flächen in
+                // (withOpacity(color, 0.5) oben), zwei überlagerte Flächen in
                 // gleicher Stärke würden sich sonst gegenseitig zumatschen.
                 if (this.areaFill) cmp.areaStyle = {color, opacity: 0.05};
               }
@@ -1590,6 +1805,216 @@
             }],
           };
           chartInstance.setOption(option, true);
+          chartInstance.resize();
+        },
+
+        // "Jahre" (Vergleichen-Menü, nur bei range='year') — zwei frei
+        // wählbare Kalenderjahre als gleichwertige Balkenserien je Entität,
+        // Monat für Monat nebeneinander (entry.years, siehe api_query_multi()
+        // in api_routes.py). Eigener Renderpfad statt eines Zweigs im
+        // normalen render() (Begründung dort): eine feste 12-Kategorien-
+        // Achse statt einer Zeitachse, keine Stacking-/Prozent-/gleitender-
+        // Durchschnitt-Fälle — für "Jahre" ohnehin nicht erreichbar.
+        renderYearsCompare() {
+          const MONTHS = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+          const isDurationSeries = s => s.aggregation_type === 'switch' && s.display_mode === 'time';
+          const axisUnit = s => isDurationSeries(s) ? ' duration' : s.unit;
+          const hasCompare = s => !!s.compare_points;
+          const isSoll = s => !!this.compareSollEntityId && s.entity_id === this.compareSollEntityId;
+          // Anders als beim früheren, frei wählbaren "Jahre"-Modus kommt die
+          // Jahreszahl nicht mehr vom Server (kein compare_years mehr) —
+          // "Vorjahr" meint immer "das Kalenderjahr von windowStart" gegen
+          // exakt ein Jahr davor (year_over_year=false, offset-1, siehe
+          // api_query_multi()).
+          const currentYear = this.windowStart ? new Date(this.windowStart * 1000).getFullYear() : new Date().getFullYear();
+          const previousYear = currentYear - 1;
+          const units = [...new Set(this.series.filter(hasCompare).map(axisUnit))];
+          const unitDecimals = new Map();
+          this.series.forEach(s => {
+            const d = this.effectiveDecimals(s);
+            if (d == null) return;
+            const current = unitDecimals.get(axisUnit(s));
+            if (current == null || d < current) unitDecimals.set(axisUnit(s), d);
+          });
+          // Laufsumme bekommt eine EIGENE Y-Achse je Einheit ("kWh kumuliert"
+          // statt "kWh") statt sich die Skala mit den Monatsbalken zu teilen
+          // — eine Jahressumme liegt um ein Vielfaches über dem größten
+          // Monatswert, beide auf einer Achse hätten die Balken auf einen
+          // schmalen Streifen am unteren Rand gequetscht (siehe Mockup,
+          // "Laufsumme, zweite Achse"). Nur für echte Entitäten, nicht die
+          // Soll-Linie (siehe unten) — ein Ziel kumuliert sich nicht selbst.
+          const cumUnits = this.compareCumsum
+            ? [...new Set(this.series.filter(s => hasCompare(s) && !isSoll(s)).map(axisUnit))]
+            : [];
+          // Nur Einheiten, die WIRKLICH als Balken gezeichnet werden (also
+          // nicht ausschließlich von der Soll-Linie genutzt werden) brauchen
+          // eine sichtbare Achse — Soll teilt sich zwar per unitIndex (s. u.)
+          // die Achse einer bereits vorhandenen Balken-Einheit, hat aber bei
+          // einer eigenen, sonst ungenutzten Einheit sonst KEINE Balken, an
+          // denen sich die Achse ablesen ließe.
+          const barUnits = new Set(this.series.filter(s => hasCompare(s) && !isSoll(s)).map(axisUnit));
+          // Eine Y-Achse je Einheit, dieselbe Zuordnung wie im normalen
+          // Zeitverlauf (render(), units/axisKey dort) — nur ohne dessen
+          // Stacking-/Normierungs-/Dynamische-Y-Achse-Verzweigung. Kumulierte
+          // Achsen hängen HINTEN an.
+          const axisUnits = [...units, ...cumUnits];
+          // Laufsumme UND eine reine Soll-Achse bleiben unsichtbar (show:
+          // false) — beides sind Ableitungen, keine eigenständig ablesbaren
+          // Größen (eine "kumulierte °C"-Achse ergäbe ohnehin keinen Sinn,
+          // eine reine Soll-Achse zeigte nur die Ziel-Linie einer einzelnen
+          // Entität). ECharts benutzt eine ausgeblendete Achse trotzdem
+          // weiter zum Skalieren der Serien, die auf sie zeigen (yAxisIndex),
+          // reserviert dafür aber keinen Rand — deshalb links/rechts/offset
+          // NUR über die sichtbaren Achsen hochzählen, sonst bliebe für eine
+          // unsichtbare Achse unnötig Platz frei (gemessen: zwei "kWh"-
+          // Achsenbeschriftungen liefen bei EINER Einheit + Laufsumme, aber
+          // ohne Soll, ineinander, weil beide denselben Offset 0 bekamen,
+          // statt dass die zweite (unsichtbare) einfach entfällt).
+          let visiblePos = 0;
+          const yAxis = axisUnits.map((u, i) => {
+            const isCum = i >= units.length;
+            const hidden = isCum || !barUnits.has(u);
+            const pos = hidden ? 0 : visiblePos++;
+            const decimals = unitDecimals.get(u);
+            const isDuration = u === ' duration';
+            return {
+              type: 'value',
+              // show:false ALLEIN reichte nicht — containLabel (grid, s. u.)
+              // reservierte trotzdem Rand für die ausgeblendete Achse (Name +
+              // Beschriftungsbreite fließen in dessen Berechnung ein,
+              // unabhängig von show), sichtbar als unbegründeter Leerraum
+              // links vom sichtbaren "kWh" links neben den Balken (gemessen).
+              // axisLine/axisTick/axisLabel/splitLine/name einzeln
+              // abzuschalten nimmt der Achse jeden Platzanspruch, show:false
+              // bleibt zusätzlich als Absicherung stehen.
+              show: !hidden,
+              name: hidden ? '' : (isDuration ? 'Dauer' : u || '') + (isCum ? ' kumuliert' : '') || undefined,
+              nameLocation: 'end',
+              position: pos % 2 === 0 ? 'left' : 'right',
+              offset: Math.floor(pos / 2) * 55,
+              min: value => Math.min(0, value.min),
+              max: value => Math.max(0, value.max),
+              axisLine: {show: !hidden},
+              axisTick: {show: !hidden},
+              splitLine: {show: !hidden},
+              axisLabel: {
+                show: !hidden,
+                formatter: v => isDuration ? NumberFormat.fmtDuration(v) : (u ? `${fmtNum(v, decimals)} ${u}` : fmtNum(v, decimals)),
+              },
+            };
+          });
+          const visibleAxisCount = visiblePos;
+          const cumAxisIndex = u => { const i = cumUnits.indexOf(u); return i === -1 ? -1 : units.length + i; };
+          // Eine Farbe je Entität (nicht je Jahr) — bleibt so auch bei
+          // mehreren gleichzeitig gewählten Entitäten eindeutig zuordenbar,
+          // statt mit einem zweiten Farbschema um dieselben Paletten-Farben
+          // zu konkurrieren. Das aktuelle Jahr bekommt volle Deckkraft, das
+          // Vorjahr ist gedimmt — dieselbe Idee wie die bestehende
+          // Vorjahres-Schattenserie (render()), nur beide diesmal mit
+          // eigenem Namen und eigener Legende.
+          const echartsSeries = [];
+          this.series.forEach(s => {
+            if (!hasCompare(s)) return;
+            const color = PALETTE[this.colorIndexFor(s.entity_id) % PALETTE.length];
+            const displayName = this.entityNames[s.entity_id] || s.friendly_name;
+            const decimals = unitDecimals.get(axisUnit(s));
+            const unitIndex = units.indexOf(axisUnit(s));
+            const valueFormatter = v => v == null
+              ? '—'
+              : (isDurationSeries(s) ? NumberFormat.fmtDuration(v) : `${fmtNum(v, decimals)}${s.unit ? ' ' + s.unit : ''}`);
+            // Die Soll-Entität ist kein Jahresvergleich mit sich selbst,
+            // sondern eine einzelne Ziel-Linie fürs aktuelle Jahr — teilt
+            // sich aber die Achse ihrer EIGENEN Einheit wie jede andere
+            // Entität auch (unitIndex oben), statt fest auf einer fremden zu
+            // landen: eine Soll-Entität mit abweichender Einheit (z. B. °C
+            // gegen eine m³-Entität) hätte auf einer geteilten Achse ihre
+            // rohen Werte in die falsche Skala gemischt und die eigentliche
+            // Entität auf einen schmalen Streifen gequetscht — gemessen mit
+            // Außentemperatur als Soll neben dem Wasserzähler. Gepunktet
+            // statt gestrichelt hält sie optisch von der Laufsumme
+            // (gestrichelt, siehe unten) auseinander.
+            if (isSoll(s)) {
+              echartsSeries.push({
+                name: displayName,
+                type: 'line',
+                yAxisIndex: unitIndex,
+                data: monthlyBuckets(s.points, s.aggregation_type),
+                lineStyle: {type: 'dotted', width: 2, color},
+                itemStyle: {color},
+                symbol: 'none',
+                z: 3,
+                tooltip: {valueFormatter},
+              });
+              return;
+            }
+            // Aktuelles Jahr ZUERST (siehe Reihenfolge unten) — ECharts
+            // ordnet gruppierte Balken einer Kategorie in Serien-Reihenfolge
+            // an, das zuerst gepushte Jahr steht also links. Ohne Radius
+            // (anders als ein früherer Stand hier): die übrigen Balken
+            // dieser Seite (render() oben, chartType 'bar') sind ebenfalls
+            // eckig, dieselbe Optik bleibt auch im Jahresvergleich erhalten.
+            [
+              {year: currentYear, points: s.points, opacity: 1},
+              {year: previousYear, points: s.compare_points, opacity: 0.55},
+            ].forEach(({year, points, opacity}) => {
+              const monthly = monthlyBuckets(points, s.aggregation_type);
+              // withOpacity() statt itemStyle.opacity — der Tooltip-Marker
+              // (ECharts' eigener, s. o.) ignoriert itemStyle/lineStyle.opacity
+              // und zeigte Vorjahr/aktuelles Jahr dadurch mit demselben
+              // satten Farbpunkt an, obwohl der Balken im Chart sichtbar
+              // blasser ist (gemessen).
+              echartsSeries.push({
+                name: `${displayName} (${year})`,
+                type: 'bar',
+                yAxisIndex: unitIndex,
+                barGap: '20%',
+                data: monthly,
+                itemStyle: {color: withOpacity(color, opacity)},
+                tooltip: {valueFormatter},
+              });
+              if (this.compareCumsum) {
+                echartsSeries.push({
+                  name: `${displayName} (${year}) kumuliert`,
+                  type: 'line',
+                  yAxisIndex: cumAxisIndex(axisUnit(s)),
+                  data: cumulate(monthly),
+                  lineStyle: {type: 'dashed', width: 2, color: withOpacity(color, opacity)},
+                  itemStyle: {color: withOpacity(color, opacity)},
+                  symbol: 'none',
+                  z: 4,
+                  tooltip: {valueFormatter},
+                });
+              }
+            });
+          });
+          const uiFontScale = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-scale')) || 1;
+          chartInstance.setOption({
+            toolbox: toolboxOption(
+              this.exportFilename,
+              getComputedStyle(document.body).getPropertyValue('--surface'),
+              getComputedStyle(document.body).getPropertyValue('--ink-faint')
+            ),
+            textStyle: {
+              fontFamily: getComputedStyle(document.body).getPropertyValue('--font-mono'),
+              color: getComputedStyle(document.body).getPropertyValue('--ink-muted'),
+              fontSize: Math.round(12 * uiFontScale * 10) / 10,
+            },
+            // top/left/right deutlich großzügiger als die 24/10/20 der
+            // übrigen Renderpfade: eine zweite, rechte Achse mit langem
+            // Namen ("… kumuliert") saß dort mit dem Toolbox-Download-Icon
+            // (top:0, siehe toolboxOption()) buchstäblich übereinander und
+            // wurde am Kartenrand abgeschnitten — gemessen mit aktiver
+            // Laufsumme bei zwei Einheiten gleichzeitig.
+            grid: {
+              left: visibleAxisCount > 1 ? 20 : 10,
+              right: visibleAxisCount > 1 ? 40 : 24,
+              top: 36, bottom: 40, containLabel: true,
+            },
+            xAxis: {type: 'category', data: MONTHS},
+            yAxis,
+            tooltip: {trigger: 'axis'},
+            series: echartsSeries,
+          }, true);
           chartInstance.resize();
         },
 
