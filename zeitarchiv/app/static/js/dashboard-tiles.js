@@ -1246,7 +1246,8 @@
       // CSS-::after-Tooltip abschneiden würde (siehe fixed-tooltip.js).
       const periodNote = TableCompute.currentPeriodNote(c, isCurrent[ci], windowEnds[ci]);
       const periodTooltipAttr = periodNote ? ` data-tooltip-fixed="${escapeHtml(periodNote)}"` : '';
-      html += `<th${comparisonClass}${colWidthAttr(c.width)}${periodTooltipAttr}>${escapeHtml(TableCompute.resolveLabel(c.label, windowStarts[ci]))}</th>`;
+      const periodHint = periodNote ? '<span class="tbl-period-hint">i</span>' : '';
+      html += `<th${comparisonClass}${colWidthAttr(c.width)}${periodTooltipAttr}>${escapeHtml(TableCompute.resolveLabel(c.label, windowStarts[ci]))}${periodHint}</th>`;
     });
     html += '</tr></thead><tbody>';
     let dataRowIndex = 0;

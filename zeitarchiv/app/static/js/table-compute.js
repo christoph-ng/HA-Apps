@@ -429,11 +429,28 @@ window.TableCompute = (() => {
   }
 
   // Kurzform "TT.MM." (bewusst ohne Jahr — die Spaltenbeschriftung nennt das
-  // Jahr bereits) für den Cutoff einer noch laufenden Spalte, siehe
-  // currentPeriodNote() unten.
+  // Jahr bereits) für den Cutoff einer noch laufenden Woche/Monat/Jahr-
+  // Spalte, siehe shortCutoffText()/currentPeriodNote() unten.
   function shortDateText(epochSeconds) {
     if (epochSeconds == null) return null;
     return new Date(epochSeconds * 1000).toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'});
+  }
+
+  // "HH:MM Uhr" für eine noch laufende Stunde/Tag-Spalte — ein Datum wäre
+  // dort doppelt gemoppelt (die Beschriftung selbst nennt schon den Tag,
+  // z. B. bei einer Vorjahresvergleichs-Spalte "21.09.25") und sagt zudem
+  // nicht, WIE weit der Tag/die Stunde bereits gelaufen ist.
+  function shortTimeText(epochSeconds) {
+    if (epochSeconds == null) return null;
+    return `${new Date(epochSeconds * 1000).toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit'})} Uhr`;
+  }
+
+  // Cutoff-Text passend zum Zeitraumtyp — Uhrzeit bei Stunde/Tag, sonst
+  // Datum (siehe shortDateText()/shortTimeText() oben).
+  function shortCutoffText(rangeKey, epochSeconds) {
+    return (rangeKey === 'hour' || rangeKey === 'day')
+      ? shortTimeText(epochSeconds)
+      : shortDateText(epochSeconds);
   }
 
   // Ausgeschriebene Zeitraum-Phrase für eine noch laufende BASIS-Spalte
@@ -451,23 +468,26 @@ window.TableCompute = (() => {
   // irgendwo erkennbar (siehe Konzept "laufendes Jahr"):
   // * Basis-Spalte (offset 0, kein Vorjahresvergleich): zeigt die noch
   //   laufende, nicht abgeschlossene Periode — Text nennt Zeitraumart UND
-  //   Enddatum ("im laufenden Jahr · bis 21.09.").
+  //   Enddatum ("im laufenden Jahr · bis 21.09."). Nur Woche/Monat/Jahr
+  //   (siehe CURRENT_PERIOD_PHRASE), Stunde/Tag bekommen hier nie einen
+  //   Hinweis.
   // * Vorjahresvergleichs-Spalte (year_over_year): ihr Fenster ist aus
   //   genau demselben, bereits gedeckelten Basis-Fenster gebaut, nur um ein
   //   Jahr verschoben (siehe query.py `_window()`/year_over_year) — fair
   //   für den Vergleich, aber ebenso keine vollständige Periode. Die eigene
-  //   Beschriftung sagt bereits "Vorjahr" o. ä., hier nur das Enddatum.
+  //   Beschriftung sagt bereits "Vorjahr" o. ä. bzw. bei Stunde/Tag das
+  //   Datum selbst — hier nur der Cutoff (Uhrzeit bei Stunde/Tag, sonst
+  //   Datum, siehe shortCutoffText()).
   // null, wenn nichts davon zutrifft: eine abgeschlossene Vor-Spalte
   // (offset < 0 ohne year_over_year) zeigt immer den vollständigen
-  // Zeitraum (siehe _cap() in query.py) und braucht keinen Hinweis, ebenso
-  // Stunde/Tag (siehe CURRENT_PERIOD_PHRASE oben).
+  // Zeitraum (siehe _cap() in query.py) und braucht keinen Hinweis.
   function currentPeriodNote(col, isCurrentCol, windowEnd) {
     if (!isCurrentCol) return null;
-    const date = shortDateText(windowEnd);
-    if (!date) return null;
-    if (col.year_over_year) return `bis ${date}`;
+    const cutoff = shortCutoffText(col.range_key, windowEnd);
+    if (!cutoff) return null;
+    if (col.year_over_year) return `bis ${cutoff}`;
     const phrase = CURRENT_PERIOD_PHRASE[col.range_key];
-    return phrase ? `${phrase} · bis ${date}` : null;
+    return phrase ? `${phrase} · bis ${cutoff}` : null;
   }
 
   // Dieselbe Bedingung wie currentPeriodNote() (über deren Rückgabe geprüft,
@@ -475,7 +495,7 @@ window.TableCompute = (() => {
   // Hover (CSV-Export) statt des ausgeschriebenen Tooltips.
   function currentPeriodShortSuffix(col, isCurrentCol, windowEnd) {
     if (!currentPeriodNote(col, isCurrentCol, windowEnd)) return '';
-    return ` (bis ${shortDateText(windowEnd)})`;
+    return ` (bis ${shortCutoffText(col.range_key, windowEnd)})`;
   }
 
   // Monatsnamen/-kürzel für resolveLabel() unten — dieselbe Wortwahl wie der

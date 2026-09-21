@@ -289,6 +289,25 @@
      das entweder schon über .tbl-label-col (sticky) oder bekommt es hier
      explizit für die übrigen Kopfzellen. */
   .tbl-preview th{position:relative;}
+  /* Sichtbarer Hinweis, dass ein Spaltenkopf einen Tooltip trägt (laufende
+     Basis-Spalte/Vorjahresvergleich, siehe columnPeriodTooltip() in
+     table_editor.js) — ohne ihn war der Tooltip nur per Zufallshover zu
+     entdecken. Inline statt frei positioniert: bei der (Standard-)
+     rechtsbündigen Kopfausrichtung ging ein absolut oben-rechts platzierter
+     Punkt im Text unter — beide wollen dieselbe Ecke. Rein dekorativ
+     (pointer-events:none): der Hover-Auslöser bleibt der ganze th
+     (data-tooltip-fixed sitzt dort). Zweite Farbe für die hervorgehobene
+     Kopfzeile (--accent-line-Hintergrund, siehe .tbl-style-header-accent
+     unten) — --ink-faint wäre dort auf dem Akzent kaum zu erkennen. */
+  .tbl-period-hint{
+    display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
+    border-radius:999px;margin:0 0 1px 5px;vertical-align:middle;pointer-events:none;
+    border:1px solid var(--ink-faint);color:var(--ink-faint);
+    font-family:var(--font-mono);font-size:9px;font-weight:600;
+  }
+  .tbl-style-header-accent .tbl-period-hint{
+    border-color:color-mix(in srgb, var(--accent-contrast) 70%, transparent);color:var(--accent-contrast);
+  }
   .tbl-col-resize-handle{
     position:absolute;top:0;right:-4px;bottom:0;width:8px;cursor:col-resize;
     z-index:4;user-select:none;
