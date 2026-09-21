@@ -32,7 +32,10 @@
               <template x-for="(col, idx) in columns" :key="col.uid">
                 <div class="tbl-col-card" draggable="true" :data-col-uid="col.uid" :class="{'tbl-col-card-hidden': col.hidden}">
                   <div class="tbl-col-top">
-                    <span class="drag-handle" data-tooltip="Ziehen zum Verschieben" aria-hidden="true"></span>
+                    <span class="tbl-col-top-left">
+                      <span class="drag-handle" data-tooltip="Ziehen zum Verschieben" aria-hidden="true"></span>
+                      <span class="tbl-col-number" x-text="idx + 1"></span>
+                    </span>
                     <span class="tbl-col-move">
                       <button type="button" data-tooltip="Spalte nach links" :disabled="idx === 0" @click="moveColumn(col.uid, -1)">←</button>
                       <button type="button" data-tooltip="Spalte nach rechts" :disabled="idx === columns.length - 1" @click="moveColumn(col.uid, 1)">→</button>
@@ -347,6 +350,35 @@
         </template>
 
         <div class="tbl-preview-card">
+        <!-- Spalten-Kürzel, analog zu .tbl-letters-gutter unten: ebenfalls
+             außerhalb von .tbl-wrap (schwebt auf der Kartenfläche statt
+             innerhalb des Tabellenrahmens zu stehen) und nur beim Bearbeiten
+             sichtbar. Anders als die Zeilen-Buchstaben aber NICHT mit
+             top/height aus einer einmaligen Messung positioniert — diese
+             Tabelle scrollt horizontal (.tbl-wrap, overflow-x:auto), ein nur
+             bei Größenänderung neu gemessener Gutter liefe bei jedem
+             Scrollen sofort auseinander. .tbl-numbers-gutter clippt deshalb
+             (overflow:hidden) auf die sichtbare Breite, und ihr Inhalt
+             (.tbl-numbers-track, x-ref="numbersTrack") bekommt bei jedem
+             scroll-Event auf .tbl-wrap per onPreviewScroll() denselben
+             transform:translateX() wie das scrollLeft der echten Tabelle —
+             dieselbe scrollLeft-Sync-Technik wie ein eingefrorener
+             Tabellenkopf, nur ohne die Tabelle selbst zu verändern.
+             .tbl-numbers-spacer hält denselben 26px-Abstand wie
+             .tbl-letters-gutter darunter, damit die Zahlen über der
+             richtigen (um den Buchstaben-Gutter versetzten) Spalte stehen. -->
+        <div class="tbl-preview-numbers-row" x-show="editing" x-cloak>
+          <div class="tbl-numbers-spacer" aria-hidden="true"></div>
+          <div class="tbl-numbers-gutter">
+            <div class="tbl-numbers-track" x-ref="numbersTrack" :style="`width:${numbersTrackWidth}px`">
+              <template x-for="(col, idx) in columns" :key="col.uid">
+                <div class="tbl-col-number-slot" x-show="!col.hidden" :style="colNumberSlotStyle(col.uid)">
+                  <span class="tbl-col-number" x-text="idx + 1"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
         <div class="tbl-preview-row">
           <!-- Nur beim Bearbeiten sichtbar, bewusst außerhalb von .tbl-wrap
                — siehe Kommentar bei .tbl-letters-gutter oben im CSS. Position
@@ -360,7 +392,7 @@
               </div>
             </template>
           </div>
-          <div class="tbl-wrap tbl-preview" :class="{'tbl-preview-scroll': style.sticky_header}">
+          <div class="tbl-wrap tbl-preview" :class="{'tbl-preview-scroll': style.sticky_header}" x-ref="previewWrap" @scroll="onPreviewScroll()">
             <table class="dt compact" :class="TableCompute.styleClasses(style)" x-ref="previewTable">
               <!-- Nur für "Spalten gleichmäßig" (table-layout:fixed) relevant
                    — <col>-Breiten sind bei fixed layout die einzige robuste,
@@ -388,7 +420,7 @@
                   <span class="tbl-col-resize-handle" x-show="editing" @mousedown.stop.prevent="startLabelColResize($event)" @dblclick.stop.prevent="style.label_col_width = null" data-tooltip="Ziehen zum Verändern der Breite, Doppelklick für automatische Breite"></span>
                 </th>
                 <template x-for="col in columns" :key="col.uid">
-                  <th x-show="!col.hidden" :class="{'tbl-comparison-col': isComparisonColumn(col)}" :style="colWidthStyle(col)" :data-tooltip-fixed="columnPeriodTooltip(col)">
+                  <th x-show="!col.hidden" :class="{'tbl-comparison-col': isComparisonColumn(col)}" :style="colWidthStyle(col)" :data-tooltip-fixed="columnPeriodTooltip(col)" :data-col-uid="col.uid">
                     <span x-text="renderedColumnLabel(col)"></span>
                     <span class="tbl-period-hint" x-show="columnPeriodTooltip(col)">i</span>
                     <span class="tbl-col-resize-handle" x-show="editing" @mousedown.stop.prevent="startColResize($event, col)" @dblclick.stop.prevent="col.width = null" data-tooltip="Ziehen zum Verändern der Breite, Doppelklick für automatische Breite"></span>

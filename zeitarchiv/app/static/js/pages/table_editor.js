@@ -294,6 +294,8 @@
         valueAlignPickerOpen: false,
         letterPositions: {},  // row.uid -> {top, height} in px, aus der echten Tabelle gemessen
         gutterHeight: 0,
+        colNumberPositions: {},  // col.uid -> {left, width} in px, aus der echten Tabelle gemessen
+        numbersTrackWidth: 0,  // Gesamtbreite der Tabelle — Breite von .tbl-numbers-track
 
         // Buchstaben-Zuordnung bewusst über ALLE Zeilen (auch ausgeblendete)
         // — sonst würde eine Formel, die auf eine versteckte Hilfszeile
@@ -906,13 +908,64 @@
           table.style.setProperty('--tbl-group-header-h', groupH + 'px');
         },
 
+        // Position/Breite EINES Zahlen-Badges in .tbl-numbers-track — aus
+        // colNumberPositions (von syncColumnNumberPositions() gemessen).
+        // Kein top/height wie bei letterSlotStyle() (die Zeile ist immer
+        // gleich hoch), sondern left/width, da Spalten unterschiedlich
+        // breit sind. Ohne Eintrag bleibt der Slot unsichtbar statt bei 0/0
+        // zu "kleben" — dieselbe Begründung wie letterSlotStyle().
+        colNumberSlotStyle(colUid) {
+          const p = this.colNumberPositions[colUid];
+          if (!p) return 'display:none;';
+          return `left:${p.left}px;width:${p.width}px;`;
+        },
+        // Liest die TATSÄCHLICH gerenderten Spalten-Positionen der echten
+        // Tabelle aus (analog zu syncLetterPositions() oben, nur horizontal
+        // statt vertikal — der Kopfzeilen-th trägt dafür data-col-uid).
+        // left ist relativ zum linken Tabellenrand, bleibt also unabhängig
+        // vom aktuellen Scroll-Stand korrekt (Tabelle UND th verschieben
+        // sich beim Scrollen um denselben Betrag, die Differenz ändert sich
+        // nicht) — nur das SICHTBARE Fenster (.tbl-numbers-gutter,
+        // overflow:hidden) muss dem Scrollen folgen, siehe
+        // onPreviewScroll() unten.
+        syncColumnNumberPositions() {
+          const table = this.$refs.previewTable;
+          if (!table || !table.isConnected) return;
+          const tableRect = table.getBoundingClientRect();
+          const headerRow = Array.from(table.querySelectorAll('tr.tbl-header-row'))
+            .find(tr => !tr.classList.contains('tbl-group-header-row'));
+          if (!headerRow) return;
+          const positions = {};
+          headerRow.querySelectorAll('th[data-col-uid]').forEach(th => {
+            if (th.offsetParent === null) return;
+            const r = th.getBoundingClientRect();
+            positions[th.dataset.colUid] = {left: r.left - tableRect.left, width: r.width};
+          });
+          this.colNumberPositions = positions;
+          this.numbersTrackWidth = tableRect.width;
+          this.onPreviewScroll();
+        },
+        // .tbl-numbers-gutter clippt (overflow:hidden) auf die sichtbare
+        // Breite von .tbl-wrap — ihr Inhalt (.tbl-numbers-track, dieselbe
+        // Gesamtbreite wie die echte Tabelle) folgt per transform exakt
+        // demselben scrollLeft, statt selbst zu scrollen. Dieselbe Technik
+        // wie ein "eingefrorener" Tabellenkopf, ohne die echte Tabelle
+        // anzufassen.
+        onPreviewScroll() {
+          const wrap = this.$refs.previewWrap;
+          const track = this.$refs.numbersTrack;
+          if (wrap && track) track.style.transform = `translateX(${-wrap.scrollLeft}px)`;
+        },
+
         init() {
           this.load();
           // .tbl-columns/.tbl-rows stecken in einem x-if="editing" — bei
           // jedem Wechsel auf "editing" wird der Container neu erzeugt (der
           // dragBound-Marker geht dabei verloren), deshalb hier neu binden,
           // nicht nur einmalig beim ersten Laden.
-          this.$watch('editing', v => { if (v) this.$nextTick(() => { setupColumnDrag(); setupRowDrag(); this.syncLetterPositions(); }); });
+          this.$watch('editing', v => {
+            if (v) this.$nextTick(() => { setupColumnDrag(); setupRowDrag(); this.syncLetterPositions(); this.syncColumnNumberPositions(); });
+          });
           if (this.editing) this.$nextTick(() => { setupColumnDrag(); setupRowDrag(); });
           // ResizeObserver statt einzelner Watcher auf rows/columns/style —
           // jede Änderung, die die Zeilenhöhen der echten Tabelle beeinflussen
@@ -920,13 +973,17 @@
           // geladene Werte ändern die Zellenbreite/Umbruch, Schriftgrößen-
           // Skalierung), ändert zwangsläufig auch deren Gesamthöhe — genau
           // das beobachtet der ResizeObserver, ganz ohne jede einzelne
-          // mögliche Ursache selbst auflisten zu müssen.
+          // mögliche Ursache selbst auflisten zu müssen. Dieselbe Größen-
+          // änderung kann auch Spaltenbreiten verschieben (z. B. Spalte
+          // hinzugefügt/entfernt/versteckt), deshalb hier auch die
+          // Spalten-Positionen neu messen.
           this.$nextTick(() => {
             const table = this.$refs.previewTable;
             if (table && window.ResizeObserver) {
-              new ResizeObserver(() => this.syncLetterPositions()).observe(table);
+              new ResizeObserver(() => { this.syncLetterPositions(); this.syncColumnNumberPositions(); }).observe(table);
             }
             this.syncLetterPositions();
+            this.syncColumnNumberPositions();
           });
         },
       };
