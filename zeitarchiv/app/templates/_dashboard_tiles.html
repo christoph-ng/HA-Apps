@@ -172,18 +172,19 @@
               <span class="dtile-entity-number">{{ tile.value_text }}</span>
               {% if tile.unit %}<span class="dtile-entity-unit">{{ tile.unit }}</span>{% endif %}
             </span>
-            {# Der Zeitraum steht genau einmal auf der Kachel (siehe
-               _tile_metric_context() in main.py): hier nur, wenn es keine
-               Kennzahlen-Zeile gibt, die ihn sonst trägt. Alter nur bei
-               einem echten Momentanwert (primary_metric == 'last') — bei
-               einem Aggregations-Hauptwert sagt "vor X" über den letzten
-               Rohpunkt nichts über den angezeigten Zeitraum-Durchschnitt
-               aus; ist der Zeitraum-Hinweis dort per show_period
-               abgeschaltet, bleibt die Zeile leer statt einen irreführenden
-               Alterswert zu zeigen. #}
+            {# Zeitraum (siehe _tile_metric_context() in main.py, nur wenn es
+               keine Kennzahlen-Zeile gibt, die ihn sonst trägt) und Alter
+               sind unabhängig voneinander — schließen sich nicht aus. Anders
+               als anfangs angenommen ist "vor X" keine Aussage über den
+               angezeigten Wert (der bei einem Aggregations-Hauptwert ein
+               Zeitraum-Durchschnitt sein kann), sondern über die Aktualität
+               der Entität selbst — sinnvoll unabhängig vom Hauptwert
+               (Nutzer-Feedback 2026-09-22, nachdem beide Angaben nebeneinander
+               zu sehen waren: "da schliesst sich nichts gegenseitig aus"). #}
             {% if tile.show_period_in_value_row %}
             <span class="dtile-entity-period">{{ tile.range_label }}</span>
-            {% elif tile.show_age and tile.primary_metric == 'last' %}
+            {% endif %}
+            {% if tile.show_age %}
             <span class="dtile-entity-age" title="Letzte Aktualisierung">{{ tile.age_text }}</span>
             {% endif %}
           </div>

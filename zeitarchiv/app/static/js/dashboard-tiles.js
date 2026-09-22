@@ -1965,25 +1965,20 @@
               : body.appendChild(zeile);
           }
 
-          // Der Zeitraum steht genau einmal — in der Wert-Zeile nur dann,
-          // wenn es keine Kennzahlen-Zeile gibt, die ihn trägt. Alter nur
-          // bei echtem Momentanwert (primary_metric 'last', siehe
-          // gleichlautender Kommentar in _dashboard_tiles.html) — sonst
-          // bliebe die Zeile bei abgeschaltetem show_period leer statt
-          // einen für einen Aggregations-Hauptwert irreführenden
-          // Alterswert zu zeigen.
+          // Zeitraum (in der Wert-Zeile nur dann, wenn es keine
+          // Kennzahlen-Zeile gibt, die ihn trägt) und Alter sind unabhängig
+          // voneinander — schließen sich nicht aus (siehe gleichlautender
+          // Kommentar in _dashboard_tiles.html).
           const wertZeile = body.querySelector('.dtile-entity-value');
           wertZeile?.querySelector('.dtile-entity-period')?.remove();
-          const alter = wertZeile?.querySelector('.dtile-entity-age');
           if (ctx.show_period_in_value_row) {
-            if (alter) alter.hidden = true;
             const periode = document.createElement('span');
             periode.className = 'dtile-entity-period';
             periode.textContent = ctx.range_label;
             wertZeile?.appendChild(periode);
-          } else if (alter) {
-            alter.hidden = body.dataset.showAge !== 'true' || ctx.primary_metric !== 'last';
           }
+          const alter = wertZeile?.querySelector('.dtile-entity-age');
+          if (alter) alter.hidden = body.dataset.showAge !== 'true';
 
           // Popup-Zustand nachziehen: der Hauptwert sperrt seinen Eintrag in
           // der Kennzahlen-Zeile, deshalb reicht kein reines Umfärben.
