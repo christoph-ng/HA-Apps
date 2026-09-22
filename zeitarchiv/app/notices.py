@@ -451,7 +451,7 @@ def build_notices(
 
     # mismatches: der automatische Hintergrundabgleich repariert sie immer
     # sofort (main.py _run_storage_reconcile, repair=True) — dann nur info,
-    # rein zur Kenntnis. Ein MANUELLER Klick auf "Index prüfen" ist dagegen
+    # rein zur Kenntnis. Ein MANUELLER Klick auf "Speicher prüfen" ist dagegen
     # zunächst nur lesend (siehe _settings_storage_index_form.html); bleiben
     # dabei gefundene Abweichungen unrepariert stehen, ist das noch zu tun —
     # dann warn, weil eine echte Handlung (Button "Index reparieren") fehlt.
