@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.0.0 - 2026-09-22
+
+### Neu
+
+- Werte-Kacheln: dieselbe Entität lässt sich jetzt mehrfach mit
+  unterschiedlichen Einstellungen (z. B. Hauptwert oder Zeitraum) anheften.
+- Werte-Kachel: Zeitraum-Etikett lässt sich ein-/ausblenden, unabhängig von
+  „Letzte Aktualisierung" — beide gleichzeitig anzeigbar.
+- Laufende, noch nicht abgeschlossene Zeiträume (Woche/Monat/Jahr) sind
+  jetzt überall als solche erkennbar — Energiedashboard, Energiebericht und
+  Vergleichstabellen zeigen, bis wann die Daten tatsächlich reichen.
+- Tabellen-Editor: Spalten sind jetzt wie die Zeilen nummeriert, auch in der
+  Vorschau-Tabelle sichtbar.
+- Backup/Restore: nach einer vorgemerkten Wiederherstellung fragt ein
+  Dialog aktiv nach einem Neustart. Der vorherige Stand lässt sich jetzt
+  direkt wiederherstellen statt nur gelöscht zu werden, und erscheint im
+  Ausführungsverlauf.
+- Housekeeping → Speicherplatz: neuer Bereich „Datenintegrität" zeigt, ob
+  die gespeicherten Rohdaten selbst noch lesbar sind.
+- Housekeeping → Speicherplatz: Liste „Markierte Datensätze" jetzt
+  seitenweise blätterbar.
+
+### Geändert
+
+- Housekeeping → Speicherplatz: Knopf „Index prüfen" heißt jetzt „Speicher
+  prüfen".
+- Ein paar neue Tipps im Meldungs-Center.
+
+### Behoben
+
+- Index-Optimierung konnte in seltenen Fällen die Datenbank beschädigen;
+  behoben, jetzt mit Bestätigungsdialog und sichtbarem Fortschritt.
+- Die Kachel „Größe" auf Übersicht und Statistik zeigte nur das Archiv,
+  nicht die Summe aus Archiv, Rollups und Hot Buffer.
+- Nach dem Löschen oder Erstellen eines Backups erschien manchmal fälschlich
+  die Meldung einer vorherigen Wiederherstellung.
+- Eine beschädigte Zeile im Hot Buffer (z. B. nach einem Stromausfall)
+  konnte Abfragen und den Wartungsplaner zum Absturz bringen — wird jetzt
+  übersprungen statt die App zu blockieren.
+
 ## 0.99.0 - 2026-09-20
 
 ### Neu
