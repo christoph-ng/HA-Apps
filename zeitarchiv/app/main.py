@@ -1735,7 +1735,7 @@ def _backup_list_context(sort: str = "created_at", direction: str = "desc", page
 
 
 def _backup_context(
-    *, message: str | None = None,
+    *, message: str | None = None, offer_restart: bool = False,
     sort: str = "created_at", direction: str = "desc", page: int = 1, page_size: int = 10,
 ) -> dict:
     with _background.backup_progress.lock:
@@ -1762,6 +1762,29 @@ def _backup_context(
             "size": format_size(job["size_bytes"] or 0) if job["size_bytes"] else "—",
             "error": job["error"],
         })
+    rollbacks = [
+        {
+            "name": row["name"],
+            "size": format_size(row["size_bytes"]),
+            "created_at": (
+                f"{format_timestamp(row['created_at'], TZ)} {format_time(row['created_at'], TZ)}"
+                if row["created_at"] is not None else "—"
+            ),
+        }
+        for row in backup.list_restore_rollback_details(DATA_DIR)
+    ]
+    for event in backup.list_restore_events(DATA_DIR):
+        jobs.append({
+            "trigger": "Wiederherstellung",
+            "status": "Erfolgreich",
+            "status_key": "success",
+            "created_at": f"{format_timestamp(event['created_at'], TZ)} {format_time(event['created_at'], TZ)}",
+            "created_at_ts": event["created_at"],
+            "duration": "—",
+            "size": format_size(event["size_bytes"]) if event["size_bytes"] else "—",
+            "error": None,
+        })
+    jobs.sort(key=lambda job: job["created_at_ts"], reverse=True)
 
     next_raw = index.get_setting("backup_schedule_next_run", "")
     try:
@@ -1801,7 +1824,7 @@ def _backup_context(
     if message is None and _restore_startup_result:
         if _restore_startup_result.get("success"):
             message = (
-                f"Backup {_restore_startup_result['filename']} wurde wiederhergestellt. "
+                f"{_restore_startup_result['source']} wurde wiederhergestellt. "
                 f"Der vorherige Stand liegt in {_restore_startup_result['rollback']}."
             )
         else:
@@ -1812,10 +1835,11 @@ def _backup_context(
         "total": total,
         "percent": percent,
         "backup_message": message,
+        "backup_offer_restart": offer_restart,
         "backup_warnings": warnings,
         **_backup_list_context(sort, direction, page, page_size),
         "backup_jobs": jobs,
-        "backup_rollbacks": backup.list_restore_rollbacks(DATA_DIR),
+        "backup_rollbacks": rollbacks,
         "backup_schedule": schedule_value,
         "backup_schedule_options": list(BACKUP_SCHEDULE_LABELS.items()),
         "backup_schedule_time": index.get_setting("backup_schedule_time", BACKUP_DEFAULT_TIME),
@@ -1995,8 +2019,34 @@ def backup_restore_prepare(request: Request, filename: str) -> HTMLResponse:
         request,
         "_settings_backup_ready.html",
         _backup_context(
-            message="Wiederherstellung vorbereitet. Bitte das Zeitarchiv-Add-on neu starten; "
-                    "vor dem Öffnen der Datenbank wird das Backup eingespielt und der aktuelle Stand als Rollback behalten."
+            message="Wiederherstellung vorbereitet. Das Backup wird beim nächsten Start eingespielt, "
+                    "der aktuelle Stand bleibt als Rollback erhalten.",
+            offer_restart=True,
+        ),
+    )
+
+
+@app.post("/backup/rollback/restore/{name}", response_class=HTMLResponse)
+def backup_rollback_restore(request: Request, name: str) -> HTMLResponse:
+    """Merkt einen Rollback-Stand für den Neustart vor — dasselbe Vormerk-
+    Prinzip wie backup_restore_prepare(), nur mit einem Rollback-Verzeichnis
+    statt einem Backup-ZIP als Quelle (Konzept "Restore-Rollbacks",
+    22.09.2026: bislang ließ sich ein Rollback nur löschen, nie einspielen)."""
+    try:
+        backup.prepare_restore_from_rollback(DATA_DIR, name)
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request,
+            "_settings_backup_ready.html",
+            _backup_context(message=f"Wiederherstellung nicht vorbereitet: {exc}"),
+        )
+    return templates.TemplateResponse(
+        request,
+        "_settings_backup_ready.html",
+        _backup_context(
+            message="Wiederherstellung vorbereitet. Der gewählte Rollback-Stand wird beim nächsten "
+                    "Start eingespielt, der aktuelle Stand bleibt zusätzlich als neuer Rollback erhalten.",
+            offer_restart=True,
         ),
     )
 
@@ -2011,6 +2061,24 @@ def backup_rollback_delete(request: Request, name: str) -> HTMLResponse:
         request,
         "_settings_backup_ready.html",
         _backup_context(message="Rollback-Daten wurden gelöscht."),
+    )
+
+
+@app.post("/system/restart", response_class=HTMLResponse)
+def system_restart(request: Request) -> HTMLResponse:
+    """Ziel des "Jetzt neu starten"-Dialogs nach einem vorgemerkten Restore
+    (siehe backup_restore_prepare()/backup_rollback_restore()) — ruft die
+    Supervisor-Selbst-Neustart-API auf (supervisor_stats.restart_addon(),
+    dasselbe Zugriffsmuster wie die RAM-Anzeige). Außerhalb eines
+    HA-Supervisors (z. B. lokale Entwicklung) kommt eine klare Fehlermeldung
+    zurück statt eines stillen Fehlschlags."""
+    try:
+        supervisor_stats.restart_addon()
+        message = "Neustart angefordert — die Seite lädt in Kürze neu."
+    except RuntimeError as exc:
+        message = f"Automatischer Neustart nicht möglich: {exc}. Bitte das Add-on manuell neu starten."
+    return templates.TemplateResponse(
+        request, "_settings_backup_ready.html", _backup_context(message=message),
     )
 
 
@@ -2096,14 +2164,23 @@ def _storage_breakdown() -> list[dict]:
     Walks bei jedem Diagnose-Download (siehe ROADMAP.md, Performance ZP-011).
     "rollup" bleibt ein echter Walk: der Index führt Rollup-Dateigrößen nicht
     mit, nur Archiv-Parquet-Größen. Alle übrigen Kategorien (Hot Buffer,
-    Import, Backups) sind ohnehin nicht im Index abgebildet."""
+    Import, Backups) sind ohnehin nicht im Index abgebildet.
+
+    "backups" zählt neben den Backup-ZIPs auch die Restore-Rollbacks mit
+    (Konzept "Restore-Rollbacks", 22.09.2026) — die liegen als volle Kopien
+    von BACKUP_ENTRIES direkt unter DATA_DIR, nicht unter backups/, würden
+    sonst aber unsichtbar Speicherplatz belegen, den diese Aufschlüsselung
+    eigentlich vollständig erklären soll."""
     index_path = DATA_DIR / "index.sqlite"
+    rollback_bytes = sum(
+        row["size_bytes"] for row in backup.list_restore_rollback_details(DATA_DIR)
+    )
     return [
         {"key": "archive", "label": "Archiv", "bytes": index.get_overview()["total_size_bytes"]},
         {"key": "rollup", "label": "Rollups", "bytes": dir_size(DATA_DIR / "rollup")},
         {"key": "hot", "label": "Laufender Monat (Hot Buffer)", "bytes": dir_size(DATA_DIR / "hot")},
         {"key": "index", "label": "Index", "bytes": index_path.stat().st_size if index_path.exists() else 0},
-        {"key": "backups", "label": "Backups", "bytes": dir_size(DATA_DIR / "backups")},
+        {"key": "backups", "label": "Backups", "bytes": dir_size(DATA_DIR / "backups") + rollback_bytes},
         {"key": "reports", "label": "Import-Reports", "bytes": dir_size(DATA_DIR / "reports")},
         {
             "key": "import",

@@ -1,7 +1,8 @@
-"""Abruf des aktuellen RAM-Verbrauchs dieses Addon-Containers über die
-Home-Assistant-Supervisor-API (Konzept "Über Zeitarchiv": RAM-Anzeige).
-Dasselbe Zugriffsmuster wie log_source.fetch_supervisor_log_text (Token aus
-SUPERVISOR_TOKEN, http://supervisor/..., 5s Timeout)."""
+"""Zugriffe auf die Home-Assistant-Supervisor-API für dieses Addon: RAM-
+Verbrauch (Konzept "Über Zeitarchiv") und Selbst-Neustart nach einem Restore
+(Konzept "Restore-Rollbacks", 22.09.2026). Dasselbe Zugriffsmuster wie
+log_source.fetch_supervisor_log_text (Token aus SUPERVISOR_TOKEN,
+http://supervisor/..., kurzer Timeout)."""
 
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SUPERVISOR_STATS_URL = "http://supervisor/addons/self/stats"
+SUPERVISOR_RESTART_URL = "http://supervisor/addons/self/restart"
 
 
 def fetch_memory_usage_bytes() -> int:
@@ -47,6 +49,41 @@ def fetch_memory_usage_bytes() -> int:
         return int(payload["data"]["memory_usage"])
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("Supervisor-Statistik hat unerwartetes Format") from exc
+
+
+def restart_addon() -> None:
+    """Startet dieses Addon über die Supervisor-API neu — für den
+    "Jetzt neu starten"-Dialog nach einem vorgemerkten Restore (Konzept
+    "Restore-Rollbacks"): ein Restore wird erst beim nächsten Start
+    eingespielt, vorher bleibt die alte Datenbank offen. Wirft RuntimeError,
+    wenn kein Supervisor verfügbar ist (z. B. lokale Entwicklung) oder der
+    Aufruf fehlschlägt — der Aufrufer zeigt dann den Hinweis, manuell neu zu
+    starten, statt eines stillen Fehlers.
+
+    Kehrt normal zurück, sobald Supervisor den Neustart ENTGEGENGENOMMEN
+    hat — der Container selbst lebt zu dem Zeitpunkt meist noch kurz weiter,
+    genug, um diese Antwort noch auszuliefern, bevor er tatsächlich fällt."""
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        raise RuntimeError("Supervisor ist in dieser Umgebung nicht verfügbar")
+    request = urllib.request.Request(
+        SUPERVISOR_RESTART_URL,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "Zeitarchiv/Restart",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise RuntimeError("Neustart über Supervisor fehlgeschlagen") from exc
+    if payload.get("result") != "ok":
+        raise RuntimeError(
+            f"Supervisor meldete: {payload.get('message') or 'unbekannter Fehler'}"
+        )
 
 
 def describe_memory_usage() -> str:

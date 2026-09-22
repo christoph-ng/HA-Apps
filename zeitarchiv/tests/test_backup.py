@@ -3,6 +3,7 @@ gehören (und welche bewusst nicht), Fortschritts-Callback, atomares Schreiben."
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -460,6 +461,228 @@ def test_restore_moves_away_stale_wal_sidecars() -> None:
         rollback_dir = tmp / result["rollback"]
         assert (rollback_dir / "index.sqlite-wal").read_bytes() == b"stale-wal"
         assert (rollback_dir / "index.sqlite-shm").read_bytes() == b"stale-shm"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_apply_pending_restore_writes_restore_info_into_the_rollback() -> None:
+    """Grundlage für list_restore_events() (Ausführungsverlauf auf der
+    Backup-Seite, Konzept "Restore-Rollbacks", 22.09.2026): jedes neu
+    angelegte Rollback-Verzeichnis trägt seine eigene Herkunft."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-restore-info-test-"))
+    try:
+        backups_dir = tmp / "backups"
+        conn = sqlite3.connect(tmp / "index.sqlite")
+        conn.execute("CREATE TABLE sample (value TEXT)")
+        conn.commit()
+        conn.close()
+        dest = backups_dir / "zeitarchiv-backup-2026-08-24-143000.zip"
+        backup.create_backup(tmp, dest, consistent_sqlite=True)
+
+        backup.prepare_restore(tmp, backups_dir, dest.name)
+        result = backup.apply_pending_restore(tmp, backups_dir)
+
+        assert result and result["success"] is True
+        assert result["source"] == dest.name
+        info_path = tmp / result["rollback"] / backup.RESTORE_INFO_NAME
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        assert info["source"] == dest.name
+        assert info["installed_size_bytes"] > 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_a_rollback_can_itself_be_restored() -> None:
+    """Bislang ließ sich ein Rollback nur löschen, nie tatsächlich
+    einspielen. prepare_restore_from_rollback() + apply_pending_restore()
+    holen den Stand zurück UND legen dabei selbst einen frischen Rollback
+    des Zwischenstands an, bevor der alte Rollback (RESTORE_ROLLBACK_KEEP_
+    COUNT == 1) automatisch wegfällt — dessen Inhalt ist zu dem Zeitpunkt
+    aber bereits live, geht also nicht verloren."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-rollback-restore-test-"))
+    try:
+        backups_dir = tmp / "backups"
+        conn = sqlite3.connect(tmp / "index.sqlite")
+        conn.execute("CREATE TABLE sample (value TEXT)")
+        conn.execute("INSERT INTO sample VALUES ('original')")
+        conn.commit()
+        conn.close()
+        dest = backups_dir / "zeitarchiv-backup-2026-08-24-143000.zip"
+        backup.create_backup(tmp, dest, consistent_sqlite=True)
+
+        conn = sqlite3.connect(tmp / "index.sqlite")
+        conn.execute("UPDATE sample SET value = 'first-restore'")
+        conn.commit()
+        conn.close()
+        backup.prepare_restore(tmp, backups_dir, dest.name)
+        first = backup.apply_pending_restore(tmp, backups_dir)
+        assert first and first["success"] is True
+        first_rollback_name = first["rollback"]
+
+        conn = sqlite3.connect(tmp / "index.sqlite")
+        conn.execute("UPDATE sample SET value = 'second-change'")
+        conn.commit()
+        conn.close()
+
+        backup.prepare_restore_from_rollback(tmp, first_rollback_name)
+        second = backup.apply_pending_restore(tmp, backups_dir)
+
+        assert second and second["success"] is True
+        assert second["rollback"] != first_rollback_name
+        assert f"Rollback {first_rollback_name}" in second["source"]
+        restored = sqlite3.connect(tmp / "index.sqlite")
+        assert restored.execute("SELECT value FROM sample").fetchone()[0] == "first-restore"
+        restored.close()
+        newest_rollback = sqlite3.connect(tmp / second["rollback"] / "index.sqlite")
+        assert newest_rollback.execute("SELECT value FROM sample").fetchone()[0] == "second-change"
+        newest_rollback.close()
+        # Der ursprüngliche Rollback ist weg (RESTORE_ROLLBACK_KEEP_COUNT == 1)
+        # — kein Datenverlust, sein Inhalt ('first-restore') ist gerade erst
+        # live gegangen, steht also ohnehin schon in der aktuellen Datenbank.
+        assert not (tmp / first_rollback_name).is_dir()
+        assert backup.list_restore_rollbacks(tmp) == [second["rollback"]]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_prepare_restore_from_rollback_rejects_bad_names() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-rollback-guard-test-"))
+    try:
+        for bad in ("../etc", "not-a-rollback", ".zeitarchiv-restore-rollback-20260101T000000Z/../x"):
+            try:
+                backup.prepare_restore_from_rollback(tmp, bad)
+                raise AssertionError(f"Ungültiger Name wurde akzeptiert: {bad}")
+            except ValueError:
+                pass
+        # Formal gültiger Name, aber es gibt das Verzeichnis nicht.
+        try:
+            backup.prepare_restore_from_rollback(tmp, ".zeitarchiv-restore-rollback-20260101T000000Z")
+            raise AssertionError("Nicht vorhandenes Rollback wurde akzeptiert")
+        except ValueError:
+            pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_list_restore_events_tolerates_a_rollback_without_restore_info() -> None:
+    """Rollbacks, die vor restore-info.json entstanden sind, sollen trotzdem
+    als Zeile im Ausführungsverlauf auftauchen — nur ohne bekannte Quelle,
+    statt sie wegzulassen. Beide Rollbacks hier von Hand angelegt (statt über
+    apply_pending_restore()), damit das automatische Pruning
+    (RESTORE_ROLLBACK_KEEP_COUNT == 1) den älteren nicht gleich wieder
+    entfernt — geprüft wird hier ausschließlich list_restore_events()."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-restore-events-test-"))
+    try:
+        old_style = tmp / ".zeitarchiv-restore-rollback-20260101T000000Z"
+        old_style.mkdir(parents=True)
+
+        new_style = tmp / ".zeitarchiv-restore-rollback-20260201T000000Z"
+        new_style.mkdir(parents=True)
+        (new_style / "index.sqlite").write_bytes(b"x" * 42)
+        (new_style / backup.RESTORE_INFO_NAME).write_text(
+            json.dumps({
+                "source": "zeitarchiv-backup-2026-01-31-030000.zip",
+                "installed_size_bytes": 42,
+            }),
+            encoding="utf-8",
+        )
+
+        events = backup.list_restore_events(tmp)
+        assert len(events) == 2
+        by_rollback = {e["rollback"]: e for e in events}
+        assert by_rollback[old_style.name]["source"] is None
+        assert by_rollback[new_style.name]["source"] == "zeitarchiv-backup-2026-01-31-030000.zip"
+        assert by_rollback[new_style.name]["size_bytes"] == 42
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_prune_restore_rollbacks_keeps_only_the_newest_one_by_default() -> None:
+    """Jedes Rollback ist eine volle Kopie des Datenbestands — ein Rollback
+    macht nur den LETZTEN Restore rückgängig, nicht mehr (Konzept
+    "Restore-Rollbacks", 22.09.2026: alles Ältere holt man sich über ein
+    echtes Backup zurück, nicht über eine Rollback-Kette), deshalb
+    RESTORE_ROLLBACK_KEEP_COUNT == 1 statt konfigurierbar."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-rollback-prune-test-"))
+    try:
+        names = [
+            f".zeitarchiv-restore-rollback-2026010{n}T000000Z" for n in range(1, 4)
+        ]
+        for name in names:
+            (tmp / name).mkdir()
+
+        removed = backup.prune_restore_rollbacks(tmp)
+
+        assert removed == 2
+        assert backup.list_restore_rollbacks(tmp) == [names[-1]]  # nur der jüngste
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_prune_restore_rollbacks_respects_an_explicit_keep_count() -> None:
+    """keep_count bleibt als Parameter allgemein nutzbar, auch wenn
+    apply_pending_restore() ihn immer mit dem Standardwert 1 aufruft."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-rollback-prune-explicit-test-"))
+    try:
+        names = [
+            f".zeitarchiv-restore-rollback-2026010{n}T000000Z" for n in range(1, 6)
+        ]
+        for name in names:
+            (tmp / name).mkdir()
+
+        removed = backup.prune_restore_rollbacks(tmp, keep_count=3)
+
+        assert removed == 2
+        assert set(backup.list_restore_rollbacks(tmp)) == set(names[-3:])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_apply_pending_restore_prunes_automatically() -> None:
+    """Das Limit greift nicht nur isoliert (siehe oben), sondern auch am
+    tatsächlichen Auslöser: jeder neu angelegte Rollback räumt selbst auf."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-rollback-autoprune-test-"))
+    try:
+        for n in range(1, 3):
+            (tmp / f".zeitarchiv-restore-rollback-2026010{n}T000000Z").mkdir()
+        assert len(backup.list_restore_rollbacks(tmp)) == 2
+
+        backups_dir = tmp / "backups"
+        conn = sqlite3.connect(tmp / "index.sqlite")
+        conn.execute("CREATE TABLE sample (value TEXT)")
+        conn.commit()
+        conn.close()
+        dest = backups_dir / "zeitarchiv-backup-2026-08-24-143000.zip"
+        backup.create_backup(tmp, dest, consistent_sqlite=True)
+        backup.prepare_restore(tmp, backups_dir, dest.name)
+        result = backup.apply_pending_restore(tmp, backups_dir)
+
+        assert result and result["success"] is True
+        assert backup.list_restore_rollbacks(tmp) == [result["rollback"]]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_list_restore_rollback_details_reports_size_and_timestamp() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-rollback-details-test-"))
+    try:
+        backups_dir = tmp / "backups"
+        conn = sqlite3.connect(tmp / "index.sqlite")
+        conn.execute("CREATE TABLE sample (value TEXT)")
+        conn.commit()
+        conn.close()
+        dest = backups_dir / "zeitarchiv-backup-2026-08-24-143000.zip"
+        backup.create_backup(tmp, dest, consistent_sqlite=True)
+        backup.prepare_restore(tmp, backups_dir, dest.name)
+        result = backup.apply_pending_restore(tmp, backups_dir)
+        assert result and result["success"] is True
+
+        details = backup.list_restore_rollback_details(tmp)
+        assert len(details) == 1
+        row = details[0]
+        assert row["name"] == result["rollback"]
+        assert row["size_bytes"] == (tmp / result["rollback"] / "index.sqlite").stat().st_size
+        assert row["created_at"] is not None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

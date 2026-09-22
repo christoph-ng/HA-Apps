@@ -25,7 +25,7 @@ import shutil
 import tempfile
 import zipfile
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import zip_guard
@@ -56,6 +56,20 @@ BACKUP_MANIFEST_NAME = "zeitarchiv-manifest.json"
 BACKUP_FORMAT_VERSION = 1
 RESTORE_REQUEST_NAME = ".zeitarchiv-restore-request.json"
 RESTORE_ROLLBACK_RE = re.compile(r"^\.zeitarchiv-restore-rollback-\d{8}T\d{6}Z$")
+# Liegt INNERHALB eines Rollback-Verzeichnisses (siehe apply_pending_restore()) —
+# hält fest, was gerade eingespielt wurde, damit list_restore_events() daraus
+# Zeilen für den Ausführungsverlauf bauen kann. Ältere, vor dieser Ergänzung
+# angelegte Rollbacks haben keine — list_restore_events() zeigt sie trotzdem,
+# nur ohne bekannte Quelle.
+RESTORE_INFO_NAME = "restore-info.json"
+# Jedes Rollback ist eine volle Kopie von BACKUP_ENTRIES — bei einem großen
+# Archiv real spürbarer Speicherplatz. Fest auf 1 begrenzt statt konfigurierbar
+# (anders als bei den Backup-ZIPs, siehe prune_backups()): ein Rollback dient
+# nur dem Rückgängigmachen des LETZTEN Restores, nicht der langfristigen
+# Aufbewahrung wie ein echtes Backup — alles, was weiter zurückliegt, holt man
+# sich über ein echtes Backup zurück, nicht über eine Rollback-Kette. Dafür
+# braucht es keine eigene Einstellung.
+RESTORE_ROLLBACK_KEEP_COUNT = 1
 BACKUP_FILENAME_RE = re.compile(
     r"^zeitarchiv-backup-\d{4}-\d{2}-\d{2}-\d{6}\.zip$"
 )
@@ -413,38 +427,101 @@ def prepare_restore(data_dir: Path, backups_dir: Path, filename: str) -> dict:
     return manifest
 
 
+def prepare_restore_from_rollback(data_dir: Path, name: str) -> None:
+    """Merkt einen vorhandenen Rollback-Stand für den nächsten Start vor —
+    dasselbe Vormerk-Prinzip wie prepare_restore(), nur mit einem
+    Rollback-Verzeichnis statt einem Backup-ZIP als Quelle. Bislang ließ sich
+    ein Rollback nur löschen, nie tatsächlich einspielen (Konzept
+    "Restore-Rollbacks", 22.09.2026)."""
+    if not RESTORE_ROLLBACK_RE.fullmatch(name) or Path(name).name != name:
+        raise ValueError("Ungültiger Rollback-Name")
+    if not (data_dir / name).is_dir():
+        raise ValueError("Rollback nicht gefunden")
+    request_path = data_dir / RESTORE_REQUEST_NAME
+    tmp_path = request_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"rollback": name}), encoding="utf-8")
+    tmp_path.replace(request_path)
+
+
+def _reserve_rollback_dir(data_dir: Path) -> Path:
+    """Der Name kodiert den UTC-Zeitpunkt nur auf die Sekunde genau — zwei
+    Restores in derselben Sekunde (z. B. ein gerade zurückgespielter
+    Rollback wird gleich darauf selbst wieder zurückgespielt) würden sonst
+    denselben Verzeichnisnamen treffen. Bei Kollision eine Sekunde
+    weiterzählen statt fehlzuschlagen, derselbe Ausweich-Ansatz wie bei
+    install_validated_backup() für Backup-Dateinamen."""
+    now = datetime.now(timezone.utc)
+    for offset in range(1000):
+        candidate = data_dir / (
+            f".zeitarchiv-restore-rollback-{(now + timedelta(seconds=offset)).strftime('%Y%m%dT%H%M%SZ')}"
+        )
+        if not candidate.exists():
+            return candidate
+    raise ValueError("Kein freier Rollback-Verzeichnisname verfügbar")
+
+
 def apply_pending_restore(data_dir: Path, backups_dir: Path) -> dict | None:
     """Spielt einen bestätigten Restore vor dem Öffnen der Datenbank ein.
 
-    Die bisherigen Daten werden nicht gelöscht, sondern in ein datiertes
-    Rollback-Verzeichnis verschoben. Schlägt ein Schritt fehl, werden bereits
-    verschobene Einträge sofort zurückgesetzt.
+    Zwei mögliche Quellen im Vormerk-Request: ein Backup-ZIP ({"filename":
+    ...}, siehe prepare_restore()) oder ein bestehendes Rollback-Verzeichnis
+    ({"rollback": ...}, siehe prepare_restore_from_rollback()) — z. B. um
+    eine vorherige Wiederherstellung rückgängig zu machen. Beide Wege laufen
+    ab der Validierung identisch weiter.
+
+    Die bisherigen Daten werden nicht gelöscht, sondern in ein NEUES,
+    datiertes Rollback-Verzeichnis verschoben — auch wenn die Quelle selbst
+    bereits ein Rollback war: so verliert man beim Zurückspielen eines
+    Rollbacks nie versehentlich den Zwischenstand. Schlägt ein Schritt fehl,
+    werden bereits verschobene Einträge sofort zurückgesetzt.
     """
     request_path = data_dir / RESTORE_REQUEST_NAME
     if not request_path.is_file():
         return None
     staging = data_dir / ".zeitarchiv-restore-staging"
-    rollback = data_dir / f".zeitarchiv-restore-rollback-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    rollback = _reserve_rollback_dir(data_dir)
     moved_old: list[tuple[Path, Path]] = []
     installed: list[Path] = []
     try:
         request = json.loads(request_path.read_text(encoding="utf-8"))
         filename = request.get("filename")
-        path = resolve_backup_path(backups_dir, filename) if isinstance(filename, str) else None
-        if path is None or not path.is_file():
-            raise ValueError("Vorgemerktes Backup wurde nicht gefunden")
-        manifest = validate_backup(path)
+        rollback_source = request.get("rollback")
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
-        with zipfile.ZipFile(path) as zf:
-            for info in zf.infolist():
-                parts = Path(info.filename).parts
-                if not parts or parts[0] not in BACKUP_ENTRIES or info.is_dir():
+        if isinstance(rollback_source, str):
+            source_dir = data_dir / rollback_source
+            if not RESTORE_ROLLBACK_RE.fullmatch(rollback_source) or not source_dir.is_dir():
+                raise ValueError("Vorgemerkter Rollback wurde nicht gefunden")
+            for name in BACKUP_ENTRIES:
+                source = source_dir / name
+                if not source.exists():
                     continue
-                target = staging.joinpath(*parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(info) as source, target.open("wb") as destination:
-                    shutil.copyfileobj(source, destination)
+                target = staging / name
+                if source.is_dir():
+                    shutil.copytree(source, target)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+            restore_source_label = f"Rollback {rollback_source}"
+            format_version = 0
+        elif isinstance(filename, str):
+            path = resolve_backup_path(backups_dir, filename)
+            if path is None or not path.is_file():
+                raise ValueError("Vorgemerktes Backup wurde nicht gefunden")
+            manifest = validate_backup(path)
+            with zipfile.ZipFile(path) as zf:
+                for info in zf.infolist():
+                    parts = Path(info.filename).parts
+                    if not parts or parts[0] not in BACKUP_ENTRIES or info.is_dir():
+                        continue
+                    target = staging.joinpath(*parts)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as source, target.open("wb") as destination:
+                        shutil.copyfileobj(source, destination)
+            restore_source_label = filename
+            format_version = manifest.get("format_version", 0)
+        else:
+            raise ValueError("Vorgemerkter Restore hat weder Backup noch Rollback als Quelle")
 
         restored_index = staging / "index.sqlite"
         connection = sqlite3.connect(f"file:{restored_index}?mode=ro", uri=True)
@@ -453,6 +530,7 @@ def apply_pending_restore(data_dir: Path, backups_dir: Path) -> dict | None:
                 raise ValueError("Wiederhergestellter SQLite-Index ist beschädigt")
         finally:
             connection.close()
+        installed_size_bytes = restored_index.stat().st_size
 
         rollback.mkdir(parents=True)
         for name in [*BACKUP_ENTRIES, *_INDEX_SQLITE_WAL_SIDECARS]:
@@ -468,12 +546,22 @@ def apply_pending_restore(data_dir: Path, backups_dir: Path) -> dict | None:
                 target = data_dir / name
                 restored.replace(target)
                 installed.append(target)
+        (rollback / RESTORE_INFO_NAME).write_text(
+            json.dumps({
+                "source": restore_source_label,
+                "format_version": format_version,
+                "restored_at": datetime.now(timezone.utc).isoformat(),
+                "installed_size_bytes": installed_size_bytes,
+            }),
+            encoding="utf-8",
+        )
         request_path.unlink(missing_ok=True)
         shutil.rmtree(staging, ignore_errors=True)
+        prune_restore_rollbacks(data_dir)
         return {
             "success": True,
-            "filename": filename,
-            "format_version": manifest.get("format_version", 0),
+            "source": restore_source_label,
+            "format_version": format_version,
             "rollback": rollback.name,
         }
     except Exception as exc:
@@ -487,6 +575,7 @@ def apply_pending_restore(data_dir: Path, backups_dir: Path) -> dict | None:
                 old_target.replace(original)
         request_path.unlink(missing_ok=True)
         shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(rollback, ignore_errors=True)
         return {"success": False, "error": str(exc)[:2000] or exc.__class__.__name__}
 
 
@@ -496,6 +585,78 @@ def list_restore_rollbacks(data_dir: Path) -> list[str]:
          if path.is_dir() and RESTORE_ROLLBACK_RE.fullmatch(path.name)),
         reverse=True,
     )
+
+
+def prune_restore_rollbacks(data_dir: Path, keep_count: int = RESTORE_ROLLBACK_KEEP_COUNT) -> int:
+    """Entfernt die ältesten Rollback-Verzeichnisse über keep_count hinaus —
+    dieselbe "neueste zuerst, Rest weg"-Regel wie prune_backups() mit
+    keep_count, nur ohne Alters-Variante (siehe RESTORE_ROLLBACK_KEEP_COUNT).
+    Läuft nach jedem neu angelegten Rollback in apply_pending_restore()."""
+    names = list_restore_rollbacks(data_dir)
+    removed = 0
+    for name in names[keep_count:]:
+        if delete_restore_rollback(data_dir, name):
+            removed += 1
+    return removed
+
+
+def list_restore_rollback_details(data_dir: Path) -> list[dict]:
+    """Rollback-Verzeichnisse mit Größe, neueste zuerst — für die
+    Restore-Rollbacks-Tabelle (look & feel wie die Backup-Liste) und für die
+    Speicherplatzberechnung in der Statistik (_storage_breakdown()). Größe
+    über dieselbe estimate_size_bytes()-Zählung wie bei einem Backup, nur
+    auf dem Rollback-Verzeichnis statt auf data_dir selbst — ein Rollback
+    spiegelt exakt dieselbe BACKUP_ENTRIES-Struktur."""
+    details = []
+    for name in list_restore_rollbacks(data_dir):
+        try:
+            created_at = datetime.strptime(
+                name.removeprefix(".zeitarchiv-restore-rollback-"), "%Y%m%dT%H%M%SZ"
+            ).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            created_at = None
+        details.append({
+            "name": name,
+            "size_bytes": estimate_size_bytes(data_dir / name),
+            "created_at": created_at,
+        })
+    return details
+
+
+def list_restore_events(data_dir: Path) -> list[dict]:
+    """Wiederherstellungen für den Ausführungsverlauf — aus den
+    Rollback-Verzeichnissen selbst abgeleitet, nicht aus einer eigenen
+    Historientabelle: der Verzeichnisname trägt bereits den exakten
+    UTC-Zeitpunkt (kein neuer Speicherplatz nötig), restore-info.json
+    (falls vorhanden) liefert Quelle und Größe dazu. Nur erfolgreiche
+    Wiederherstellungen hinterlassen ein Rollback-Verzeichnis — ein
+    gescheiterter Versuch bricht in apply_pending_restore() vorher ab und
+    taucht hier bewusst nicht auf."""
+    events = []
+    for name in list_restore_rollbacks(data_dir):
+        try:
+            created_at = datetime.strptime(
+                name.removeprefix(".zeitarchiv-restore-rollback-"), "%Y%m%dT%H%M%SZ"
+            ).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+        info_path = data_dir / name / RESTORE_INFO_NAME
+        source = None
+        size_bytes = None
+        if info_path.is_file():
+            try:
+                info = json.loads(info_path.read_text(encoding="utf-8"))
+                source = info.get("source")
+                size_bytes = info.get("installed_size_bytes")
+            except (OSError, ValueError):
+                pass
+        events.append({
+            "created_at": created_at,
+            "source": source,
+            "size_bytes": size_bytes,
+            "rollback": name,
+        })
+    return events
 
 
 def delete_restore_rollback(data_dir: Path, name: str) -> bool:
