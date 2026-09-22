@@ -1821,6 +1821,7 @@ def _backup_context(
     if stale_after and last_success_ts and time.time() - last_success_ts > stale_after:
         warnings.append("Das letzte erfolgreiche Backup ist älter als zwei Sicherungsintervalle.")
 
+    global _restore_startup_result
     if message is None and _restore_startup_result:
         if _restore_startup_result.get("success"):
             message = (
@@ -1829,6 +1830,11 @@ def _backup_context(
             )
         else:
             message = f"Wiederherstellung fehlgeschlagen: {_restore_startup_result.get('error', 'Unbekannter Fehler')}"
+        # Einmalige Meldung nach einem Neustart — ohne dieses Löschen würde sie bei
+        # JEDER folgenden Aktion ohne eigene message (Backup löschen, Backup starten,
+        # Fortschritts-Polling) erneut auftauchen, weil _restore_startup_result für
+        # die gesamte Prozesslaufzeit gesetzt bleibt.
+        _restore_startup_result = None
     return {
         "running": running,
         "done": done,
