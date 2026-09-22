@@ -328,7 +328,10 @@ etwas kommt; er erscheint nur, wenn es tatsächlich etwas zu scrollen gibt.
   Sektion", falls es die erste war). Sektionen zählen nicht gegen das
   30-Kacheln-Limit.
 - **Werte-Kachel:** pinnt den aktuellen Wert einer einzelnen Entität direkt
-  aufs Dashboard, ohne dafür ein Chart anzulegen. Nach dem Anheften öffnet
+  aufs Dashboard, ohne dafür ein Chart anzulegen. Dieselbe Entität lässt
+  sich auch mehrfach anheften, jede Kachel mit eigenen, unabhängigen
+  Einstellungen — z. B. eine mit Hauptwert „Aktuell", eine zweite mit
+  „Ø" über einen anderen Zeitraum. Nach dem Anheften öffnet
   sich sofort die Konfiguration. Bei einer Entität vom Typ **Zähler** ist der
   große Wert nicht der Zählerstand, sondern der **Zuwachs** im gewählten
   Zeitraum (Kürzel „+") — der Stand seit Inbetriebnahme lässt sich über
@@ -346,7 +349,10 @@ etwas kommt; er erscheint nur, wenn es tatsächlich etwas zu scrollen gibt.
   zeigt die im Zeitarchiv gespeicherten Rohpunkte der letzten 24 Stunden;
   alternativ lässt sie sich auf einen Punkt je 5, 15 oder 30 Minuten oder je
   Stunde verdichten. Entität, Anzeige der letzten Aktualisierung,
-  Nachkommastellen und Titel sind direkt in der Kachel bearbeitbar. Ist der
+  Nachkommastellen und Titel sind direkt in der Kachel bearbeitbar. Das
+  Zeitraum-Etikett (z. B. „Monat" unter dem Hauptwert) lässt sich separat
+  ein-/ausblenden — unabhängig von der Anzeige der letzten Aktualisierung,
+  beide lassen sich gleichzeitig zeigen. Ist der
   letzte Wert älter als 15
   Minuten bzw. eine Stunde, hebt sich der Kartenrahmen gelb bzw. rot
   hervor. Alle Einstellungen einer Werte-Kachel liegen in einem eigenen,
@@ -969,6 +975,11 @@ vergangene Spalte automatisch nur den bislang vergangenen Teil ihres
 Zeitraums („Gleicher Zeitpunkt"-Vergleich) — ein noch laufender Tag wird so
 fair gegen „Vortag bis zur aktuellen Uhrzeit" statt gegen den kompletten
 Vortag verglichen.
+
+Wie Zeilen tragen auch Spalten ein Kürzel zur eindeutigen Bezeichnung beim
+Reden über die Tabelle ("Spalte 3") — bei Zeilen ein Buchstabe (zugleich die
+Formel-Referenz, siehe [Formeln](#formeln)), bei Spalten eine Zahl (rein
+zur Anzeige, ohne Funktion in Formeln).
 
 Wie Zeilen lässt sich auch eine Spalte über ihr Menü **ausblenden** — sie
 bleibt weiterhin berechnet, etwa damit eine ausgeblendete Vorjahres-Spalte
