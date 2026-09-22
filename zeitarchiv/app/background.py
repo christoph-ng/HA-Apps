@@ -283,6 +283,13 @@ class BackgroundService:
                 "Speicherindex konsistent · event=storage_reconcile_completed entities=%d",
                 report["entities_checked"],
             )
+        if report["corrupted"]:
+            logger.warning(
+                "Beschädigte Hot-Buffer-Zeilen beim Abgleich übersprungen · "
+                "event=storage_reconcile_corrupt_lines entities=%d lines=%d",
+                len(report["corrupted"]),
+                sum(entity["corrupt_line_count"] for entity in report["corrupted"]),
+            )
         return report
 
     def reconcile_in_progress(self) -> bool:
@@ -790,6 +797,7 @@ class BackgroundService:
             "entities_checked": sum(report["entities_checked"] for report in reports),
             "mismatches": [item for report in reports for item in report["mismatches"]],
             "errors": [item for report in reports for item in report["errors"]],
+            "corrupted": [item for report in reports for item in report["corrupted"]],
             "repaired": any(report["repaired"] for report in reports),
             "background": True,
         }
@@ -802,6 +810,13 @@ class BackgroundService:
             len(self.storage_reconcile_last["errors"]),
             max(0.0, time.time() - started_at),
         )
+        if self.storage_reconcile_last["corrupted"]:
+            logger.warning(
+                "Beschädigte Hot-Buffer-Zeilen beim Hintergrundabgleich übersprungen · "
+                "event=storage_reconcile_corrupt_lines entities=%d lines=%d",
+                len(self.storage_reconcile_last["corrupted"]),
+                sum(entity["corrupt_line_count"] for entity in self.storage_reconcile_last["corrupted"]),
+            )
 
     def _refresh_duplicate_snapshot_if_stale(self) -> None:
         """Berechnet die Duplikat-Zählung für /housekeeping höchstens einmal pro

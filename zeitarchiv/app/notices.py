@@ -475,6 +475,31 @@ def build_notices(
             "link": "/housekeeping#speicherplatz",
         })
 
+    # corrupted: Zeilen, die iter_records() beim Lesen des Hot Buffers
+    # übersprungen hat (siehe hotbuffer.py) — anders als errors/mismatches
+    # oben ist die Entität selbst erfolgreich geprüft, aber einzelne
+    # Rohwerte sind dauerhaft verloren (meist nach einem unsauberen
+    # Absturz/Stromausfall). Ohne diese Meldung wäre der Verlust nur noch im
+    # Log sichtbar, weil iter_records() die Zeile bewusst überspringt statt
+    # die Prüfung abzubrechen.
+    if storage_reconcile and storage_reconcile.get("corrupted"):
+        corrupted = storage_reconcile["corrupted"]
+        entity_count = len(corrupted)
+        line_count = sum(entity["corrupt_line_count"] for entity in corrupted)
+        notices.append({
+            "id": "system.storage_reconcile_corrupted",
+            "severity": "warn",
+            "title": "Beschädigte Rohdaten gefunden",
+            "detail": (
+                f"{line_count} beschädigte Zeile{'n' if line_count != 1 else ''} in "
+                f"{entity_count} Entität{'en' if entity_count != 1 else ''} beim letzten Abgleich "
+                "übersprungen und dauerhaft verloren — meist durch einen unsauberen Neustart "
+                "(Stromausfall, harter Kill)."
+            ),
+            "meta": "Speicherplatz",
+            "link": "/housekeeping#speicherplatz",
+        })
+
     last_backup = index.list_backup_jobs(1)
     if last_backup and last_backup[0]["status"] == "failed":
         notices.append({

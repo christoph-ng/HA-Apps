@@ -824,7 +824,7 @@ def test_the_startup_reconciliation_announces_the_entity_it_is_on(monkeypatch, t
 
     def fake_audit(_dir, _index, _tz, *, entity_ids, repair):
         unterwegs.extend(j for j in activity_snapshot() if j["id"] == "storage-reconcile")
-        return {"entities_checked": 1, "mismatches": [], "errors": [], "repaired": repair}
+        return {"entities_checked": 1, "mismatches": [], "errors": [], "corrupted": [], "repaired": repair}
 
     monkeypatch.setattr(reconcile, "audit_storage_metadata", fake_audit)
     dienst = BackgroundService(BackgroundDependencies(

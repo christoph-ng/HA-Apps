@@ -77,6 +77,31 @@ def test_storage_audit_streams_hot_files_without_materializing_them(monkeypatch,
     index.close()
 
 
+def test_a_corrupt_hot_line_is_reported_as_corrupted_not_silently_dropped(tmp_path: Path) -> None:
+    """hotbuffer.iter_records() überspringt eine kaputte Zeile inzwischen
+    (siehe hotbuffer.py) statt zu crashen — ohne diese Meldung hier würde ein
+    dadurch entstandener Datenverlust komplett unsichtbar bleiben, weder im
+    Abgleichsbericht noch für den Nutzer (siehe notices.py)."""
+    index = Index(tmp_path / "index.sqlite")
+    entity_id = "sensor.korrupt"
+    index.get_or_create_entity(entity_id, "sensor", "measurement", "W", "Korrupt")
+    hotbuffer.append(tmp_path, entity_id, 10.0, 1.0, TZ)
+    hot_path = hotbuffer.hot_path(tmp_path, entity_id, 10.0, TZ)
+    with hot_path.open("a", encoding="utf-8") as handle:
+        handle.write("\x00" * 100 + "1789930796.4,2.0\n")
+    hotbuffer.append(tmp_path, entity_id, 30.0, 3.0, TZ)
+
+    report = reconcile.audit_storage_metadata(tmp_path, index, TZ, repair=True)
+
+    assert report["errors"] == []
+    assert len(report["corrupted"]) == 1
+    assert report["corrupted"][0]["entity_id"] == entity_id
+    assert report["corrupted"][0]["corrupt_line_count"] == 1
+    entity = index.get_entity(entity_id)
+    assert entity["row_count"] == 2  # die beiden gültigen Zeilen, nicht drei
+    index.close()
+
+
 def test_storage_index_settings_fragment_has_preview_and_confirmed_repair() -> None:
     source = (TEMPLATES / "_settings_storage_index_form.html").read_text(encoding="utf-8")
     # Speicherplatz/Indexkonsistenz lebt seit 0.75.0 in Housekeeping statt

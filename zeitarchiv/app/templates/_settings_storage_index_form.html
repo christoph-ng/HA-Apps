@@ -42,13 +42,22 @@
 {% else %}
 <p class="hint hint-status" style="color:var(--danger);">Die Vorschau hat noch nichts verändert.</p>
 {% endif %}
-{% elif not storage_audit.errors %}
+{% elif not storage_audit.errors and not storage_audit.corrupted %}
 <p class="save-status">✓ Index und gespeicherte Rohdaten sind konsistent.</p>
 {% endif %}
 
 {% if storage_audit.errors %}
 <p class="hint hint-status" style="color:var(--danger);">
   {{ storage_audit.errors | length }} Entität{% if storage_audit.errors | length != 1 %}en konnten{% else %} konnte{% endif %} nicht vollständig geprüft werden.
+</p>
+{% endif %}
+
+{% if storage_audit.corrupted %}
+{% set corrupt_line_total = storage_audit.corrupted | sum(attribute='corrupt_line_count') %}
+<p class="hint hint-status" style="color:var(--danger);">
+  {{ corrupt_line_total }} beschädigte Zeile{% if corrupt_line_total != 1 %}n{% endif %} in
+  {{ storage_audit.corrupted | length }} Entität{% if storage_audit.corrupted | length != 1 %}en{% endif %}
+  übersprungen und dauerhaft verloren — meist durch einen unsauberen Neustart (Stromausfall, harter Kill).
 </p>
 {% endif %}
 {% endif %}

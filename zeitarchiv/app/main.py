@@ -2253,6 +2253,10 @@ def _diagnostics_payload() -> dict:
             "entities_checked": int(audit.get("entities_checked", 0) or 0),
             "mismatch_count": len(audit.get("mismatches", [])),
             "error_count": len(audit.get("errors", [])),
+            "corrupted_entity_count": len(audit.get("corrupted", [])),
+            "corrupted_line_count": sum(
+                entity["corrupt_line_count"] for entity in audit.get("corrupted", [])
+            ),
             "repaired": bool(audit.get("repaired", False)),
         },
     }
