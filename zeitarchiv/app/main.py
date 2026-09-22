@@ -2281,7 +2281,11 @@ def statistik_view(request: Request) -> HTMLResponse:
         {
             "entity_count": overview["entity_count"],
             "total_rows": format_int(overview['total_rows']),
-            "total_size": format_size(overview["total_size_bytes"]),
+            # Derselbe Wert wie die "Größe"-Kachel auf der Übersicht (Archiv +
+            # gecachte Rollups/Hot Buffer) — nicht der aus storage_breakdown_raw
+            # frisch gewalkte Wert, sonst könnten beide Seiten je nach letztem
+            # Cache-Refresh unterschiedliche Zahlen zeigen.
+            "total_size": format_size(overview["total_size_bytes"] + _background.rollup_hot_size_cached),
             "chart_count": index.count_saved_charts(),
             "table_count": index.count_saved_tables(),
             "dashboard_count": dashboard_count,
