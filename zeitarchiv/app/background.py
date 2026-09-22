@@ -63,6 +63,7 @@ from .energiedashboard_routes import (
 )
 from .limits import MAX_UI_ANALYSIS_ROWS
 from .progress import JobBusy, JobProgress
+from .route_support import dir_size
 from .storage import backup, cleanup, hotbuffer, reconcile
 from .storage import resolution as resolution_mod
 from .storage import retention as retention_mod
@@ -218,6 +219,19 @@ class BackgroundService:
         # als ein einzelner Syscall.
         self.demo_dir_info_cached: dict | None = None
         self._demo_dir_info_last_refresh = 0.0
+
+        # Für die "Größe"-Kachel der Übersichtsseite (entities_view): die zeigte
+        # bisher nur index.get_overview()["total_size_bytes"], also allein das
+        # Archiv — Rollups und Hot Buffer trägt der Index nicht mit (siehe
+        # _storage_breakdown()-Docstring, ROADMAP.md ZP-011). Anders als beim
+        # Archiv bliebe für die Summe nur ein echter Verzeichnis-Walk übrig, und
+        # die Übersicht ist — anders als der seltene Diagnose-Download, für den
+        # ZP-011 einen Walk noch hinnahm — die Standard-Startseite. Deshalb wie
+        # demo_dir_info_cached: im Wartungsplaner vorgerechnet statt pro
+        # Seitenaufruf, hier mit stündlichem statt 5-minütigem Takt (Nutzerwunsch
+        # 2026-09-22 — die Kachel muss nicht sekundengenau sein).
+        self.rollup_hot_size_cached = 0
+        self._rollup_hot_size_last_refresh = 0.0
 
         # Zeitpunkt des letzten (versuchten) Wartungsplaner-Durchlaufs — unabhängig
         # davon, ob er erfolgreich war (siehe try/except in
@@ -511,6 +525,18 @@ class BackgroundService:
             return
         self.demo_dir_info_cached = demo_mode.demo_dir_info(self.base_dir)
         self._demo_dir_info_last_refresh = now
+
+    #: Wie _DEMO_DIR_INFO_MAX_AGE_SECONDS ein echter Verzeichnis-Walk (zwei,
+    #: für rollup/ und hot/), aber seltener als jene 5 Minuten: die Kachel, die
+    #: diesen Wert zeigt, verträgt eine stündliche statt minütliche Auflösung.
+    _ROLLUP_HOT_SIZE_MAX_AGE_SECONDS = 3600
+
+    def _refresh_rollup_hot_size_if_stale(self, *, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._rollup_hot_size_last_refresh < self._ROLLUP_HOT_SIZE_MAX_AGE_SECONDS:
+            return
+        self.rollup_hot_size_cached = dir_size(self.data_dir / "rollup") + dir_size(self.data_dir / "hot")
+        self._rollup_hot_size_last_refresh = now
 
     def _empty_purge_preview(self) -> dict:
         return {
@@ -962,6 +988,7 @@ class BackgroundService:
                 self._run_backup_schedule_if_due(datetime.now(self.tz))
                 self._run_retention_enforcement_if_due(datetime.now(self.tz))
                 self._refresh_demo_dir_info_if_stale()
+                self._refresh_rollup_hot_size_if_stale()
                 self._run_demo_append_if_due(datetime.now(self.tz))
                 self._flush_stale_resolution_windows(datetime.now(self.tz))
                 self._run_automatic_compaction_if_due(datetime.now(self.tz))

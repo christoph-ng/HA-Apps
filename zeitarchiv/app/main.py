@@ -871,7 +871,10 @@ def entities_view(request: Request) -> HTMLResponse:
         "entity_count": overview["entity_count"],
         "type_breakdown": type_breakdown,
         "total_rows": format_int(overview['total_rows']),
-        "total_size": format_size(overview["total_size_bytes"]),
+        # Archiv (live, indexiert) + Rollups/Hot Buffer (vom Wartungsplaner
+        # stündlich vorgerechnet, siehe BackgroundService.rollup_hot_size_cached) —
+        # bis 0.99.x zeigte diese Kachel nur das Archiv.
+        "total_size": format_size(overview["total_size_bytes"] + _background.rollup_hot_size_cached),
         "rows_sparkline": _sparkline_paths([s["total_rows"] for s in snapshots]),
         "size_sparkline": _sparkline_paths([s["total_size_bytes"] for s in snapshots]),
         **_dashboard_tiles_context(index.get_default_dashboard_id()),
