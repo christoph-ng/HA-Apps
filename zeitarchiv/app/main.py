@@ -3195,7 +3195,6 @@ def entity_migrate_execute(entity_id: str, body: _EntityMigrateExecuteBody) -> d
         "post_action": result.post_action,
         "overlap_resolution": result.overlap_resolution,
         "repointed_dashboards": result.repointed_dashboards,
-        "duplicate_pin_dashboards": result.duplicate_pin_dashboards,
     }
 
 
@@ -3736,7 +3735,7 @@ def _tile_metric_context(pin, aggregation_type: str | None = None) -> dict:
 
 
 def _dashboard_tiles_context(
-    dashboard_id: int, auto_open_entity_id: str | None = None
+    dashboard_id: int, auto_open_pin_id: int | None = None
 ) -> dict:
     """Für die Dashboard-Kacheln einer Dashboard-Seite (Konzept "Offene
     Punkte", erweitert um Vergleichstabellen UND um mehrere unabhängige
@@ -3858,6 +3857,11 @@ def _dashboard_tiles_context(
                 staleness = "fresh"
             tiles.append({
                 "kind": "entity", "entity_id": e["entity_id"],
+                # Eigene Zeilen-ID der Kachel (nicht der Entität!) — macht
+                # mehrere Kacheln derselben Entität einzeln identifizierbar
+                # (Einstellungen, Umsortieren, Entfernen), siehe
+                # pin_entity_to_dashboard() in index.py.
+                "pin_id": p["item_id"],
                 "name": p["title"] or entity_display_name(e["entity_id"], e["friendly_name"], e["custom_name"]),
                 # Roher Override fürs Titel-Eingabefeld im Kachelmenü — anders
                 # als "name" oben (mit friendly_name-Fallback) soll das Feld
@@ -3907,7 +3911,10 @@ def _dashboard_tiles_context(
         # unabhängig vom Präzisen Modus, beide lassen sich frei kombinieren.
         "dashboard_fill_gaps": dashboard_fill_gaps,
         "groups": groups,
-        "auto_open_entity_id": auto_open_entity_id,
+        "auto_open_pin_id": auto_open_pin_id,
+        # "pinned" ist rein informativ (Hinweis im Picker) — eine bereits
+        # angeheftete Entität lässt sich seit dem Mehrfach-Anheften-Feature
+        # trotzdem erneut wählen, statt ausgeschlossen zu werden.
         "entity_pin_options": [
             {**row, "pinned": row["entity_id"] in pinned_entity_ids}
             for row in all_entities
@@ -3918,11 +3925,6 @@ def _dashboard_tiles_context(
         "can_add_tile": len(tiles) < index.DASHBOARD_TILE_LIMIT and not dashboard_locked,
         "unpinned_charts": [c for c in index.list_saved_charts() if c["id"] not in pinned_chart_ids],
         "unpinned_tables": [t for t in index.list_saved_tables() if t["id"] not in pinned_table_ids],
-        # Werte-Kachel-Picker filtert client-seitig per Suchfeld (siehe
-        # dashboard-tiles.js setupEntityPinSearch()) statt eines eigenen
-        # Server-Roundtrips — dieselbe Größenordnung wie die Entitätenliste
-        # anderswo in der App (Tabellen-Editor-Picker), kein Pagination-Bedarf.
-        "unpinned_entities": [row for row in all_entities if row["entity_id"] not in pinned_entity_ids],
     }
 
 
@@ -4073,51 +4075,51 @@ def dashboard_legend(body: _LegendDashboardTileBody) -> dict:
 
 # -- Werte-Kacheln (item_type='entity'): eine Entität direkt anheften, ohne
 # zuerst ein Chart/eine Tabelle anzulegen (Konzept-Erweiterung). Eigene Routen
-# statt die obigen chart/table-Endpunkte zu erweitern, weil eine entity_id
-# (TEXT) statt einer Integer-item_id identifiziert wird. ---------------------
+# statt die obigen chart/table-Endpunkte zu erweitern, weil neu Angeheftetes
+# über eine entity_id (TEXT) statt einer Integer-item_id identifiziert wird
+# — bestehende Kacheln danach aber über pin_id (dieselbe item_id-Spalte wie
+# bei Chart/Tabelle, siehe pin_entity_to_dashboard() in index.py), damit
+# dieselbe Entität mehrfach mit unterschiedlichen Einstellungen angeheftet
+# werden kann, ohne dass eine Änderung mehrere Kacheln träfe. -------------
 
 @app.post("/dashboard/pin-entity/{entity_id}", response_class=HTMLResponse)
 def dashboard_pin_entity(request: Request, entity_id: str, dashboard_id: int = 1) -> HTMLResponse:
     _require_entity(entity_id)
     _get_dashboard_or_404(dashboard_id)
     _require_dashboard_unlocked(dashboard_id)
-    index.pin_entity_to_dashboard(dashboard_id, entity_id)
+    new_pin_id = index.pin_entity_to_dashboard(dashboard_id, entity_id)
     return templates.TemplateResponse(
         request, "_dashboard_tiles.html",
-        _dashboard_tiles_context(dashboard_id, auto_open_entity_id=entity_id),
+        _dashboard_tiles_context(dashboard_id, auto_open_pin_id=new_pin_id),
     )
 
 
-@app.post("/dashboard/entity/{entity_id}", response_class=HTMLResponse)
+@app.post("/dashboard/entity/{pin_id}", response_class=HTMLResponse)
 async def dashboard_entity_change(
-    request: Request, entity_id: str, dashboard_id: int = 1
+    request: Request, pin_id: int, dashboard_id: int = 1
 ) -> HTMLResponse:
     _require_dashboard_unlocked(dashboard_id)
     form = await request.form()
     new_entity_id = str(form.get("new_entity_id", "")).strip()
     _require_entity(new_entity_id)
-    try:
-        updated = index.set_dashboard_entity_pin_entity(dashboard_id, entity_id, new_entity_id)
-    except ValueError as err:
-        raise HTTPException(status_code=409, detail=str(err)) from err
-    if not updated:
+    if not index.set_dashboard_entity_pin_entity(dashboard_id, pin_id, new_entity_id):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return templates.TemplateResponse(
         request, "_dashboard_tiles.html",
-        _dashboard_tiles_context(dashboard_id, auto_open_entity_id=new_entity_id),
+        _dashboard_tiles_context(dashboard_id, auto_open_pin_id=pin_id),
     )
 
 
-@app.post("/dashboard/unpin-entity/{entity_id}", response_class=HTMLResponse)
-def dashboard_unpin_entity(request: Request, entity_id: str, dashboard_id: int = 1) -> HTMLResponse:
+@app.post("/dashboard/unpin-entity/{pin_id}", response_class=HTMLResponse)
+def dashboard_unpin_entity(request: Request, pin_id: int, dashboard_id: int = 1) -> HTMLResponse:
     _require_dashboard_unlocked(dashboard_id)
-    index.unpin_entity_from_dashboard(dashboard_id, entity_id)
+    index.unpin_entity_from_dashboard(dashboard_id, pin_id)
     return templates.TemplateResponse(request, "_dashboard_tiles.html", _dashboard_tiles_context(dashboard_id))
 
 
 class _ResizeDashboardEntityTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     grid_cols: int = Field(ge=1, le=6)
     grid_rows: int = Field(ge=1, le=6)
 
@@ -4129,7 +4131,7 @@ def dashboard_entity_size(body: _ResizeDashboardEntityTileBody) -> dict:
     max_size = 6 if dashboard and dashboard["precise_mode"] else 3
     try:
         updated = index.set_dashboard_entity_pin_size(
-            body.dashboard_id, body.entity_id, body.grid_cols, body.grid_rows, max_size=max_size
+            body.dashboard_id, body.pin_id, body.grid_cols, body.grid_rows, max_size=max_size
         )
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
@@ -4140,21 +4142,21 @@ def dashboard_entity_size(body: _ResizeDashboardEntityTileBody) -> dict:
 
 class _SparklineDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     show_sparkline: bool
 
 
 @app.post("/dashboard/sparkline")
 def dashboard_sparkline(body: _SparklineDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
-    if not index.set_dashboard_entity_pin_sparkline(body.dashboard_id, body.entity_id, body.show_sparkline):
+    if not index.set_dashboard_entity_pin_sparkline(body.dashboard_id, body.pin_id, body.show_sparkline):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return {"ok": True, "show_sparkline": body.show_sparkline}
 
 
 class _SparklineResolutionDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     resolution: str
 
 
@@ -4163,7 +4165,7 @@ def dashboard_sparkline_resolution(body: _SparklineResolutionDashboardTileBody) 
     _require_dashboard_unlocked(body.dashboard_id)
     try:
         updated = index.set_dashboard_entity_pin_sparkline_resolution(
-            body.dashboard_id, body.entity_id, body.resolution
+            body.dashboard_id, body.pin_id, body.resolution
         )
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
@@ -4174,28 +4176,40 @@ def dashboard_sparkline_resolution(body: _SparklineResolutionDashboardTileBody) 
 
 class _ShowAgeDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     show_age: bool
 
 
 @app.post("/dashboard/entity-show-age")
 def dashboard_entity_show_age(body: _ShowAgeDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
-    if not index.set_dashboard_entity_pin_show_age(body.dashboard_id, body.entity_id, body.show_age):
+    if not index.set_dashboard_entity_pin_show_age(body.dashboard_id, body.pin_id, body.show_age):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return {"ok": True, "show_age": body.show_age}
 
 
 class _ShowPeriodDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     show_period: bool
+
+
+def _get_dashboard_entity_pin(dashboard_id: int, pin_id: int) -> dict | None:
+    """Eine einzelne Werte-Kachel per Pin-ID (statt entity_id, die seit dem
+    Mehrfach-Anheften-Feature auf mehrere Kacheln zutreffen kann) — gemeinsam
+    von den beiden Endpunkten genutzt, die nach dem Speichern den vollen
+    Kachel-Kontext zurückgeben."""
+    return next(
+        (p for p in index.list_dashboard_pins(dashboard_id)
+         if p["item_type"] == "entity" and p["item_id"] == pin_id),
+        None,
+    )
 
 
 @app.post("/dashboard/entity-show-period")
 def dashboard_entity_show_period(body: _ShowPeriodDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
-    if not index.set_dashboard_entity_pin_show_period(body.dashboard_id, body.entity_id, body.show_period):
+    if not index.set_dashboard_entity_pin_show_period(body.dashboard_id, body.pin_id, body.show_period):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     # Voller Kachel-Kontext statt nur {"show_period": ...} zurück: anders als
     # show_age (rein additiv, eigenes <span>) wirkt show_period auf dieselbe
@@ -4203,14 +4217,10 @@ def dashboard_entity_show_period(body: _ShowPeriodDashboardTileBody) -> dict:
     # Wert-Bereich, siehe _tile_metric_context()) — der Browser kann das
     # deshalb mit derselben uebernehmen(ctx)-Logik anwenden wie
     # /dashboard/entity-metrics, statt eine dritte Variante zu bauen.
-    pin = next(
-        (p for p in index.list_dashboard_pins(body.dashboard_id)
-         if p["item_type"] == "entity" and p["item_entity_id"] == body.entity_id),
-        None,
-    )
+    pin = _get_dashboard_entity_pin(body.dashboard_id, body.pin_id)
     if pin is None:
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
-    entity = index.get_entity(body.entity_id)
+    entity = index.get_entity(pin["item_entity_id"])
     return {
         "ok": True,
         **_tile_metric_context(pin, entity["aggregation_type"] if entity else None),
@@ -4219,7 +4229,7 @@ def dashboard_entity_show_period(body: _ShowPeriodDashboardTileBody) -> dict:
 
 class _DecimalsDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     decimals: str
 
 
@@ -4227,7 +4237,7 @@ class _DecimalsDashboardTileBody(BaseModel):
 def dashboard_entity_decimals(body: _DecimalsDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
     try:
-        updated = index.set_dashboard_entity_pin_decimals(body.dashboard_id, body.entity_id, body.decimals)
+        updated = index.set_dashboard_entity_pin_decimals(body.dashboard_id, body.pin_id, body.decimals)
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
     if not updated:
@@ -4237,7 +4247,7 @@ def dashboard_entity_decimals(body: _DecimalsDashboardTileBody) -> dict:
 
 class _TitleDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     title: str = ""
 
 
@@ -4245,7 +4255,7 @@ class _TitleDashboardTileBody(BaseModel):
 def dashboard_entity_title(body: _TitleDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
     title = body.title.strip()
-    if not index.set_dashboard_entity_pin_title(body.dashboard_id, body.entity_id, title or None):
+    if not index.set_dashboard_entity_pin_title(body.dashboard_id, body.pin_id, title or None):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return {"ok": True, "title": title}
 
@@ -4261,7 +4271,7 @@ class _MetricsDashboardTileBody(BaseModel):
     """
 
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     range_key: str | None = None
     continuous: bool | None = None
     primary_metric: str | None = None
@@ -4274,7 +4284,7 @@ def dashboard_entity_metrics(body: _MetricsDashboardTileBody) -> dict:
     try:
         geaendert = index.set_dashboard_entity_pin_metrics(
             body.dashboard_id,
-            body.entity_id,
+            body.pin_id,
             range_key=body.range_key,
             continuous=body.continuous,
             primary_metric=body.primary_metric,
@@ -4284,14 +4294,10 @@ def dashboard_entity_metrics(body: _MetricsDashboardTileBody) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not geaendert:
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
-    pin = next(
-        (p for p in index.list_dashboard_pins(body.dashboard_id)
-         if p["item_type"] == "entity" and p["item_entity_id"] == body.entity_id),
-        None,
-    )
+    pin = _get_dashboard_entity_pin(body.dashboard_id, body.pin_id)
     if pin is None:
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
-    entity = index.get_entity(body.entity_id)
+    entity = index.get_entity(pin["item_entity_id"])
     # Den fertigen Anzeigezustand zurückgeben statt nur "ok": der Browser muss
     # das Zeitraum-Etikett und die um Hauptwert und Entitätstyp bereinigte
     # Kennzahlen-Liste sonst selbst nachbilden — genau die Regeln, die hier

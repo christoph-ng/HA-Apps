@@ -532,8 +532,13 @@ CREATE TABLE IF NOT EXISTS dashboard_pins (
     item_id INTEGER NOT NULL,
     -- Nur bei item_type='entity' befüllt (Werte-Kacheln, direkt angeheftete
     -- Entität ohne zugrundeliegendes Chart/Tabelle) — Entitäten haben eine
-    -- entity_id (TEXT), keine Integer-ID wie saved_charts/saved_tables,
-    -- item_id bleibt für diese Zeilen ungenutzt (0).
+    -- entity_id (TEXT), keine eigene Integer-ID wie saved_charts/saved_tables.
+    -- item_id trägt für diese Zeilen stattdessen die id der eigenen Zeile
+    -- (siehe pin_entity_to_dashboard()) — dasselbe Identifikationsmuster wie
+    -- bei Chart-/Tabellen-Pins, nötig damit dieselbe Entität mehrfach mit
+    -- unterschiedlichen Einstellungen angeheftet werden kann (die UNIQUE-
+    -- Beschränkung unten griffe sonst schon beim zweiten Pin derselben
+    -- Entität, weil item_id für alle gleich wäre).
     item_entity_id TEXT,
     position INTEGER NOT NULL,
     grid_cols INTEGER NOT NULL DEFAULT 1,
@@ -1254,6 +1259,24 @@ class Index:
             self._conn.execute(
                 "ALTER TABLE dashboard_pins ADD COLUMN stats_metrics TEXT NOT NULL DEFAULT ''"
             )
+
+        # Werte-Kacheln: dieselbe Entität sollte bisher nur EIN Mal pro
+        # Dashboard angeheftet werden können — item_id trug für sie immer den
+        # Platzhalter 0, und genau der (zusammen mit item_entity_id) machte
+        # die UNIQUE-Beschränkung oben zur "eine Kachel pro Entität"-Regel.
+        # Nutzer-Wunsch: dieselbe Entität mehrfach mit unterschiedlichen
+        # Einstellungen (Hauptwert/Zeitraum) zeigen können. Ein Tabellen-
+        # Neuaufbau wie bei den beiden UNIQUE-Umbauten oben ist dafür NICHT
+        # nötig: item_id bekommt stattdessen die eigene id der Zeile (wie bei
+        # Chart-/Tabellen-Pins, deren item_id schon immer die echte ID des
+        # jeweiligen Charts/der Tabelle ist) — die UNIQUE-Tupel zweier Pins
+        # derselben Entität unterscheiden sich dann automatisch in item_id
+        # und blockieren sich nicht mehr gegenseitig. Idempotent von selbst:
+        # bereits migrierte Zeilen haben item_id = id ≠ 0 (AUTOINCREMENT
+        # startet bei 1), die WHERE-Bedingung greift dann nie wieder.
+        self._conn.execute(
+            "UPDATE dashboard_pins SET item_id = id WHERE item_type = 'entity' AND item_id = 0"
+        )
 
         dashboards_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(dashboards)")}
         if "locked" not in dashboards_columns:
@@ -2619,23 +2642,24 @@ class Index:
     # zu erweitern: deren item_id-basierte Signatur bleibt dadurch unverändert
     # für alle bestehenden Aufrufer (charts_pin/tables_pin/dashboard_size/…). --
 
-    def pin_entity_to_dashboard(self, dashboard_id: int, entity_id: str) -> bool:
+    def pin_entity_to_dashboard(self, dashboard_id: int, entity_id: str) -> int | None:
         """Wie pin_item_to_dashboard(), nur über entity_id statt einer
-        Integer-item_id — item_id bleibt für diese Zeilen der Platzhalter 0,
-        die eigentliche Identität trägt item_entity_id (siehe UNIQUE-
-        Beschränkung der Tabelle)."""
+        Integer-item_id. item_id trägt bei Entitäts-Pins keine vom Nutzer
+        gewählte Identität (anders als bei Chart/Tabelle), bekommt aber nach
+        dem Einfügen die eigene id der Zeile — das macht jeden Pin einzeln
+        identifizierbar, auch mehrere derselben Entität auf einem Dashboard
+        (Nutzer-Wunsch: dieselbe Entität mit unterschiedlichem Hauptwert/
+        Zeitraum mehrfach zeigen können — anders als früher ist ein erneutes
+        Anheften deshalb kein No-op mehr, sondern legt bewusst eine weitere,
+        unabhängig konfigurierbare Kachel an). Gibt die neue Pin-ID zurück,
+        oder None, wenn DASHBOARD_TILE_LIMIT erreicht ist."""
         with self._lock, self._conn:
             count = self._conn.execute(
                 "SELECT COUNT(*) FROM dashboard_pins WHERE dashboard_id = ? AND item_type != 'section'",
                 (dashboard_id,),
             ).fetchone()[0]
             if count >= self.DASHBOARD_TILE_LIMIT:
-                return False
-            if self._conn.execute(
-                "SELECT 1 FROM dashboard_pins WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (dashboard_id, entity_id),
-            ).fetchone():
-                return True  # schon angeheftet — kein Fehler, einfach nichts weiter tun
+                return None
             max_pos = self._conn.execute(
                 "SELECT MAX(position) FROM dashboard_pins WHERE dashboard_id = ?", (dashboard_id,)
             ).fetchone()[0]
@@ -2650,19 +2674,21 @@ class Index:
                 "SELECT 1 FROM entities WHERE entity_id = ? AND aggregation_type = 'counter'",
                 (entity_id,),
             ).fetchone() is not None
-            self._conn.execute(
+            cursor = self._conn.execute(
                 "INSERT INTO dashboard_pins "
                 "(dashboard_id, item_type, item_id, item_entity_id, position, show_sparkline, primary_metric) "
                 "VALUES (?, 'entity', 0, ?, ?, 1, ?)",
                 (dashboard_id, entity_id, (max_pos or 0) + 1, "sum" if zaehler else "last"),
             )
-            return True
+            pin_id = cursor.lastrowid
+            self._conn.execute("UPDATE dashboard_pins SET item_id = ? WHERE id = ?", (pin_id, pin_id))
+            return pin_id
 
-    def unpin_entity_from_dashboard(self, dashboard_id: int, entity_id: str) -> None:
+    def unpin_entity_from_dashboard(self, dashboard_id: int, pin_id: int) -> None:
         with self._lock, self._conn:
             self._conn.execute(
-                "DELETE FROM dashboard_pins WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (dashboard_id, entity_id),
+                "DELETE FROM dashboard_pins WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (dashboard_id, pin_id),
             )
 
     def list_entity_pin_dashboards(self, entity_id: str) -> list[dict]:
@@ -2670,10 +2696,14 @@ class Index:
         list_item_dashboards() für Chart/Tabelle, aber über item_entity_id
         (siehe pin_entity_to_dashboard()). Von entity_migration.py genutzt, um
         beim Verschieben jede gefundene Kachel auf die Ziel-Entität
-        umzuhängen."""
+        umzuhängen — pin_id (item_id) ist dabei die konkrete Kachel, gegen
+        die set_dashboard_entity_pin_entity() aufgerufen wird. Absichtlich
+        ohne DISTINCT/GROUP BY: sind mehrere Kacheln derselben Entität auf
+        einem Dashboard angeheftet, liefert das eine Zeile je Kachel, nicht
+        je Dashboard — jede muss einzeln umgehängt werden."""
         with self._lock, self._conn:
             rows = self._conn.execute(
-                "SELECT d.id, d.name, d.is_default "
+                "SELECT d.id, d.name, d.is_default, p.item_id AS pin_id "
                 "FROM dashboard_pins p JOIN dashboards d ON d.id = p.dashboard_id "
                 "WHERE p.item_type = 'entity' AND p.item_entity_id = ? "
                 "ORDER BY d.is_default DESC, d.name COLLATE NOCASE ASC, d.id ASC",
@@ -2682,94 +2712,92 @@ class Index:
             return [dict(row) for row in rows]
 
     def set_dashboard_entity_pin_size(
-        self, dashboard_id: int, entity_id: str, grid_cols: int, grid_rows: int, max_size: int = 6
+        self, dashboard_id: int, pin_id: int, grid_cols: int, grid_rows: int, max_size: int = 6
     ) -> bool:
         if not 1 <= int(grid_cols) <= max_size or not 1 <= int(grid_rows) <= max_size:
             raise ValueError(f"Dashboard-Kachelgröße muss zwischen 1 und {max_size} liegen")
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET grid_cols = ?, grid_rows = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (int(grid_cols), int(grid_rows), dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (int(grid_cols), int(grid_rows), dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_sparkline(
-        self, dashboard_id: int, entity_id: str, show_sparkline: bool
+        self, dashboard_id: int, pin_id: int, show_sparkline: bool
     ) -> bool:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET show_sparkline = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (int(show_sparkline), dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (int(show_sparkline), dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_sparkline_resolution(
-        self, dashboard_id: int, entity_id: str, resolution: str
+        self, dashboard_id: int, pin_id: int, resolution: str
     ) -> bool:
         if resolution not in ("raw", "5min", "15min", "30min", "1h"):
             raise ValueError("Ungültige Sparkline-Auflösung")
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET sparkline_resolution = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (resolution, dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (resolution, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_entity(
-        self, dashboard_id: int, old_entity_id: str, new_entity_id: str
+        self, dashboard_id: int, pin_id: int, new_entity_id: str
     ) -> bool:
         """Wechselt die Entität einer Werte-Kachel, ohne Position und
-        Darstellungsoptionen der Kachel zu verlieren."""
+        Darstellungsoptionen der Kachel zu verlieren. Die Zielentität darf
+        auf dem Dashboard bereits (auch mehrfach) angeheftet sein — das ist
+        seit dem Mehrfach-Anheften-Feature kein Fehlerfall mehr, sondern der
+        Zweck: eine weitere, unabhängig konfigurierte Kachel derselben
+        Entität."""
         with self._lock, self._conn:
-            if old_entity_id != new_entity_id and self._conn.execute(
-                "SELECT 1 FROM dashboard_pins WHERE dashboard_id = ? "
-                "AND item_type = 'entity' AND item_entity_id = ?",
-                (dashboard_id, new_entity_id),
-            ).fetchone():
-                raise ValueError("Diese Entität ist bereits auf dem Dashboard angeheftet")
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET item_entity_id = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (new_entity_id, dashboard_id, old_entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (new_entity_id, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
-    def set_dashboard_entity_pin_show_age(self, dashboard_id: int, entity_id: str, show_age: bool) -> bool:
+    def set_dashboard_entity_pin_show_age(self, dashboard_id: int, pin_id: int, show_age: bool) -> bool:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET show_age = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (int(show_age), dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (int(show_age), dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
-    def set_dashboard_entity_pin_show_period(self, dashboard_id: int, entity_id: str, show_period: bool) -> bool:
+    def set_dashboard_entity_pin_show_period(self, dashboard_id: int, pin_id: int, show_period: bool) -> bool:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET show_period = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (int(show_period), dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (int(show_period), dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
-    def set_dashboard_entity_pin_decimals(self, dashboard_id: int, entity_id: str, decimals: str) -> bool:
+    def set_dashboard_entity_pin_decimals(self, dashboard_id: int, pin_id: int, decimals: str) -> bool:
         if decimals not in ("auto", "0", "1", "2", "3"):
             raise ValueError("Ungültige Nachkommastellen")
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET decimals = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (decimals, dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (decimals, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_metrics(
         self,
         dashboard_id: int,
-        entity_id: str,
+        pin_id: int,
         *,
         range_key: str | None = None,
         continuous: bool | None = None,
@@ -2815,20 +2843,20 @@ class Index:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 f"UPDATE dashboard_pins SET {', '.join(fields)} "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (*values, dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (*values, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
-    def set_dashboard_entity_pin_title(self, dashboard_id: int, entity_id: str, title: str | None) -> bool:
+    def set_dashboard_entity_pin_title(self, dashboard_id: int, pin_id: int, title: str | None) -> bool:
         """title=None/leer setzt auf "übernehmen" zurück (entity-eigener
         friendly_name statt eines eigenen Kachel-Titels, siehe
         _dashboard_tiles_context() in main.py)."""
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET title = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (title or None, dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (title or None, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 

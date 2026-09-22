@@ -147,7 +147,7 @@
       </div>
       {% else %}
       <div class="dtile dtile-entity{{ ' is-warn' if tile.staleness == 'warn' else '' }}{{ ' is-stale' if tile.staleness == 'stale' else '' }}"
-           draggable="{{ 'false' if dashboard_locked else 'true' }}" data-item-type="entity" data-item-id="0"
+           draggable="{{ 'false' if dashboard_locked else 'true' }}" data-item-type="entity" data-item-id="{{ tile.pin_id }}"
            data-item-entity-id="{{ tile.entity_id }}"
            data-grid-cols="{{ tile.grid_cols }}" data-grid-rows="{{ tile.grid_rows }}"
            style="--tile-cols:{{ tile.grid_cols }};--tile-rows:{{ tile.grid_rows }}"
@@ -259,12 +259,13 @@
                 <a class="dtile-picker-item dtile-picker-new" href="{{ href_base }}tables/new">+ Neue Tabelle</a>
               </div>
               <div x-show="tab === 'entity'">
-                {% for e in unpinned_entities %}
+                {% for e in entity_pin_options %}
                 <button type="button" class="dtile-picker-item"
                         x-show='!search || {{ (e.label ~ " " ~ e.entity_id) | lower | tojson }}.includes(search.toLowerCase())'
                         hx-post="{{ href_base }}dashboard/pin-entity/{{ e.entity_id }}?dashboard_id={{ dashboard_id }}"
                         hx-target="#dashboard-grid" hx-swap="outerHTML" @click="open = false">
                   {{ e.label }}{% if e.is_custom %}{{ custom_name_icon() }}{% endif %}
+                  {% if e.pinned %}<span class="dtile-picker-pinned-hint">bereits angeheftet</span>{% endif %}
                 </button>
                 {% endfor %}
               </div>

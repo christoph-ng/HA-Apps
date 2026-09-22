@@ -1701,7 +1701,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(isEntityTile ? {
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10),
                 grid_cols: gridCols, grid_rows: gridRows,
               } : {
                 dashboard_id: dashboardId,
@@ -1788,7 +1788,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, show_sparkline: showSparkline,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), show_sparkline: showSparkline,
               }),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1824,7 +1824,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, resolution,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), resolution,
               }),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1850,7 +1850,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, show_age: showAge,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), show_age: showAge,
               }),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2005,7 +2005,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, ...aenderung,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), ...aenderung,
               }),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2028,7 +2028,7 @@
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                  dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, show_period: showPeriod,
+                  dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), show_period: showPeriod,
                 }),
               });
               if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2083,7 +2083,7 @@
             const response = await fetch(`${base}/dashboard/entity-decimals`, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, decimals}),
+              body: JSON.stringify({dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), decimals}),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             decimalsCells.forEach(option => option.classList.toggle('is-selected', option === cell));
@@ -2112,7 +2112,7 @@
             const response = await fetch(`${base}/dashboard/entity-title`, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, title}),
+              body: JSON.stringify({dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), title}),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             if (titleEl) titleEl.textContent = title || titleInput.placeholder;
@@ -2340,26 +2340,24 @@
   // Nutzer tippt dort z.B. gerade an den Einstellungen, während irgendwo
   // sonst auf der Seite eine dieser Aktionen feuert) verschwindet dabei
   // kommentarlos, weil der Server dessen offenen Zustand nicht kennt (nur
-  // die eigene Kachel des jeweiligen Endpunkts kennt `auto_open_entity_id`,
+  // die eigene Kachel des jeweiligen Endpunkts kennt `auto_open_pin_id`,
   // siehe _dashboard_tile_menu.html). Deshalb hier vor jedem solchen Swap
   // merken, welche Kachel-Menüs offen waren (Kachel-Identität überlebt den
-  // Swap: data-item-type + data-item-id/-item-entity-id), und sie danach
-  // wieder öffnen.
+  // Swap: data-item-type + data-item-id), und sie danach wieder öffnen.
+  // data-item-id ist für Entitäts-Kacheln seit dem Mehrfach-Anheften-Feature
+  // die eigene Pin-ID statt eines Platzhalters — kein Sonderfall mehr nötig,
+  // derselbe generische Schlüssel wie bei Chart/Tabelle identifiziert jede
+  // Kachel eindeutig, auch mehrere derselben Entität.
   function tileIdentity(dtileEl) {
     if (!dtileEl) return null;
-    const type = dtileEl.dataset.itemType;
-    return type === 'entity'
-      ? {type, entityId: dtileEl.dataset.itemEntityId}
-      : {type, id: dtileEl.dataset.itemId};
+    return {type: dtileEl.dataset.itemType, id: dtileEl.dataset.itemId};
   }
 
   function findTileByIdentity(identity) {
     if (!identity) return null;
     const grid = document.getElementById('dashboard-grid');
     if (!grid) return null;
-    return identity.type === 'entity'
-      ? grid.querySelector(`.dtile[data-item-type="entity"][data-item-entity-id="${CSS.escape(identity.entityId || '')}"]`)
-      : grid.querySelector(`.dtile[data-item-type="${identity.type}"][data-item-id="${CSS.escape(identity.id || '')}"]`);
+    return grid.querySelector(`.dtile[data-item-type="${identity.type}"][data-item-id="${CSS.escape(identity.id || '')}"]`);
   }
 
   let openMenusBeforeSwap = [];

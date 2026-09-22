@@ -165,10 +165,6 @@ function showResult(result) {
       `<div class="migrate-result-row"><span>${_escapeHtml(name)}</span><span class="tag">→ ${_escapeHtml(result.target_entity_id)}</span></div>`
     ).join('') + '</div>');
   }
-  if (result.duplicate_pin_dashboards.length) {
-    const names = result.duplicate_pin_dashboards.map(_escapeHtml).join(', ');
-    notes.push(`<div class="migrate-banner warning">⚠ ${result.duplicate_pin_dashboards.length} Kachel(n) auf ${names} entfernt: die Ziel-Entität war dort schon angepinnt, ein Umhängen hätte sie doppelt angezeigt.</div>`);
-  }
   document.getElementById('migrate-result-dashboards').innerHTML = notes.join('');
 
   document.getElementById('migrate-result-done-btn').href = `${BASE}/entities/${result.target_entity_id}/config`;

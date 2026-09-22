@@ -76,10 +76,10 @@ def test_tile_metrics_endpoint_resolves_the_dependencies_itself(client) -> None:
 
     index.get_or_create_entity("sensor.kacheltest", "sensor", "measurement", "°C")
     dashboard_id = index.get_default_dashboard_id()
-    index.pin_entity_to_dashboard(dashboard_id, "sensor.kacheltest")
+    pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.kacheltest")
     try:
         antwort = client.post("/dashboard/entity-metrics", json={
-            "dashboard_id": dashboard_id, "entity_id": "sensor.kacheltest",
+            "dashboard_id": dashboard_id, "pin_id": pin_id,
             "range_key": "month", "continuous": True,
             "primary_metric": "avg", "stats_metrics": ["min", "avg", "max", "sum"],
         })
@@ -93,9 +93,9 @@ def test_tile_metrics_endpoint_resolves_the_dependencies_itself(client) -> None:
         assert daten["range_label"] == "30 Tage"
 
         ungueltig = client.post("/dashboard/entity-metrics", json={
-            "dashboard_id": dashboard_id, "entity_id": "sensor.kacheltest",
+            "dashboard_id": dashboard_id, "pin_id": pin_id,
             "range_key": "decade",
         })
         assert ungueltig.status_code == 400
     finally:
-        index.unpin_entity_from_dashboard(dashboard_id, "sensor.kacheltest")
+        index.unpin_entity_from_dashboard(dashboard_id, pin_id)

@@ -1,7 +1,7 @@
 {% set size_max = 6 if dashboard_precise else 3 %}
 {% set legend_threshold = 3 if dashboard_precise else 2 %}
 <div class="dtile-menu{{ ' is-precise' if dashboard_precise else '' }}"
-     x-data="{menuOpen: {{ 'true' if tile.kind == 'entity' and auto_open_entity_id == tile.entity_id else 'false' }}}"
+     x-data="{menuOpen: {{ 'true' if tile.kind == 'entity' and auto_open_pin_id == tile.pin_id else 'false' }}}"
      :class="{'is-open': menuOpen}">
   <button type="button" class="dtile-menu-btn" draggable="false"
           @pointerdown.stop @click.prevent.stop="menuOpen = !menuOpen"
@@ -33,7 +33,7 @@
             <form class="dd-picker-wrap dtile-entity-picker"
                   x-data='entityPicker({{ entity_pin_options | tojson }}, {{ tile.entity_id | tojson }})'
                   x-ref="entityForm" @click.outside="open = false"
-                  hx-post="{{ href_base }}dashboard/entity/{{ tile.entity_id }}?dashboard_id={{ dashboard_id }}"
+                  hx-post="{{ href_base }}dashboard/entity/{{ tile.pin_id }}?dashboard_id={{ dashboard_id }}"
                   hx-target="#dashboard-grid" hx-swap="outerHTML">
               <input type="hidden" name="new_entity_id" :value="entityId">
               <button type="button" class="btn" @click="toggleOpen($refs.tileEntitySearch)"
@@ -43,7 +43,10 @@
                 <input type="search" class="dd-picker-popover-search" x-ref="tileEntitySearch"
                        x-model="search" placeholder="Entität suchen …">
                 <div class="dtile-entity-picker-list">
-                  <template x-for="opt in filtered().filter(opt => !opt.pinned || opt.entity_id === entityId)" :key="opt.entity_id">
+                  <!-- Auch bereits angeheftete Entitäten wählbar (Mehrfach-
+                       Anheften-Feature) — kein Ausschluss-Filter mehr wie
+                       früher, opt.pinned ist rein informativ. -->
+                  <template x-for="opt in filtered()" :key="opt.entity_id">
                     <div class="dd-picker-row" :class="{active: entityId === opt.entity_id}"
                          @click="select(opt.entity_id); $nextTick(() => $refs.entityForm.requestSubmit())"
                          @mouseenter="scheduleHover(opt, $event.currentTarget)" @mouseleave="clearHover()">
@@ -187,7 +190,7 @@
       </div>
       <div class="dtile-settings-footer">
         <button type="button" class="btn danger btn-sm" draggable="false"
-                hx-post="{{ href_base }}dashboard/unpin-entity/{{ tile.entity_id }}?dashboard_id={{ dashboard_id }}"
+                hx-post="{{ href_base }}dashboard/unpin-entity/{{ tile.pin_id }}?dashboard_id={{ dashboard_id }}"
                 hx-target="#dashboard-grid" hx-swap="outerHTML"
                 hx-confirm="Diese Kachel wirklich vom Dashboard entfernen?">Vom Dashboard entfernen</button>
         <button type="button" class="btn btn-sm" @click="menuOpen = false">Fertig</button>
