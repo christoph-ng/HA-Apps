@@ -252,6 +252,62 @@ def test_database_maintenance_stats_and_vacuum_reclaim_free_pages() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_a_concurrent_write_during_vacuum_neither_corrupts_nor_gets_lost() -> None:
+    """Regressionstest zum Vorfall vom 22.09.2026 (siehe CHANGELOG_INTERNAL.md):
+    vacuum_database() lief früher lock-frei auf einer separaten Kopie — ein
+    set_setting()-Schreibzugriff genau währenddessen (z. B. aus dem
+    30-Sekunden-Wartungsplaner) konnte die Kopie mit einem WAL-Checkpoint
+    kollidieren lassen und die daraus resultierende index.sqlite korrumpieren.
+    Seit dem Rückbau auf synchrones VACUUM unter self._lock kann ein
+    paralleler Schreibzugriff nur noch bis nach dem VACUUM warten — geprüft
+    wird hier, dass er dabei weder verloren geht noch die Datenbank beschädigt,
+    UND dass nach dem VACUUM keine offene WAL-Datei mit unkomprimiertem Inhalt
+    liegen bleibt (der eigentliche Zweck von "optimieren")."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-index-vacuum-race-test-"))
+    try:
+        db_path = tmp / "index.sqlite"
+        index = Index(db_path)
+        with index._conn:
+            index._conn.execute(
+                "CREATE TABLE vacuum_payload (id INTEGER PRIMARY KEY, payload BLOB)"
+            )
+            index._conn.executemany(
+                "INSERT INTO vacuum_payload (payload) VALUES (?)",
+                [(b"x" * 8192,) for _ in range(512)],
+            )
+            index._conn.execute("DELETE FROM vacuum_payload")
+
+        # Kein präzises Timing auf "genau während VACUUM" nötig (dafür müsste
+        # man sqlite3.Connection.execute abfangen — geht nicht, read-only
+        # Attribut auf dem C-Typ): self._lock serialisiert seit dem Rückbau
+        # ohnehin JEDEN Zugriff, ganz gleich wer zuerst dran ist. Geprüft wird
+        # genau diese Serialisierung — ein echtes Wettrennen um denselben Lock
+        # reicht dafür.
+        geschrieben = threading.Event()
+
+        def schreiber() -> None:
+            index.set_setting("pytest_race_marker", "geschrieben-waehrend-vacuum")
+            geschrieben.set()
+
+        thread = threading.Thread(target=schreiber)
+        thread.start()
+        result = index.vacuum_database()
+        thread.join(timeout=5)
+
+        assert result["quick_check"] == "ok"
+        assert geschrieben.is_set(), "der parallele Schreibzugriff kam nie durch"
+        assert index.get_setting("pytest_race_marker") == "geschrieben-waehrend-vacuum"
+        assert sqlite3.connect(db_path).execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        wal_path = db_path.with_name(db_path.name + "-wal")
+        assert not wal_path.exists() or wal_path.stat().st_size == 0, (
+            "WAL-Datei nach VACUUM nicht leer/gecheckpointet — der freigegebene "
+            "Platz liegt dann nur verschoben in -wal statt tatsächlich in index.sqlite"
+        )
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_type_change_requires_successful_rollup_migration() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-index-test-"))
     try:

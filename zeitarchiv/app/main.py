@@ -2375,13 +2375,22 @@ def statistik_index_detail(request: Request) -> HTMLResponse:
 
 @app.post("/statistik/index/optimize", response_class=HTMLResponse)
 def statistik_index_optimize(request: Request) -> HTMLResponse:
-    """Führt ein ausdrücklich angefordertes, abgesichertes VACUUM aus."""
+    """Führt ein ausdrücklich angefordertes, abgesichertes VACUUM aus.
+
+    Liefert nur das Partial (htmx-Swap von #statistik-index-body), nicht mehr
+    die ganze Seite — vorher löste "Index optimieren" eine komplette
+    Formular-Navigation aus: während des (synchron unter Lock laufenden,
+    siehe Index.vacuum_database()) VACUUMs war nichts von der App zu sehen,
+    und ein unerwarteter Fehler landete als nackte Internal-Server-Error-
+    Antwort statt in der Seite. Der bereits vorhandene try/except in
+    optimize_index() fängt die erwartbaren Fehlerfälle weiterhin ab und
+    zeigt sie über index_optimization_result im Partial an."""
     result = optimize_index(
         index, DATA_DIR / "index.sqlite", storage_coordinator
     )
     return templates.TemplateResponse(
         request,
-        "statistik_index.html",
+        "_statistik_index_body.html",
         _statistik_index_context(optimization_result=result),
     )
 
