@@ -30,15 +30,30 @@
 
 ### Behoben
 
-- Index-Optimierung konnte in seltenen Fällen die Datenbank beschädigen;
-  behoben, jetzt mit Bestätigungsdialog und sichtbarem Fortschritt.
-- Die Kachel „Größe" auf Übersicht und Statistik zeigte nur das Archiv,
-  nicht die Summe aus Archiv, Rollups und Hot Buffer.
-- Nach dem Löschen oder Erstellen eines Backups erschien manchmal fälschlich
-  die Meldung einer vorherigen Wiederherstellung.
-- Eine beschädigte Zeile im Hot Buffer (z. B. nach einem Stromausfall)
-  konnte Abfragen und den Wartungsplaner zum Absturz bringen — wird jetzt
-  übersprungen statt die App zu blockieren.
+- Index-Optimierung konnte in seltenen Fällen (großer Index, gleichzeitiger
+  Schreibzugriff während des Laufs) die lokale Datenbank beschädigen und
+  einen Neustart mit Datenverlust bis zum letzten Backup erzwingen. Der
+  Vorgang läuft jetzt wieder wie ursprünglich vorgesehen unter kurzzeitiger
+  Schreibsperre, mit Bestätigungsdialog vorher und sichtbarem
+  Fortschritt/Ergebnis während des Laufs statt eines stillen Seitenwechsels.
+- Die Kachel „Größe" auf der Übersichts- und der Statistik-Seite zeigte nur
+  die Größe des komprimierten Archivs, nicht die tatsächliche Gesamtgröße
+  inklusive Rollups und des noch unkomprimierten laufenden Monats (Hot
+  Buffer) — der ausgewiesene Speicherverbrauch war dadurch spürbar zu
+  niedrig. Beide Kacheln zeigen jetzt dieselbe, vollständige Summe.
+- Nach dem Löschen eines Backups oder dem Start eines neuen Backups
+  erschien manchmal fälschlich erneut die Erfolgsmeldung einer früheren
+  Wiederherstellung („… wurde wiederhergestellt"), obwohl gerade gar kein
+  Restore lief — die Meldung war eigentlich nur für die erste Ansicht nach
+  einem Neustart mit vorgemerktem Restore gedacht. Erscheint jetzt
+  tatsächlich nur noch einmal.
+- Eine durch einen Stromausfall oder einen harten Neustart beschädigte
+  Zeile im Hot Buffer (laufender Monat, unkomprimiert) konnte Abfragen auf
+  die betroffene Entität sowie den Wartungsplaner dauerhaft zum Absturz
+  bringen — Letzterer versuchte es alle 30 Sekunden erneut und scheiterte
+  jedes Mal an derselben Stelle. Eine solche Zeile wird jetzt übersprungen
+  statt die App zu blockieren; der neue Bereich „Datenintegrität" zeigt an,
+  falls das passiert ist.
 
 ## 0.99.0 - 2026-09-20
 
