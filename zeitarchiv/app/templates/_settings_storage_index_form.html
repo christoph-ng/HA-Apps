@@ -1,4 +1,5 @@
 {% from "_hints.html" import hint_button, hint_body %}
+<div class="settings-subsection">
 <h3 class="settings-subsection-title">Indexkonsistenz {{ hint_button('Indexkonsistenz') }}</h3>
 {% call hint_body() %}
   Vergleicht Index mit den gespeicherten Rohdaten. Prüfung liest nur, Reparatur korrigiert nur abgeleitete Werte.
@@ -42,7 +43,7 @@
 {% else %}
 <p class="hint hint-status" style="color:var(--danger);">Die Vorschau hat noch nichts verändert.</p>
 {% endif %}
-{% elif not storage_audit.errors and not storage_audit.corrupted %}
+{% elif not storage_audit.errors %}
 <p class="save-status">✓ Index und gespeicherte Rohdaten sind konsistent.</p>
 {% endif %}
 
@@ -51,15 +52,46 @@
   {{ storage_audit.errors | length }} Entität{% if storage_audit.errors | length != 1 %}en konnten{% else %} konnte{% endif %} nicht vollständig geprüft werden.
 </p>
 {% endif %}
+{% endif %}
+</div>
 
+{% if storage_audit %}
+<div class="settings-subsection">
+<h3 class="settings-subsection-title">Datenintegrität {{ hint_button('Datenintegrität') }}</h3>
+{% call hint_body() %}
+  Prüft, ob die Rohdaten im Hot Buffer selbst noch lesbar sind — unabhängig vom Indexabgleich oben, läuft aber
+  mit derselben Prüfung mit. Beschädigungen entstehen fast immer durch einen unsauberen Neustart (Stromausfall,
+  harter Kill) und sind nicht reparierbar — die betroffenen Werte sind unwiederbringlich verloren.
+{% endcall %}
 {% if storage_audit.corrupted %}
 {% set corrupt_line_total = storage_audit.corrupted | sum(attribute='corrupt_line_count') %}
-<p class="hint hint-status" style="color:var(--danger);">
-  {{ corrupt_line_total }} beschädigte Zeile{% if corrupt_line_total != 1 %}n{% endif %} in
-  {{ storage_audit.corrupted | length }} Entität{% if storage_audit.corrupted | length != 1 %}en{% endif %}
-  übersprungen und dauerhaft verloren — meist durch einen unsauberen Neustart (Stromausfall, harter Kill).
-</p>
+<div class="status-grid">
+  <div class="status-card status-card-danger">
+    <span class="status-card-label">Beschädigte Zeilen</span>
+    <strong>{{ corrupt_line_total }}</strong>
+    <span class="status-card-detail">
+      in {{ storage_audit.corrupted | length }} Entität{% if storage_audit.corrupted | length != 1 %}en{% endif %}
+    </span>
+  </div>
+</div>
+<div class="tbl-wrap">
+  <table class="dt compact" data-sortable data-paginate data-page-size="10">
+    <thead><tr><th>Entität</th><th>Beschädigte Zeilen</th><th>Betroffene Monate</th></tr></thead>
+    <tbody>
+    {% for entity in storage_audit.corrupted %}
+      <tr>
+        <td><strong>{{ entity.friendly_name or entity.entity_id }}</strong>{% if entity.friendly_name %}<span class="ts-time">{{ entity.entity_id }}</span>{% endif %}</td>
+        <td>{{ entity.corrupt_line_count }}</td>
+        <td>{{ entity.months | join(', ') }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="save-status">✓ Keine beschädigten Rohdaten gefunden.</p>
 {% endif %}
+</div>
 {% endif %}
 
 {# Prüfen und Reparieren laufen über ALLE Entitäten und deren Archivdateien

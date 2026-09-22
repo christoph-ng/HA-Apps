@@ -97,6 +97,7 @@ def test_a_corrupt_hot_line_is_reported_as_corrupted_not_silently_dropped(tmp_pa
     assert len(report["corrupted"]) == 1
     assert report["corrupted"][0]["entity_id"] == entity_id
     assert report["corrupted"][0]["corrupt_line_count"] == 1
+    assert report["corrupted"][0]["months"] == [hotbuffer.month_key(10.0, TZ)]
     entity = index.get_entity(entity_id)
     assert entity["row_count"] == 2  # die beiden gültigen Zeilen, nicht drei
     index.close()

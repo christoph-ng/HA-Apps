@@ -104,7 +104,9 @@ def test_status_card_labels_are_no_longer_hints() -> None:
         for m in re.finditer(r'<div class="status-card[^"]*">(.*?)</div>', quelle, re.S):
             assert 'class="hint"' not in m.group(1), name
         treffer += quelle.count('class="status-card-label"')
-    assert treffer == 16, f"16 Kartenbeschriftungen erwartet, {treffer} gefunden"
+    # 17 statt 16: neue Datenintegrität-Karte ("Beschädigte Zeilen") in
+    # _settings_storage_index_form.html.
+    assert treffer == 17, f"17 Kartenbeschriftungen erwartet, {treffer} gefunden"
 
 
 def test_the_roles_themselves_stay_a_pure_annotation() -> None:
