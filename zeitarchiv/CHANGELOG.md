@@ -9,8 +9,11 @@
 - Werte-Kachel: Zeitraum-Etikett lässt sich ein-/ausblenden, unabhängig von
   „Letzte Aktualisierung" — beide gleichzeitig anzeigbar.
 - Laufende, noch nicht abgeschlossene Zeiträume (Woche/Monat/Jahr) sind
-  jetzt überall als solche erkennbar — Energiedashboard, Energiebericht und
-  Vergleichstabellen zeigen, bis wann die Daten tatsächlich reichen.
+  jetzt überall als solche erkennbar: Energiedashboard-Periodenzeile und
+  Energiebericht-Kopf zeigen, bis wann die Daten tatsächlich reichen, statt
+  den vollen Kalenderzeitraum zu behaupten. Vergleichstabellen markieren
+  betroffene Spaltenköpfe zusätzlich mit einem sichtbaren Hinweis-Symbol
+  (Tooltip mit Cutoff-Datum, bei Tages-/Stundenansicht als Uhrzeit).
 - Tabellen-Editor: Spalten sind jetzt wie die Zeilen nummeriert, auch in der
   Vorschau-Tabelle sichtbar.
 - Backup/Restore: nach einer vorgemerkten Wiederherstellung fragt ein
