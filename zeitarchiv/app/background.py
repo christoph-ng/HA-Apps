@@ -63,6 +63,7 @@ from .energiedashboard_routes import (
 )
 from .limits import MAX_UI_ANALYSIS_ROWS
 from .progress import JobBusy, JobProgress
+from .route_support import dir_size
 from .storage import backup, cleanup, hotbuffer, reconcile
 from .storage import resolution as resolution_mod
 from .storage import retention as retention_mod
@@ -219,6 +220,19 @@ class BackgroundService:
         self.demo_dir_info_cached: dict | None = None
         self._demo_dir_info_last_refresh = 0.0
 
+        # Für die "Größe"-Kachel der Übersichtsseite (entities_view): die zeigte
+        # bisher nur index.get_overview()["total_size_bytes"], also allein das
+        # Archiv — Rollups und Hot Buffer trägt der Index nicht mit (siehe
+        # _storage_breakdown()-Docstring, ROADMAP.md ZP-011). Anders als beim
+        # Archiv bliebe für die Summe nur ein echter Verzeichnis-Walk übrig, und
+        # die Übersicht ist — anders als der seltene Diagnose-Download, für den
+        # ZP-011 einen Walk noch hinnahm — die Standard-Startseite. Deshalb wie
+        # demo_dir_info_cached: im Wartungsplaner vorgerechnet statt pro
+        # Seitenaufruf, hier mit stündlichem statt 5-minütigem Takt (Nutzerwunsch
+        # 2026-09-22 — die Kachel muss nicht sekundengenau sein).
+        self.rollup_hot_size_cached = 0
+        self._rollup_hot_size_last_refresh = 0.0
+
         # Zeitpunkt des letzten (versuchten) Wartungsplaner-Durchlaufs — unabhängig
         # davon, ob er erfolgreich war (siehe try/except in
         # _maintenance_scheduler_loop()). Erkennt einen Thread, der ganz aufgehört
@@ -268,6 +282,13 @@ class BackgroundService:
             logger.info(
                 "Speicherindex konsistent · event=storage_reconcile_completed entities=%d",
                 report["entities_checked"],
+            )
+        if report["corrupted"]:
+            logger.warning(
+                "Beschädigte Hot-Buffer-Zeilen beim Abgleich übersprungen · "
+                "event=storage_reconcile_corrupt_lines entities=%d lines=%d",
+                len(report["corrupted"]),
+                sum(entity["corrupt_line_count"] for entity in report["corrupted"]),
             )
         return report
 
@@ -511,6 +532,18 @@ class BackgroundService:
             return
         self.demo_dir_info_cached = demo_mode.demo_dir_info(self.base_dir)
         self._demo_dir_info_last_refresh = now
+
+    #: Wie _DEMO_DIR_INFO_MAX_AGE_SECONDS ein echter Verzeichnis-Walk (zwei,
+    #: für rollup/ und hot/), aber seltener als jene 5 Minuten: die Kachel, die
+    #: diesen Wert zeigt, verträgt eine stündliche statt minütliche Auflösung.
+    _ROLLUP_HOT_SIZE_MAX_AGE_SECONDS = 3600
+
+    def _refresh_rollup_hot_size_if_stale(self, *, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._rollup_hot_size_last_refresh < self._ROLLUP_HOT_SIZE_MAX_AGE_SECONDS:
+            return
+        self.rollup_hot_size_cached = dir_size(self.data_dir / "rollup") + dir_size(self.data_dir / "hot")
+        self._rollup_hot_size_last_refresh = now
 
     def _empty_purge_preview(self) -> dict:
         return {
@@ -764,6 +797,7 @@ class BackgroundService:
             "entities_checked": sum(report["entities_checked"] for report in reports),
             "mismatches": [item for report in reports for item in report["mismatches"]],
             "errors": [item for report in reports for item in report["errors"]],
+            "corrupted": [item for report in reports for item in report["corrupted"]],
             "repaired": any(report["repaired"] for report in reports),
             "background": True,
         }
@@ -776,6 +810,13 @@ class BackgroundService:
             len(self.storage_reconcile_last["errors"]),
             max(0.0, time.time() - started_at),
         )
+        if self.storage_reconcile_last["corrupted"]:
+            logger.warning(
+                "Beschädigte Hot-Buffer-Zeilen beim Hintergrundabgleich übersprungen · "
+                "event=storage_reconcile_corrupt_lines entities=%d lines=%d",
+                len(self.storage_reconcile_last["corrupted"]),
+                sum(entity["corrupt_line_count"] for entity in self.storage_reconcile_last["corrupted"]),
+            )
 
     def _refresh_duplicate_snapshot_if_stale(self) -> None:
         """Berechnet die Duplikat-Zählung für /housekeeping höchstens einmal pro
@@ -962,6 +1003,7 @@ class BackgroundService:
                 self._run_backup_schedule_if_due(datetime.now(self.tz))
                 self._run_retention_enforcement_if_due(datetime.now(self.tz))
                 self._refresh_demo_dir_info_if_stale()
+                self._refresh_rollup_hot_size_if_stale()
                 self._run_demo_append_if_due(datetime.now(self.tz))
                 self._flush_stale_resolution_windows(datetime.now(self.tz))
                 self._run_automatic_compaction_if_due(datetime.now(self.tz))

@@ -532,8 +532,13 @@ CREATE TABLE IF NOT EXISTS dashboard_pins (
     item_id INTEGER NOT NULL,
     -- Nur bei item_type='entity' befüllt (Werte-Kacheln, direkt angeheftete
     -- Entität ohne zugrundeliegendes Chart/Tabelle) — Entitäten haben eine
-    -- entity_id (TEXT), keine Integer-ID wie saved_charts/saved_tables,
-    -- item_id bleibt für diese Zeilen ungenutzt (0).
+    -- entity_id (TEXT), keine eigene Integer-ID wie saved_charts/saved_tables.
+    -- item_id trägt für diese Zeilen stattdessen die id der eigenen Zeile
+    -- (siehe pin_entity_to_dashboard()) — dasselbe Identifikationsmuster wie
+    -- bei Chart-/Tabellen-Pins, nötig damit dieselbe Entität mehrfach mit
+    -- unterschiedlichen Einstellungen angeheftet werden kann (die UNIQUE-
+    -- Beschränkung unten griffe sonst schon beim zweiten Pin derselben
+    -- Entität, weil item_id für alle gleich wäre).
     item_entity_id TEXT,
     position INTEGER NOT NULL,
     grid_cols INTEGER NOT NULL DEFAULT 1,
@@ -554,6 +559,12 @@ CREATE TABLE IF NOT EXISTS dashboard_pins (
     -- Nur bei Werte-Kacheln: "vor X"-Alter neben dem Wert ein-/ausblendbar —
     -- Standard an, da das bisherige (einzige) Verhalten.
     show_age INTEGER NOT NULL DEFAULT 1,
+    -- Nur bei Werte-Kacheln: das Zeitraum-Etikett ("Jahr" etc., sonst
+    -- automatisch in Kennzahlen-Zeile oder Wert-Bereich platziert, siehe
+    -- _tile_metric_context() in main.py) ein-/ausblendbar, unabhängig von
+    -- Hauptwert/Kennzahlen — Standard an, da das bisherige (einzige)
+    -- Verhalten.
+    show_period INTEGER NOT NULL DEFAULT 1,
     -- Nur bei Werte-Kacheln: abgefragter Zeitraum für Sparkline UND
     -- Kennzahlen. Beides folgt bewusst demselben Fenster — zwei
     -- verschiedene Zeiträume in einer Kachel wären nicht erklärbar.
@@ -1216,6 +1227,10 @@ class Index:
             # "vor X"-Alter neben dem Wert ein-/ausblendbar — Standard an
             # (bisheriges, einziges Verhalten).
             self._conn.execute("ALTER TABLE dashboard_pins ADD COLUMN show_age INTEGER NOT NULL DEFAULT 1")
+        if "show_period" not in dashboard_columns:
+            # Zeitraum-Etikett ein-/ausblendbar — Standard an (bisheriges,
+            # einziges Verhalten).
+            self._conn.execute("ALTER TABLE dashboard_pins ADD COLUMN show_period INTEGER NOT NULL DEFAULT 1")
         if "sparkline_resolution" not in dashboard_columns:
             self._conn.execute(
                 "ALTER TABLE dashboard_pins ADD COLUMN sparkline_resolution TEXT NOT NULL DEFAULT 'raw'"
@@ -1244,6 +1259,24 @@ class Index:
             self._conn.execute(
                 "ALTER TABLE dashboard_pins ADD COLUMN stats_metrics TEXT NOT NULL DEFAULT ''"
             )
+
+        # Werte-Kacheln: dieselbe Entität sollte bisher nur EIN Mal pro
+        # Dashboard angeheftet werden können — item_id trug für sie immer den
+        # Platzhalter 0, und genau der (zusammen mit item_entity_id) machte
+        # die UNIQUE-Beschränkung oben zur "eine Kachel pro Entität"-Regel.
+        # Nutzer-Wunsch: dieselbe Entität mehrfach mit unterschiedlichen
+        # Einstellungen (Hauptwert/Zeitraum) zeigen können. Ein Tabellen-
+        # Neuaufbau wie bei den beiden UNIQUE-Umbauten oben ist dafür NICHT
+        # nötig: item_id bekommt stattdessen die eigene id der Zeile (wie bei
+        # Chart-/Tabellen-Pins, deren item_id schon immer die echte ID des
+        # jeweiligen Charts/der Tabelle ist) — die UNIQUE-Tupel zweier Pins
+        # derselben Entität unterscheiden sich dann automatisch in item_id
+        # und blockieren sich nicht mehr gegenseitig. Idempotent von selbst:
+        # bereits migrierte Zeilen haben item_id = id ≠ 0 (AUTOINCREMENT
+        # startet bei 1), die WHERE-Bedingung greift dann nie wieder.
+        self._conn.execute(
+            "UPDATE dashboard_pins SET item_id = id WHERE item_type = 'entity' AND item_id = 0"
+        )
 
         dashboards_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(dashboards)")}
         if "locked" not in dashboards_columns:
@@ -2355,7 +2388,7 @@ class Index:
             new_id = cursor.lastrowid
             pins = self._conn.execute(
                 "SELECT item_type, item_id, item_entity_id, position, grid_cols, grid_rows, show_legend, "
-                "show_sparkline, sparkline_resolution, decimals, title, show_age, "
+                "show_sparkline, sparkline_resolution, decimals, title, show_age, show_period, "
                 "range_key, continuous, primary_metric, stats_metrics "
                 "FROM dashboard_pins WHERE dashboard_id = ? ORDER BY position ASC",
                 (dashboard_id,),
@@ -2363,15 +2396,15 @@ class Index:
             self._conn.executemany(
                 "INSERT INTO dashboard_pins "
                 "(dashboard_id, item_type, item_id, item_entity_id, position, grid_cols, grid_rows, show_legend, "
-                "show_sparkline, sparkline_resolution, decimals, title, show_age, "
+                "show_sparkline, sparkline_resolution, decimals, title, show_age, show_period, "
                 "range_key, continuous, primary_metric, stats_metrics) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         new_id, p["item_type"], p["item_id"], p["item_entity_id"], p["position"],
                         p["grid_cols"], p["grid_rows"], p["show_legend"], p["show_sparkline"],
                         p["sparkline_resolution"],
-                        p["decimals"], p["title"], p["show_age"],
+                        p["decimals"], p["title"], p["show_age"], p["show_period"],
                         p["range_key"], p["continuous"], p["primary_metric"], p["stats_metrics"],
                     )
                     for p in pins
@@ -2609,23 +2642,24 @@ class Index:
     # zu erweitern: deren item_id-basierte Signatur bleibt dadurch unverändert
     # für alle bestehenden Aufrufer (charts_pin/tables_pin/dashboard_size/…). --
 
-    def pin_entity_to_dashboard(self, dashboard_id: int, entity_id: str) -> bool:
+    def pin_entity_to_dashboard(self, dashboard_id: int, entity_id: str) -> int | None:
         """Wie pin_item_to_dashboard(), nur über entity_id statt einer
-        Integer-item_id — item_id bleibt für diese Zeilen der Platzhalter 0,
-        die eigentliche Identität trägt item_entity_id (siehe UNIQUE-
-        Beschränkung der Tabelle)."""
+        Integer-item_id. item_id trägt bei Entitäts-Pins keine vom Nutzer
+        gewählte Identität (anders als bei Chart/Tabelle), bekommt aber nach
+        dem Einfügen die eigene id der Zeile — das macht jeden Pin einzeln
+        identifizierbar, auch mehrere derselben Entität auf einem Dashboard
+        (Nutzer-Wunsch: dieselbe Entität mit unterschiedlichem Hauptwert/
+        Zeitraum mehrfach zeigen können — anders als früher ist ein erneutes
+        Anheften deshalb kein No-op mehr, sondern legt bewusst eine weitere,
+        unabhängig konfigurierbare Kachel an). Gibt die neue Pin-ID zurück,
+        oder None, wenn DASHBOARD_TILE_LIMIT erreicht ist."""
         with self._lock, self._conn:
             count = self._conn.execute(
                 "SELECT COUNT(*) FROM dashboard_pins WHERE dashboard_id = ? AND item_type != 'section'",
                 (dashboard_id,),
             ).fetchone()[0]
             if count >= self.DASHBOARD_TILE_LIMIT:
-                return False
-            if self._conn.execute(
-                "SELECT 1 FROM dashboard_pins WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (dashboard_id, entity_id),
-            ).fetchone():
-                return True  # schon angeheftet — kein Fehler, einfach nichts weiter tun
+                return None
             max_pos = self._conn.execute(
                 "SELECT MAX(position) FROM dashboard_pins WHERE dashboard_id = ?", (dashboard_id,)
             ).fetchone()[0]
@@ -2640,19 +2674,21 @@ class Index:
                 "SELECT 1 FROM entities WHERE entity_id = ? AND aggregation_type = 'counter'",
                 (entity_id,),
             ).fetchone() is not None
-            self._conn.execute(
+            cursor = self._conn.execute(
                 "INSERT INTO dashboard_pins "
                 "(dashboard_id, item_type, item_id, item_entity_id, position, show_sparkline, primary_metric) "
                 "VALUES (?, 'entity', 0, ?, ?, 1, ?)",
                 (dashboard_id, entity_id, (max_pos or 0) + 1, "sum" if zaehler else "last"),
             )
-            return True
+            pin_id = cursor.lastrowid
+            self._conn.execute("UPDATE dashboard_pins SET item_id = ? WHERE id = ?", (pin_id, pin_id))
+            return pin_id
 
-    def unpin_entity_from_dashboard(self, dashboard_id: int, entity_id: str) -> None:
+    def unpin_entity_from_dashboard(self, dashboard_id: int, pin_id: int) -> None:
         with self._lock, self._conn:
             self._conn.execute(
-                "DELETE FROM dashboard_pins WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (dashboard_id, entity_id),
+                "DELETE FROM dashboard_pins WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (dashboard_id, pin_id),
             )
 
     def list_entity_pin_dashboards(self, entity_id: str) -> list[dict]:
@@ -2660,10 +2696,14 @@ class Index:
         list_item_dashboards() für Chart/Tabelle, aber über item_entity_id
         (siehe pin_entity_to_dashboard()). Von entity_migration.py genutzt, um
         beim Verschieben jede gefundene Kachel auf die Ziel-Entität
-        umzuhängen."""
+        umzuhängen — pin_id (item_id) ist dabei die konkrete Kachel, gegen
+        die set_dashboard_entity_pin_entity() aufgerufen wird. Absichtlich
+        ohne DISTINCT/GROUP BY: sind mehrere Kacheln derselben Entität auf
+        einem Dashboard angeheftet, liefert das eine Zeile je Kachel, nicht
+        je Dashboard — jede muss einzeln umgehängt werden."""
         with self._lock, self._conn:
             rows = self._conn.execute(
-                "SELECT d.id, d.name, d.is_default "
+                "SELECT d.id, d.name, d.is_default, p.item_id AS pin_id "
                 "FROM dashboard_pins p JOIN dashboards d ON d.id = p.dashboard_id "
                 "WHERE p.item_type = 'entity' AND p.item_entity_id = ? "
                 "ORDER BY d.is_default DESC, d.name COLLATE NOCASE ASC, d.id ASC",
@@ -2672,85 +2712,92 @@ class Index:
             return [dict(row) for row in rows]
 
     def set_dashboard_entity_pin_size(
-        self, dashboard_id: int, entity_id: str, grid_cols: int, grid_rows: int, max_size: int = 6
+        self, dashboard_id: int, pin_id: int, grid_cols: int, grid_rows: int, max_size: int = 6
     ) -> bool:
         if not 1 <= int(grid_cols) <= max_size or not 1 <= int(grid_rows) <= max_size:
             raise ValueError(f"Dashboard-Kachelgröße muss zwischen 1 und {max_size} liegen")
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET grid_cols = ?, grid_rows = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (int(grid_cols), int(grid_rows), dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (int(grid_cols), int(grid_rows), dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_sparkline(
-        self, dashboard_id: int, entity_id: str, show_sparkline: bool
+        self, dashboard_id: int, pin_id: int, show_sparkline: bool
     ) -> bool:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET show_sparkline = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (int(show_sparkline), dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (int(show_sparkline), dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_sparkline_resolution(
-        self, dashboard_id: int, entity_id: str, resolution: str
+        self, dashboard_id: int, pin_id: int, resolution: str
     ) -> bool:
         if resolution not in ("raw", "5min", "15min", "30min", "1h"):
             raise ValueError("Ungültige Sparkline-Auflösung")
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET sparkline_resolution = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (resolution, dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (resolution, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_entity(
-        self, dashboard_id: int, old_entity_id: str, new_entity_id: str
+        self, dashboard_id: int, pin_id: int, new_entity_id: str
     ) -> bool:
         """Wechselt die Entität einer Werte-Kachel, ohne Position und
-        Darstellungsoptionen der Kachel zu verlieren."""
+        Darstellungsoptionen der Kachel zu verlieren. Die Zielentität darf
+        auf dem Dashboard bereits (auch mehrfach) angeheftet sein — das ist
+        seit dem Mehrfach-Anheften-Feature kein Fehlerfall mehr, sondern der
+        Zweck: eine weitere, unabhängig konfigurierte Kachel derselben
+        Entität."""
         with self._lock, self._conn:
-            if old_entity_id != new_entity_id and self._conn.execute(
-                "SELECT 1 FROM dashboard_pins WHERE dashboard_id = ? "
-                "AND item_type = 'entity' AND item_entity_id = ?",
-                (dashboard_id, new_entity_id),
-            ).fetchone():
-                raise ValueError("Diese Entität ist bereits auf dem Dashboard angeheftet")
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET item_entity_id = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (new_entity_id, dashboard_id, old_entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (new_entity_id, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
-    def set_dashboard_entity_pin_show_age(self, dashboard_id: int, entity_id: str, show_age: bool) -> bool:
+    def set_dashboard_entity_pin_show_age(self, dashboard_id: int, pin_id: int, show_age: bool) -> bool:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET show_age = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (int(show_age), dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (int(show_age), dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
-    def set_dashboard_entity_pin_decimals(self, dashboard_id: int, entity_id: str, decimals: str) -> bool:
+    def set_dashboard_entity_pin_show_period(self, dashboard_id: int, pin_id: int, show_period: bool) -> bool:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE dashboard_pins SET show_period = ? "
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (int(show_period), dashboard_id, pin_id),
+            )
+            return cursor.rowcount > 0
+
+    def set_dashboard_entity_pin_decimals(self, dashboard_id: int, pin_id: int, decimals: str) -> bool:
         if decimals not in ("auto", "0", "1", "2", "3"):
             raise ValueError("Ungültige Nachkommastellen")
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET decimals = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (decimals, dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (decimals, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_metrics(
         self,
         dashboard_id: int,
-        entity_id: str,
+        pin_id: int,
         *,
         range_key: str | None = None,
         continuous: bool | None = None,
@@ -2796,20 +2843,20 @@ class Index:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 f"UPDATE dashboard_pins SET {', '.join(fields)} "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (*values, dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (*values, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
-    def set_dashboard_entity_pin_title(self, dashboard_id: int, entity_id: str, title: str | None) -> bool:
+    def set_dashboard_entity_pin_title(self, dashboard_id: int, pin_id: int, title: str | None) -> bool:
         """title=None/leer setzt auf "übernehmen" zurück (entity-eigener
         friendly_name statt eines eigenen Kachel-Titels, siehe
         _dashboard_tiles_context() in main.py)."""
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET title = ? "
-                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_entity_id = ?",
-                (title or None, dashboard_id, entity_id),
+                "WHERE dashboard_id = ? AND item_type = 'entity' AND item_id = ?",
+                (title or None, dashboard_id, pin_id),
             )
             return cursor.rowcount > 0
 
@@ -3113,99 +3160,48 @@ class Index:
         }
 
     def vacuum_database(self) -> dict:
-        """Verdichtet den Index, ohne den globalen Lock für die eigentliche
-        Kompaktierung zu halten.
+        """Verdichtet den Index synchron auf self._conn, unter self._lock.
 
-        Der Aufrufer muss parallel laufende Dateioperationen über den
-        StorageCoordinator ausschließen — das betrifft aber nur Archiv-/
-        Rollup-/Hot-Dateien, nicht reine Index-Schreibzugriffe (z. B.
-        Dashboard/Chart/Settings speichern), die keine Entitäts-Datei
-        anfassen und deshalb am StorageCoordinator vorbeilaufen.
+        Frühere Version (ab 2a29ab4, 15.9.) baute die verdichtete Kopie
+        stattdessen lock-frei über SQLite's Backup-API auf einer separaten
+        mode=ro-Connection, um andere Index-Zugriffe (u. a. das
+        Energiedashboard) während der potenziell langen Kompaktierung nicht
+        zu blockieren. Eine Stunde später stellte 3e3575a den Index auf
+        WAL-Modus um, ohne diesen lock-freien Kopiervorgang darauf
+        nachzuziehen: storage_coordinator.exclusive() (Aufrufer in
+        index_optimization.py) pausiert nur Archiv-/Rollup-/Hot-Dateizugriffe,
+        nicht reine Index-Schreibzugriffe — der 30-Sekunden-Wartungsplaner in
+        background.py schreibt z. B. laufend per set_setting() unabhängig
+        davon weiter. Ein solcher Schreibzugriff bzw. der dadurch ausgelöste
+        WAL-Checkpoint konnte mit dem unlocked Lesezugriff der Kopie
+        kollidieren; zusätzlich blieben die separaten, langlebigen
+        _read_conn()-Lesezugriffe je Thread (ebenfalls aus 3e3575a) nach dem
+        Datei-Swap auf die ausgehängte alte Datei zeigen. Beides zusammen hat
+        am 22.09.2026 eine echte index.sqlite korrumpiert (siehe
+        CHANGELOG_INTERNAL.md) — beim nächsten Start ließ sich die Datenbank
+        nicht mehr öffnen ("malformed database schema").
 
-        Frühere Version führte VACUUM direkt auf self._conn unter self._lock
-        aus — bei einer größeren Indexdatei blockierte das für die GESAMTE
-        Dauer jeden anderen Index-Zugriff (u. a. das Energiedashboard,
-        IndexBusy nach INDEX_LOCK_TIMEOUT_SECONDS). Stattdessen läuft die
-        eigentliche Kompaktierung jetzt auf einer isolierten Kopie (über
-        SQLite's Backup-API gebaut, derselbe Ansatz wie
-        storage/backup.py._copy_sqlite_database) — self._lock wird nur für
-        die kurzen Momente davor (Stand feststellen) und danach (Datei
-        tauschen) gehalten, nicht für die potenziell lange Kompaktierung
-        selbst.
-
-        self._conn.total_changes (statt PRAGMA data_version, das auf
-        Schreibzugriffe über dieselbe Connection nicht anschlägt — hier ist
-        aber ausschließlich diese eine geteilte Connection im Spiel) markiert,
-        ob währenddessen doch etwas geschrieben wurde: dann wäre die Kopie
-        veraltet, sie wird verworfen und der Versuch wiederholt. Bleibt es
-        nach mehreren Versuchen dabei (in der Praxis nicht erwartet — dafür
-        müsste jemand exakt während der Kompaktierung einen
-        Index-Schreibzugriff auslösen), kompaktiert der Fallback synchron
-        unter Lock wie bisher — langsamer, aber immer korrekt.
-
-        Bewusst nicht mit WAL-Modus gelöst (der Lese-/Schreibzugriffe generell
-        unabhängig voneinander machen würde): das hätte Rückwirkungen auf
-        storage/backup.py, das index.sqlite bisher als einzelne Datei sichert
-        — ein WAL-Sidecar mit noch nicht zurückgeschriebenen Änderungen bliebe
-        dort sonst unbemerkt außen vor. Größerer Umbau, hier bewusst nicht
-        mit erledigt.
-        """
-        copy_path = self._db_path.with_name(self._db_path.name + ".vacuum-copy")
-        for _attempt in range(3):
-            copy_path.unlink(missing_ok=True)
-            with self._lock:
-                self._conn.commit()
-                before = self._get_database_maintenance_stats_unlocked()
-                changes_before = self._conn.total_changes
-            try:
-                self._build_vacuumed_copy(copy_path)
-                with self._lock:
-                    if self._conn.total_changes != changes_before:
-                        # Während der Kompaktierung wurde geschrieben — die
-                        # Kopie ist veraltet, verwerfen und erneut versuchen.
-                        continue
-                    self._conn.close()
-                    copy_path.replace(self._db_path)
-                    self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-                    self._conn.row_factory = sqlite3.Row
-                    quick_check = str(
-                        self._conn.execute("PRAGMA quick_check").fetchone()[0]
-                    )
-                    if quick_check != "ok":
-                        raise sqlite3.DatabaseError(
-                            f"SQLite quick_check nach VACUUM: {quick_check}"
-                        )
-                    after = self._get_database_maintenance_stats_unlocked()
-                    return {"before": before, "after": after, "quick_check": quick_check}
-            finally:
-                copy_path.unlink(missing_ok=True)
-        return self._vacuum_database_locked()
-
-    def _build_vacuumed_copy(self, copy_path: Path) -> None:
-        """Kopiert den aktuellen Datenbestand über SQLite's Backup-API (kein
-        self._lock nötig — liest über eine eigene, separate Connection direkt
-        von der Datei) und kompaktiert anschließend diese Kopie. Beides
-        passiert isoliert auf copy_path, ohne self._conn zu berühren — die
-        potenziell lange VACUUM-Laufzeit blockiert dadurch keinen anderen
-        Index-Zugriff."""
-        source = sqlite3.connect(f"file:{self._db_path.resolve()}?mode=ro", uri=True)
-        destination = sqlite3.connect(copy_path)
-        try:
-            source.backup(destination)
-            destination.execute("VACUUM")
-        finally:
-            destination.close()
-            source.close()
-
-    def _vacuum_database_locked(self) -> dict:
-        """Fallback: synchrones VACUUM unter Lock, wie vor dieser Änderung —
-        nur falls vacuum_database() mehrfach hintereinander mit einem
-        parallelen Index-Schreibzugriff kollidiert (in der Praxis nicht
-        erwartet, garantiert aber Korrektheit statt endloser Versuche)."""
+        Korrektheit geht vor der Lock-Contention-Optimierung: kein
+        Datei-Swap, keine zweite Connection, keine Race-Fenster mehr — dafür
+        blockieren andere Index-Zugriffe wieder für die Dauer des VACUUMs.
+        Das betrifft nur den seltenen Fall, dass eine Optimierung überhaupt
+        empfohlen wird (Datei ≥ 50 MB, ≥ 25 % reclaimable, siehe
+        index_optimization.py), und ist dort inzwischen im UI sichtbar
+        gemacht (htmx-Button mit Ladezustand statt einer stillen
+        Seitennavigation)."""
         with self._lock:
             self._conn.commit()
             before = self._get_database_maintenance_stats_unlocked()
             self._conn.execute("VACUUM")
+            # VACUUM schreibt unter WAL wie jeder andere Schreibzugriff zunächst
+            # nur in die WAL-Datei — ohne den expliziten Checkpoint bliebe die
+            # Hauptdatei auf der alten (unkomprimierten) Größe stehen, und der
+            # eigentliche Zweck der Optimierung (Plattenplatz freigeben) bliebe
+            # unsichtbar. TRUNCATE statt PASSIVE/FULL: schreibt alle WAL-Frames
+            # zurück UND kappt die WAL-Datei danach auf 0 Bytes, statt sie nur
+            # zurückzusetzen — sonst läge die Datenmenge nur verschoben in
+            # index.sqlite-wal statt in index.sqlite.
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             quick_check = str(
                 self._conn.execute("PRAGMA quick_check").fetchone()[0]
             )

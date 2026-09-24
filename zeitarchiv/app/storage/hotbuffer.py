@@ -7,12 +7,15 @@ CSV nicht unlesbar, eine Parquet-Datei ohne Footer dagegen schon.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Iterator
 from zoneinfo import ZoneInfo
 
 from .paths import hot_file_path, storage_area_dir, validate_entity_id
+
+logger = logging.getLogger(__name__)
 
 # (ts, value, event_id, min_value, max_value). min_value/max_value sind nur
 # bei Zeilen gesetzt, die die Standard-Auflösung als Ø mehrerer Rohwerte
@@ -119,11 +122,18 @@ def read_full_rows(path: Path) -> list[HotRecord]:
     return read_records(path)
 
 
-def iter_records(path: Path) -> Iterator[HotRecord]:
+def iter_records(path: Path, corrupt_lines: list[str] | None = None) -> Iterator[HotRecord]:
     """Streamt Hot-Dateien in allen bisherigen Formaten: zwei Spalten (alt),
     drei Spalten (ts,value,event_id) oder fünf Spalten
     (ts,value,event_id,min_value,max_value — Standard-Auflösung). Fehlende
     Spalten werden als None aufgefüllt.
+
+    ``corrupt_lines``: optionale Sammelliste, an die übersprungene kaputte
+    Zeilen (siehe unten) zusätzlich zum Warn-Log angehängt werden — für
+    Aufrufer, die eine gefundene Beschädigung sichtbar machen wollen (z. B.
+    der Speicherindex-Abgleich, siehe reconcile.py), statt sie nur im Log
+    verschwinden zu lassen. Die meisten Aufrufer brauchen das nicht und
+    lassen den Parameter weg.
     """
     if not path.exists():
         return
@@ -135,10 +145,27 @@ def iter_records(path: Path) -> Iterator[HotRecord]:
             parts = line.split(",", 4)
             if len(parts) < 2:
                 continue
-            event_id = (parts[2] or None) if len(parts) >= 3 else None
-            min_value = float(parts[3]) if len(parts) >= 5 and parts[3] != "" else None
-            max_value = float(parts[4]) if len(parts) >= 5 and parts[4] != "" else None
-            yield (float(parts[0]), float(parts[1]), event_id, min_value, max_value)
+            try:
+                event_id = (parts[2] or None) if len(parts) >= 3 else None
+                min_value = float(parts[3]) if len(parts) >= 5 and parts[3] != "" else None
+                max_value = float(parts[4]) if len(parts) >= 5 and parts[4] != "" else None
+                record = (float(parts[0]), float(parts[1]), event_id, min_value, max_value)
+            except ValueError:
+                # Nach einem unsauberen Absturz kann das Dateisystem den Rest einer
+                # noch nicht geflushten Zeile als Nullbytes zurückliefern (ext4 u. a.
+                # nach Stromausfall/hartem Kill) — eine einzelne so kaputte Zeile darf
+                # weder die Abfrage noch den Wartungsplaner noch den Crash-Reconciliation-
+                # Lauf für die ganze restliche Datei/Installation lahmlegen. Übersprungen
+                # statt repariert: der ursprüngliche Wert ist unwiederbringlich verloren.
+                logger.warning(
+                    "Kaputte Hot-Buffer-Zeile übersprungen · event=hotbuffer_corrupt_line "
+                    "path=%s snippet=%r",
+                    path, line[:80],
+                )
+                if corrupt_lines is not None:
+                    corrupt_lines.append(line[:80])
+                continue
+            yield record
 
 
 def read_records(path: Path) -> list[HotRecord]:

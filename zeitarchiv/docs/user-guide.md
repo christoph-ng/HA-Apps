@@ -328,7 +328,10 @@ etwas kommt; er erscheint nur, wenn es tatsächlich etwas zu scrollen gibt.
   Sektion", falls es die erste war). Sektionen zählen nicht gegen das
   30-Kacheln-Limit.
 - **Werte-Kachel:** pinnt den aktuellen Wert einer einzelnen Entität direkt
-  aufs Dashboard, ohne dafür ein Chart anzulegen. Nach dem Anheften öffnet
+  aufs Dashboard, ohne dafür ein Chart anzulegen. Dieselbe Entität lässt
+  sich auch mehrfach anheften, jede Kachel mit eigenen, unabhängigen
+  Einstellungen — z. B. eine mit Hauptwert „Aktuell", eine zweite mit
+  „Ø" über einen anderen Zeitraum. Nach dem Anheften öffnet
   sich sofort die Konfiguration. Bei einer Entität vom Typ **Zähler** ist der
   große Wert nicht der Zählerstand, sondern der **Zuwachs** im gewählten
   Zeitraum (Kürzel „+") — der Stand seit Inbetriebnahme lässt sich über
@@ -346,7 +349,10 @@ etwas kommt; er erscheint nur, wenn es tatsächlich etwas zu scrollen gibt.
   zeigt die im Zeitarchiv gespeicherten Rohpunkte der letzten 24 Stunden;
   alternativ lässt sie sich auf einen Punkt je 5, 15 oder 30 Minuten oder je
   Stunde verdichten. Entität, Anzeige der letzten Aktualisierung,
-  Nachkommastellen und Titel sind direkt in der Kachel bearbeitbar. Ist der
+  Nachkommastellen und Titel sind direkt in der Kachel bearbeitbar. Das
+  Zeitraum-Etikett (z. B. „Monat" unter dem Hauptwert) lässt sich separat
+  ein-/ausblenden — unabhängig von der Anzeige der letzten Aktualisierung,
+  beide lassen sich gleichzeitig zeigen. Ist der
   letzte Wert älter als 15
   Minuten bzw. eine Stunde, hebt sich der Kartenrahmen gelb bzw. rot
   hervor. Alle Einstellungen einer Werte-Kachel liegen in einem eigenen,
@@ -969,6 +975,11 @@ vergangene Spalte automatisch nur den bislang vergangenen Teil ihres
 Zeitraums („Gleicher Zeitpunkt"-Vergleich) — ein noch laufender Tag wird so
 fair gegen „Vortag bis zur aktuellen Uhrzeit" statt gegen den kompletten
 Vortag verglichen.
+
+Wie Zeilen tragen auch Spalten ein Kürzel zur eindeutigen Bezeichnung beim
+Reden über die Tabelle ("Spalte 3") — bei Zeilen ein Buchstabe (zugleich die
+Formel-Referenz, siehe [Formeln](#formeln)), bei Spalten eine Zahl (rein
+zur Anzeige, ohne Funktion in Formeln).
 
 Wie Zeilen lässt sich auch eine Spalte über ihr Menü **ausblenden** — sie
 bleibt weiterhin berechnet, etwa damit eine ausgeblendete Vorjahres-Spalte
@@ -1640,7 +1651,7 @@ wie die Einstellungen:
 | **Duplikate** | Archivweit erkannte doppelte Zeitstempel der letzten 30 Tage, je Entität — derselbe stündliche Hintergrund-Schnappschuss, der auch die Meldung „Duplikate gefunden" auslöst. Entfernbar über „Duplikate automatisch entfernen" auf der jeweiligen Bereinigungs-Seite. |
 | **Ausreißer** | Entitäten, bei denen die eingestellte Ausreißer-Schwelle mehr als 1 % ihrer Werte markiert — mit Schwelle, absoluter Zahl und Quote. Dann ist die Schwelle für dieses Signal zu eng: markiert wird nicht mehr das Unplausible, sondern normales Verhalten. Es sind dieselben Zahlen, die unter dem Schwellenfeld der jeweiligen Entität stehen (siehe [Entität konfigurieren](#entität-konfigurieren)); die Liste rechnet nichts eigenes. Keine Sammel-Korrektur — die passende Schwelle hängt am Signal. |
 | **Konfiguration** | Entitäten, deren Lücken-Erkennung strukturell nie zutreffen kann, weil die gewählte Auflösung oder der aktive Wertänderungsfilter selbst schon einen größeren Mindestabstand zwischen Werten erzwingt (siehe [Entität konfigurieren](#entität-konfigurieren)) — mit Auflösung, aktueller und empfohlener Lücken-Erkennung je Entität. Rein informativ, keine Sammel-Korrektur: der passende Zielwert unterscheidet sich je Entität. |
-| **Speicherplatz** | Freier Speicherplatz auf dem Host-Dateisystem (Kachel mit Auslastungsbalken — andere Frage als die Zahlen unten, nicht Zeitarchivs eigener Speicherverbrauch); Indexkonsistenz prüfen/reparieren; markierte Datensätze endgültig aus Hot Buffer und Archiv entfernen (siehe [Bereinigung](#bereinigung)). Darunter der Schalter für die automatische Bereinigung (standardmäßig aus) und das Mindestalter der Löschmarkierung dafür — entfernt nur Markierungen, die mindestens so lange her sind, damit „Rückgängig" für eine gerade erst gelöschte Zeile nicht ins Leere läuft. Meldet die Vorschau „Löschmarkierungen ohne passende Rohdatenzeile", war die zugehörige Rohdatenzeile bereits durch eine Verdichtung oder eine abgelaufene Aufbewahrung entfernt worden — beide räumen die betroffenen Markierungen seitdem selbst mit auf, diese Zahl geht mit der Zeit gegen 0. |
+| **Speicherplatz** | Freier Speicherplatz auf dem Host-Dateisystem (Kachel mit Auslastungsbalken — andere Frage als die Zahlen unten, nicht Zeitarchivs eigener Speicherverbrauch). Knopf „Speicher prüfen" löst zwei getrennt ausgewiesene Prüfungen auf einmal aus: **Indexkonsistenz** (stimmt der abgeleitete Index-Cache mit Archiv/Hot Buffer überein — Abweichungen sind über „Index reparieren" behebbar) und **Datenintegrität** (sind die Rohdaten im Hot Buffer selbst noch lesbar — beschädigte Zeilen entstehen fast immer durch einen unsauberen Neustart, Stromausfall oder harten Kill, und sind nicht reparierbar; betroffene Entität und Monat werden aufgelistet, der Wert bleibt unwiederbringlich verloren). Darunter: markierte Datensätze endgültig aus Hot Buffer und Archiv entfernen. Der Knopf „Markierte Datensätze anzeigen" listet sie vorher durchsuchbar auf — erst je betroffene Entität mit Anzahl und letztem Markierungszeitpunkt (Suchfeld, Paginierung), ein Klick auf eine Zeile zeigt darunter im selben Dialog die einzelnen markierten Zeitpunkte samt Wert. Rein lesend: das eigentliche Rückgängigmachen einer einzelnen Markierung läuft weiterhin über die Entität selbst (siehe [Bereinigung](#bereinigung)). Darunter der Schalter für die automatische Bereinigung (standardmäßig aus) und das Mindestalter der Löschmarkierung dafür — entfernt nur Markierungen, die mindestens so lange her sind, damit „Rückgängig" für eine gerade erst gelöschte Zeile nicht ins Leere läuft. Meldet die Vorschau „Löschmarkierungen ohne passende Rohdatenzeile", war die zugehörige Rohdatenzeile bereits durch eine Verdichtung oder eine abgelaufene Aufbewahrung entfernt worden — beide räumen die betroffenen Markierungen seitdem selbst mit auf, diese Zahl geht mit der Zeit gegen 0. |
 | **Aufbewahrung** | Übersicht aktuell fälliger und bereits gelöschter Datensätze; Vorschau fälliger Löschungen; Zeitplan für automatische Durchsetzung (täglich oder wöchentlich mit Wochentag); Lauf-Historie. |
 | **Verdichten** | Schalter für die automatische, rückwirkende Verdichtung archivierter Monate (standardmäßig aus) und das Mindestalter dafür — betrifft nur Entitäten mit gesetztem Verdichtungsziel (siehe [Entität konfigurieren](#entität-konfigurieren)). Die manuelle Verdichten-Aktion liegt dagegen bei der jeweiligen Entität selbst, im Bearbeitungsbereich. |
 | **Aktivität** | Die letzten Korrektur-, Hinzufügen-, Bereinigen-, Verdichten- und Aufbewahrung-Vorgänge in einer Liste, mit Entität, Auslöser (manuell/automatisch), Zeilenzahl und Status — filterbar nach Entität, Aktionstyp, Status und Zeitraum. Ein Klick auf eine Verdichten- oder Bereinigen-Zeile zeigt ihr Detail (Zielauflösung, betroffener Zeitraum, Zeilen vorher/nachher). Backup steht dort nicht mit drin — es betrifft die ganze Installation, nicht einzelne Datensätze. |
@@ -1709,6 +1720,8 @@ Zeitarchiv unter anderem:
 
 - Speicherindex-Prüfung unvollständig oder mit gefundenen (meist bereits
   automatisch reparierten) Abweichungen
+- Beschädigte Rohdaten im Hot Buffer gefunden (unwiederbringlich verlorene
+  Zeilen, meist nach einem unsauberen Neustart)
 - Wartungsplaner oder Speicherindex-Hintergrundabgleich reagiert länger
   als 5 Minuten nicht mehr (Selbstheilungs-Schutz)
 - Kein automatischer Backup-Zeitplan aktiv
@@ -1919,23 +1932,34 @@ Eigener Menüpunkt **System → Backup / Restore** (nicht unter Einstellungen):
   für selbst erstellte wie für importierte Backups.
 - **Wiederherstellen:** bereitet den Austausch nur vor — angewendet wird er
   erst beim **nächsten Neustart des Zeitarchiv-Add-ons**, bevor die
-  Datenbank wieder geöffnet wird. Nach dem Klick erscheint dazu ein
-  entsprechender Hinweis; ohne Neustart bleibt der aktuelle Datenbestand
-  bis dahin unverändert nutzbar. Der bisherige Stand wird beim Neustart vor
-  dem Überschreiben in ein Rollback-Verzeichnis verschoben, nicht gelöscht
-  — bei Bedarf lässt sich der Zustand vor der Wiederherstellung also
-  zurückholen. Nach einer Wiederherstellung empfiehlt sich ein kurzer Blick
-  auf **Statistik**, um zu prüfen, ob die erwarteten Entitäten und
+  Datenbank wieder geöffnet wird. Nach dem Klick fragt ein Dialog aktiv
+  „Jetzt neu starten?"; eine Bestätigung stößt den Neustart über den
+  Supervisor direkt an, „Später" verschiebt ihn (der Restore bleibt
+  trotzdem vorgemerkt und wird beim nächsten regulären Neustart
+  eingespielt). Ohne Neustart bleibt der aktuelle Datenbestand bis dahin
+  unverändert nutzbar. Der bisherige Stand wird beim Neustart vor dem
+  Überschreiben in ein Restore-Rollback verschoben, nicht gelöscht — bei
+  Bedarf lässt sich der Zustand vor der Wiederherstellung also zurückholen
+  (siehe unten). Nach einer Wiederherstellung empfiehlt sich ein kurzer
+  Blick auf **Statistik**, um zu prüfen, ob die erwarteten Entitäten und
   Datensatzmengen wieder vorhanden sind.
-- **Ausführungsverlauf:** listet jeden Backup-Lauf mit Zeitpunkt, Auslöser
-  (manuell/Zeitplan), Status, Dauer und Größe. Ein fehlgeschlagener oder
+- **Ausführungsverlauf:** listet jeden Backup-Lauf sowie jede tatsächlich
+  angewendete Wiederherstellung (eigener Auslöser „Wiederherstellung") mit
+  Zeitpunkt, Status, Dauer/„—" und Größe. Ein fehlgeschlagener oder
   unterbrochener Lauf ist rot markiert; ein Klick auf die Zeile zeigt den
   Fehlergrund.
-- **Restore-Rollbacks:** die beim Wiederherstellen automatisch angelegten
-  Sicherungen des jeweils vorherigen Standes, einzeln über „Rollback
-  löschen" entfernbar, sobald sie nicht mehr gebraucht werden — sie zählen
-  nicht zu den regulären Backups und räumen sich nicht über den Zeitplan
-  automatisch mit auf.
+- **Restore-Rollback:** der beim Wiederherstellen automatisch angelegte
+  Zwischenstand unmittelbar vor der letzten Wiederherstellung, mit
+  Zeitpunkt und Größe gelistet. Zwei Aktionen: „Diesen Stand
+  wiederherstellen" macht die letzte Wiederherstellung rückgängig (läuft
+  über denselben Neustart-Mechanismus wie oben — der aktuelle Stand wird
+  dabei selbst wieder als neuer Rollback aufgehoben), oder „Rollback
+  löschen" entfernt ihn sofort. Es wird immer nur der jeweils letzte
+  aufgehoben — ein Rollback macht ausschließlich den unmittelbar
+  vorangegangenen Restore rückgängig, nicht eine längere Historie; alles,
+  was weiter zurückliegt, holt man sich über ein reguläres Backup zurück.
+  Ein neuer Restore ersetzt ihn automatisch, er zählt nicht zu den
+  regulären Backups und braucht dafür auch keinen eigenen Zeitplan.
 
 ## Demo-Modus
 

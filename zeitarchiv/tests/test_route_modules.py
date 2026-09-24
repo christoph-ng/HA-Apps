@@ -101,7 +101,18 @@ def test_main_keeps_external_api_and_report_routes_out_of_the_monolith() -> None
     # schleichendes Wachstum, sondern dieselbe neue Funktionalität weiter
     # ausgebaut. main.py wuchs von 5.491 auf 5.555 — Schwelle wieder nach
     # "Ist-Stand plus kleiner Puffer": 5.620 gegen die heutigen 5.555.
-    assert len(main.splitlines()) < 5_620
+    #
+    # Am 22. September auf 5.730 angehoben — Restore-Rollbacks (Konzept
+    # gleichen Namens): ein Rollback-Stand lässt sich jetzt tatsächlich
+    # einspielen statt nur gelöscht zu werden (neue Route backup/rollback/
+    # restore/{name}), Wiederherstellungen erscheinen im Ausführungsverlauf
+    # der Backup-Seite (Merge-Logik in _backup_context()), und ein neuer
+    # "Jetzt neu starten"-Dialog nach einem vorgemerkten Restore ruft die
+    # Supervisor-Selbst-Neustart-API über die neue Route system/restart auf.
+    # Wieder neue Nutzer-Funktionalität, kein schleichendes Wachstum an schon
+    # bekannter Stelle. main.py wuchs von 5.555 auf 5.673 — Schwelle nach
+    # "Ist-Stand plus kleiner Puffer": 5.730 gegen die heutigen 5.673.
+    assert len(main.splitlines()) < 5_730
 
 
 def test_api_router_has_explicit_runtime_dependencies_and_all_api_routes() -> None:

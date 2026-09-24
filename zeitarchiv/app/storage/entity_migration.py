@@ -204,7 +204,6 @@ class MigrationResult:
     duplicate_rows: int
     overwritten_rows: int = 0
     repointed_dashboards: list[str] = field(default_factory=list)
-    duplicate_pin_dashboards: list[str] = field(default_factory=list)
 
 
 def _group_by_month(
@@ -313,26 +312,19 @@ def _overwrite_existing_values(
     return overwritten
 
 
-def _repoint_dashboard_pins(
-    index: Index, source_entity_id: str, target_entity_id: str
-) -> tuple[list[str], list[str]]:
+def _repoint_dashboard_pins(index: Index, source_entity_id: str, target_entity_id: str) -> list[str]:
     """Hängt jede Werte-Kachel, die noch auf die Quelle zeigt, auf das Ziel um
     — Kachel-Einstellungen (Titel, Rundung, Sparkline, Größe) bleiben dabei
     erhalten (Index.set_dashboard_entity_pin_entity()). Existiert auf
-    demselben Dashboard schon eine Kachel für das Ziel, würde das Umhängen ein
-    Duplikat erzeugen (UNIQUE-Beschränkung von dashboard_pins) — dann wird die
-    Quell-Kachel stattdessen entfernt, statt die ganze Migration daran
-    scheitern zu lassen."""
+    demselben Dashboard schon eine Kachel für das Ziel, entsteht seit dem
+    Mehrfach-Anheften-Feature einfach eine zweite, unabhängig konfigurierte
+    Kachel der Zielentität — kein Sonderfall mehr wie früher, als das Umhängen
+    dafür die Quell-Kachel ersatzlos entfernt hätte."""
     repointed: list[str] = []
-    duplicate_pin: list[str] = []
     for dashboard in index.list_entity_pin_dashboards(source_entity_id):
-        try:
-            index.set_dashboard_entity_pin_entity(dashboard["id"], source_entity_id, target_entity_id)
-            repointed.append(dashboard["name"])
-        except ValueError:
-            index.unpin_entity_from_dashboard(dashboard["id"], source_entity_id)
-            duplicate_pin.append(dashboard["name"])
-    return repointed, duplicate_pin
+        index.set_dashboard_entity_pin_entity(dashboard["id"], dashboard["pin_id"], target_entity_id)
+        repointed.append(dashboard["name"])
+    return repointed
 
 
 def execute_migration(
@@ -382,9 +374,8 @@ def execute_migration(
             overwritten_rows = _overwrite_existing_values(data_dir, index, target, overlap_rows, tz)
 
     repointed: list[str] = []
-    duplicate_pin: list[str] = []
     if post_action != "keep":
-        repointed, duplicate_pin = _repoint_dashboard_pins(index, source_entity_id, target_entity_id)
+        repointed = _repoint_dashboard_pins(index, source_entity_id, target_entity_id)
         if post_action == "delete":
             entity_removal.delete_entity(data_dir, index, source_entity_id)
         elif post_action == "clear":
@@ -399,5 +390,4 @@ def execute_migration(
         duplicate_rows=import_result.duplicate_rows,
         overwritten_rows=overwritten_rows,
         repointed_dashboards=repointed,
-        duplicate_pin_dashboards=duplicate_pin,
     )

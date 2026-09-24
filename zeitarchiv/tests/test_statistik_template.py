@@ -187,7 +187,12 @@ def test_retention_summary_values_align_below_two_line_titles() -> None:
 
 
 def test_index_details_explain_all_logical_database_areas() -> None:
-    source = page_text("statistik_index.html")
+    # Der eigentliche Inhalt steckt in _statistik_index_body.html (per
+    # {% include %} eingebunden) — page_text() folgt keinen Includes, deshalb
+    # hier dazugelesen.
+    source = page_text("statistik_index.html") + (
+        TEMPLATES_DIR / "_statistik_index_body.html"
+    ).read_text(encoding="utf-8")
     main = (TEMPLATES_DIR.parent / "main.py").read_text(encoding="utf-8")
     assert "Entitäten und Archivstatus" in main
     assert "Schreibsicherheit und Bereinigung" in main

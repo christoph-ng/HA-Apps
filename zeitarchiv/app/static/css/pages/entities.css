@@ -317,6 +317,21 @@
      dieselben wie im vollen Tabellen-Editor (table_editor.html) — eine
      angeheftete Tabelle sieht hier identisch aus wie dort. */
   .dtile-table-preview{height:auto;min-height:160px;flex:1;overflow:auto;}
+  /* Sichtbarer Hinweis für einen Spaltenkopf-Tooltip (laufende Basis-Spalte/
+     Vorjahresvergleich) — dieselbe Regel wie .tbl-period-hint in
+     table_editor.css. Inline statt frei positioniert (rechtsbündiger Text
+     und ein absolut platzierter Punkt kollidieren sonst in derselben Ecke).
+     Rein dekorativ (pointer-events:none), der th selbst trägt
+     data-tooltip-fixed. */
+  .dtile-table-preview .tbl-period-hint{
+    display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
+    border-radius:999px;margin:0 0 1px 5px;vertical-align:middle;pointer-events:none;
+    border:1px solid var(--ink-faint);color:var(--ink-faint);
+    font-family:var(--font-mono);font-size:9px;font-weight:600;
+  }
+  .tbl-style-header-accent .tbl-period-hint{
+    border-color:color-mix(in srgb, var(--accent-contrast) 70%, transparent);color:var(--accent-contrast);
+  }
   /* Ohne gespeicherte Spaltenbreiten/"Spalten gleichmäßig" (kein <colgroup>,
      siehe renderTableTile() in dashboard-tiles.js) bleibt die Tabelle
      width:100% mit table-layout:auto — der Browser staucht die Spalten dann

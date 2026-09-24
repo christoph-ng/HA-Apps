@@ -975,13 +975,25 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
 
 
     @router.get("/settings/purge/marked", response_class=HTMLResponse)
-    def settings_purge_marked(request: Request, search: str = Query(default="", max_length=200)) -> HTMLResponse:
+    def settings_purge_marked(
+        request: Request,
+        search: str = Query(default="", max_length=200),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=10, le=200),
+    ) -> HTMLResponse:
         """Erste Ebene der "Markierte Datensätze"-Detailansicht: betroffene
         Entitäten mit Anzahl markierter Vorkommen, nicht mehr die einzelnen
         Zeilen direkt — bei einer einzelnen Entität mit hunderttausenden
         Markierungen (siehe Endgültige Bereinigung, "Betroffene Entitäten")
         wäre das eine endlose flache Liste ohne Orientierung. Klick auf eine
-        Entität lädt die zweite Ebene (settings_purge_marked_entity())."""
+        Entität lädt die zweite Ebene (settings_purge_marked_entity()).
+
+        Paginiert wie dort (Seitenberechnung im Python statt SQL LIMIT/OFFSET,
+        weil get_deleted_points_by_entity() unpaginiert bleiben muss — auch
+        aufgerufen von background.py für eine vollständige Entitätenliste):
+        die Anzahl BETROFFENER ENTITÄTEN bleibt auch bei riesigen
+        Markierungszahlen je Entität überschaubar, ein zusätzlicher
+        SQL-Umbau lohnt sich hier nicht."""
         rows = deps.index.get_deleted_points_by_entity(search=search)
         entities = [
             {
@@ -995,8 +1007,17 @@ def create_housekeeping_router(deps: HousekeepingDependencies) -> APIRouter:
             }
             for row in rows
         ]
+        total = len(entities)
+        total_pages = max(1, -(-total // page_size))
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * page_size
+        pagination = {
+            "page": page, "page_size": page_size, "total": total, "total_pages": total_pages,
+            "start": start + 1 if total else 0, "end": min(start + page_size, total),
+        }
         return deps.templates.TemplateResponse(
-            request, "_settings_marked_points.html", {"entities": entities, "search": search}
+            request, "_settings_marked_points.html",
+            {"entities": entities[start:start + page_size], "search": search, "pagination": pagination},
         )
 
     @router.get("/settings/purge/marked/{entity_id}", response_class=HTMLResponse)

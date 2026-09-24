@@ -451,7 +451,7 @@ def build_notices(
 
     # mismatches: der automatische Hintergrundabgleich repariert sie immer
     # sofort (main.py _run_storage_reconcile, repair=True) — dann nur info,
-    # rein zur Kenntnis. Ein MANUELLER Klick auf "Index prüfen" ist dagegen
+    # rein zur Kenntnis. Ein MANUELLER Klick auf "Speicher prüfen" ist dagegen
     # zunächst nur lesend (siehe _settings_storage_index_form.html); bleiben
     # dabei gefundene Abweichungen unrepariert stehen, ist das noch zu tun —
     # dann warn, weil eine echte Handlung (Button "Index reparieren") fehlt.
@@ -470,6 +470,31 @@ def build_notices(
                     if repaired
                     else ", aber noch nicht behoben."
                 )
+            ),
+            "meta": "Speicherplatz",
+            "link": "/housekeeping#speicherplatz",
+        })
+
+    # corrupted: Zeilen, die iter_records() beim Lesen des Hot Buffers
+    # übersprungen hat (siehe hotbuffer.py) — anders als errors/mismatches
+    # oben ist die Entität selbst erfolgreich geprüft, aber einzelne
+    # Rohwerte sind dauerhaft verloren (meist nach einem unsauberen
+    # Absturz/Stromausfall). Ohne diese Meldung wäre der Verlust nur noch im
+    # Log sichtbar, weil iter_records() die Zeile bewusst überspringt statt
+    # die Prüfung abzubrechen.
+    if storage_reconcile and storage_reconcile.get("corrupted"):
+        corrupted = storage_reconcile["corrupted"]
+        entity_count = len(corrupted)
+        line_count = sum(entity["corrupt_line_count"] for entity in corrupted)
+        notices.append({
+            "id": "system.storage_reconcile_corrupted",
+            "severity": "warn",
+            "title": "Beschädigte Rohdaten gefunden",
+            "detail": (
+                f"{line_count} beschädigte Zeile{'n' if line_count != 1 else ''} in "
+                f"{entity_count} Entität{'en' if entity_count != 1 else ''} beim letzten Abgleich "
+                "übersprungen und dauerhaft verloren — meist durch einen unsauberen Neustart "
+                "(Stromausfall, harter Kill)."
             ),
             "meta": "Speicherplatz",
             "link": "/housekeeping#speicherplatz",

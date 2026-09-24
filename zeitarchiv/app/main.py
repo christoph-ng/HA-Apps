@@ -871,7 +871,10 @@ def entities_view(request: Request) -> HTMLResponse:
         "entity_count": overview["entity_count"],
         "type_breakdown": type_breakdown,
         "total_rows": format_int(overview['total_rows']),
-        "total_size": format_size(overview["total_size_bytes"]),
+        # Archiv (live, indexiert) + Rollups/Hot Buffer (vom Wartungsplaner
+        # stündlich vorgerechnet, siehe BackgroundService.rollup_hot_size_cached) —
+        # bis 0.99.x zeigte diese Kachel nur das Archiv.
+        "total_size": format_size(overview["total_size_bytes"] + _background.rollup_hot_size_cached),
         "rows_sparkline": _sparkline_paths([s["total_rows"] for s in snapshots]),
         "size_sparkline": _sparkline_paths([s["total_size_bytes"] for s in snapshots]),
         **_dashboard_tiles_context(index.get_default_dashboard_id()),
@@ -1732,7 +1735,7 @@ def _backup_list_context(sort: str = "created_at", direction: str = "desc", page
 
 
 def _backup_context(
-    *, message: str | None = None,
+    *, message: str | None = None, offer_restart: bool = False,
     sort: str = "created_at", direction: str = "desc", page: int = 1, page_size: int = 10,
 ) -> dict:
     with _background.backup_progress.lock:
@@ -1759,6 +1762,29 @@ def _backup_context(
             "size": format_size(job["size_bytes"] or 0) if job["size_bytes"] else "—",
             "error": job["error"],
         })
+    rollbacks = [
+        {
+            "name": row["name"],
+            "size": format_size(row["size_bytes"]),
+            "created_at": (
+                f"{format_timestamp(row['created_at'], TZ)} {format_time(row['created_at'], TZ)}"
+                if row["created_at"] is not None else "—"
+            ),
+        }
+        for row in backup.list_restore_rollback_details(DATA_DIR)
+    ]
+    for event in backup.list_restore_events(DATA_DIR):
+        jobs.append({
+            "trigger": "Wiederherstellung",
+            "status": "Erfolgreich",
+            "status_key": "success",
+            "created_at": f"{format_timestamp(event['created_at'], TZ)} {format_time(event['created_at'], TZ)}",
+            "created_at_ts": event["created_at"],
+            "duration": "—",
+            "size": format_size(event["size_bytes"]) if event["size_bytes"] else "—",
+            "error": None,
+        })
+    jobs.sort(key=lambda job: job["created_at_ts"], reverse=True)
 
     next_raw = index.get_setting("backup_schedule_next_run", "")
     try:
@@ -1795,24 +1821,31 @@ def _backup_context(
     if stale_after and last_success_ts and time.time() - last_success_ts > stale_after:
         warnings.append("Das letzte erfolgreiche Backup ist älter als zwei Sicherungsintervalle.")
 
+    global _restore_startup_result
     if message is None and _restore_startup_result:
         if _restore_startup_result.get("success"):
             message = (
-                f"Backup {_restore_startup_result['filename']} wurde wiederhergestellt. "
+                f"{_restore_startup_result['source']} wurde wiederhergestellt. "
                 f"Der vorherige Stand liegt in {_restore_startup_result['rollback']}."
             )
         else:
             message = f"Wiederherstellung fehlgeschlagen: {_restore_startup_result.get('error', 'Unbekannter Fehler')}"
+        # Einmalige Meldung nach einem Neustart — ohne dieses Löschen würde sie bei
+        # JEDER folgenden Aktion ohne eigene message (Backup löschen, Backup starten,
+        # Fortschritts-Polling) erneut auftauchen, weil _restore_startup_result für
+        # die gesamte Prozesslaufzeit gesetzt bleibt.
+        _restore_startup_result = None
     return {
         "running": running,
         "done": done,
         "total": total,
         "percent": percent,
         "backup_message": message,
+        "backup_offer_restart": offer_restart,
         "backup_warnings": warnings,
         **_backup_list_context(sort, direction, page, page_size),
         "backup_jobs": jobs,
-        "backup_rollbacks": backup.list_restore_rollbacks(DATA_DIR),
+        "backup_rollbacks": rollbacks,
         "backup_schedule": schedule_value,
         "backup_schedule_options": list(BACKUP_SCHEDULE_LABELS.items()),
         "backup_schedule_time": index.get_setting("backup_schedule_time", BACKUP_DEFAULT_TIME),
@@ -1992,8 +2025,34 @@ def backup_restore_prepare(request: Request, filename: str) -> HTMLResponse:
         request,
         "_settings_backup_ready.html",
         _backup_context(
-            message="Wiederherstellung vorbereitet. Bitte das Zeitarchiv-Add-on neu starten; "
-                    "vor dem Öffnen der Datenbank wird das Backup eingespielt und der aktuelle Stand als Rollback behalten."
+            message="Wiederherstellung vorbereitet. Das Backup wird beim nächsten Start eingespielt, "
+                    "der aktuelle Stand bleibt als Rollback erhalten.",
+            offer_restart=True,
+        ),
+    )
+
+
+@app.post("/backup/rollback/restore/{name}", response_class=HTMLResponse)
+def backup_rollback_restore(request: Request, name: str) -> HTMLResponse:
+    """Merkt einen Rollback-Stand für den Neustart vor — dasselbe Vormerk-
+    Prinzip wie backup_restore_prepare(), nur mit einem Rollback-Verzeichnis
+    statt einem Backup-ZIP als Quelle (Konzept "Restore-Rollbacks",
+    22.09.2026: bislang ließ sich ein Rollback nur löschen, nie einspielen)."""
+    try:
+        backup.prepare_restore_from_rollback(DATA_DIR, name)
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request,
+            "_settings_backup_ready.html",
+            _backup_context(message=f"Wiederherstellung nicht vorbereitet: {exc}"),
+        )
+    return templates.TemplateResponse(
+        request,
+        "_settings_backup_ready.html",
+        _backup_context(
+            message="Wiederherstellung vorbereitet. Der gewählte Rollback-Stand wird beim nächsten "
+                    "Start eingespielt, der aktuelle Stand bleibt zusätzlich als neuer Rollback erhalten.",
+            offer_restart=True,
         ),
     )
 
@@ -2008,6 +2067,24 @@ def backup_rollback_delete(request: Request, name: str) -> HTMLResponse:
         request,
         "_settings_backup_ready.html",
         _backup_context(message="Rollback-Daten wurden gelöscht."),
+    )
+
+
+@app.post("/system/restart", response_class=HTMLResponse)
+def system_restart(request: Request) -> HTMLResponse:
+    """Ziel des "Jetzt neu starten"-Dialogs nach einem vorgemerkten Restore
+    (siehe backup_restore_prepare()/backup_rollback_restore()) — ruft die
+    Supervisor-Selbst-Neustart-API auf (supervisor_stats.restart_addon(),
+    dasselbe Zugriffsmuster wie die RAM-Anzeige). Außerhalb eines
+    HA-Supervisors (z. B. lokale Entwicklung) kommt eine klare Fehlermeldung
+    zurück statt eines stillen Fehlschlags."""
+    try:
+        supervisor_stats.restart_addon()
+        message = "Neustart angefordert — die Seite lädt in Kürze neu."
+    except RuntimeError as exc:
+        message = f"Automatischer Neustart nicht möglich: {exc}. Bitte das Add-on manuell neu starten."
+    return templates.TemplateResponse(
+        request, "_settings_backup_ready.html", _backup_context(message=message),
     )
 
 
@@ -2093,14 +2170,23 @@ def _storage_breakdown() -> list[dict]:
     Walks bei jedem Diagnose-Download (siehe ROADMAP.md, Performance ZP-011).
     "rollup" bleibt ein echter Walk: der Index führt Rollup-Dateigrößen nicht
     mit, nur Archiv-Parquet-Größen. Alle übrigen Kategorien (Hot Buffer,
-    Import, Backups) sind ohnehin nicht im Index abgebildet."""
+    Import, Backups) sind ohnehin nicht im Index abgebildet.
+
+    "backups" zählt neben den Backup-ZIPs auch die Restore-Rollbacks mit
+    (Konzept "Restore-Rollbacks", 22.09.2026) — die liegen als volle Kopien
+    von BACKUP_ENTRIES direkt unter DATA_DIR, nicht unter backups/, würden
+    sonst aber unsichtbar Speicherplatz belegen, den diese Aufschlüsselung
+    eigentlich vollständig erklären soll."""
     index_path = DATA_DIR / "index.sqlite"
+    rollback_bytes = sum(
+        row["size_bytes"] for row in backup.list_restore_rollback_details(DATA_DIR)
+    )
     return [
         {"key": "archive", "label": "Archiv", "bytes": index.get_overview()["total_size_bytes"]},
         {"key": "rollup", "label": "Rollups", "bytes": dir_size(DATA_DIR / "rollup")},
         {"key": "hot", "label": "Laufender Monat (Hot Buffer)", "bytes": dir_size(DATA_DIR / "hot")},
         {"key": "index", "label": "Index", "bytes": index_path.stat().st_size if index_path.exists() else 0},
-        {"key": "backups", "label": "Backups", "bytes": dir_size(DATA_DIR / "backups")},
+        {"key": "backups", "label": "Backups", "bytes": dir_size(DATA_DIR / "backups") + rollback_bytes},
         {"key": "reports", "label": "Import-Reports", "bytes": dir_size(DATA_DIR / "reports")},
         {
             "key": "import",
@@ -2167,6 +2253,10 @@ def _diagnostics_payload() -> dict:
             "entities_checked": int(audit.get("entities_checked", 0) or 0),
             "mismatch_count": len(audit.get("mismatches", [])),
             "error_count": len(audit.get("errors", [])),
+            "corrupted_entity_count": len(audit.get("corrupted", [])),
+            "corrupted_line_count": sum(
+                entity["corrupt_line_count"] for entity in audit.get("corrupted", [])
+            ),
             "repaired": bool(audit.get("repaired", False)),
         },
     }
@@ -2278,7 +2368,11 @@ def statistik_view(request: Request) -> HTMLResponse:
         {
             "entity_count": overview["entity_count"],
             "total_rows": format_int(overview['total_rows']),
-            "total_size": format_size(overview["total_size_bytes"]),
+            # Derselbe Wert wie die "Größe"-Kachel auf der Übersicht (Archiv +
+            # gecachte Rollups/Hot Buffer) — nicht der aus storage_breakdown_raw
+            # frisch gewalkte Wert, sonst könnten beide Seiten je nach letztem
+            # Cache-Refresh unterschiedliche Zahlen zeigen.
+            "total_size": format_size(overview["total_size_bytes"] + _background.rollup_hot_size_cached),
             "chart_count": index.count_saved_charts(),
             "table_count": index.count_saved_tables(),
             "dashboard_count": dashboard_count,
@@ -2368,13 +2462,22 @@ def statistik_index_detail(request: Request) -> HTMLResponse:
 
 @app.post("/statistik/index/optimize", response_class=HTMLResponse)
 def statistik_index_optimize(request: Request) -> HTMLResponse:
-    """Führt ein ausdrücklich angefordertes, abgesichertes VACUUM aus."""
+    """Führt ein ausdrücklich angefordertes, abgesichertes VACUUM aus.
+
+    Liefert nur das Partial (htmx-Swap von #statistik-index-body), nicht mehr
+    die ganze Seite — vorher löste "Index optimieren" eine komplette
+    Formular-Navigation aus: während des (synchron unter Lock laufenden,
+    siehe Index.vacuum_database()) VACUUMs war nichts von der App zu sehen,
+    und ein unerwarteter Fehler landete als nackte Internal-Server-Error-
+    Antwort statt in der Seite. Der bereits vorhandene try/except in
+    optimize_index() fängt die erwartbaren Fehlerfälle weiterhin ab und
+    zeigt sie über index_optimization_result im Partial an."""
     result = optimize_index(
         index, DATA_DIR / "index.sqlite", storage_coordinator
     )
     return templates.TemplateResponse(
         request,
-        "statistik_index.html",
+        "_statistik_index_body.html",
         _statistik_index_context(optimization_result=result),
     )
 
@@ -3188,7 +3291,6 @@ def entity_migrate_execute(entity_id: str, body: _EntityMigrateExecuteBody) -> d
         "post_action": result.post_action,
         "overlap_resolution": result.overlap_resolution,
         "repointed_dashboards": result.repointed_dashboards,
-        "duplicate_pin_dashboards": result.duplicate_pin_dashboards,
     }
 
 
@@ -3698,6 +3800,13 @@ def _tile_metric_context(pin, aggregation_type: str | None = None) -> dict:
         m for m in (pin["stats_metrics"] or "").split(",")
         if m and m != primary and m in verfuegbar
     ]
+    # Eigener Ein-/Ausschalter (Konzept "laufendes Jahr" — Nutzer-Wunsch nach
+    # einer Kachel, deren "Jahr"-Etikett ohne Datumszusatz einfach ganz weg
+    # soll statt es zu erklären), unabhängig von der Herleitung unten.
+    # "in pin.keys()" statt direkter Indizierung: pin ist hier teils ein von
+    # Hand gebautes Test-/Vorschau-Dict ohne jede Spalte (siehe Docstring
+    # oben, "fehlertolerant") — fehlt die Spalte, gilt der DB-Default (an).
+    show_period = bool(pin["show_period"]) if "show_period" in pin.keys() else True
     return {
         "range_key": range_key,
         "continuous": bool(pin["continuous"]),
@@ -3708,12 +3817,13 @@ def _tile_metric_context(pin, aggregation_type: str | None = None) -> dict:
         # damit dasselbe Σ/+ nicht an vier Stellen einzeln entschieden wird.
         "metric_labels": labels,
         "stats_metrics": metrics,
+        "show_period": show_period,
         # Der Zeitraum steht genau einmal auf der Kachel: in der
         # Kennzahlen-Zeile, wenn es sie gibt, sonst im Wert-Bereich an der
         # Stelle des Alters. Bei einem Hauptwert, der kein Momentanwert ist,
         # sagt das Alter des letzten Rohpunkts ohnehin nichts über einen
         # Monatsdurchschnitt aus — dort tritt der Zeitraum an seine Stelle.
-        "show_period_in_value_row": not metrics and primary != "last",
+        "show_period_in_value_row": show_period and not metrics and primary != "last",
         # Fürs Kachelmenü: nicht anwendbare Kennzahlen werden durchgestrichen
         # gezeigt statt weggelassen (siehe _tile_available_metrics()).
         "available_metrics": verfuegbar,
@@ -3721,7 +3831,7 @@ def _tile_metric_context(pin, aggregation_type: str | None = None) -> dict:
 
 
 def _dashboard_tiles_context(
-    dashboard_id: int, auto_open_entity_id: str | None = None
+    dashboard_id: int, auto_open_pin_id: int | None = None
 ) -> dict:
     """Für die Dashboard-Kacheln einer Dashboard-Seite (Konzept "Offene
     Punkte", erweitert um Vergleichstabellen UND um mehrere unabhängige
@@ -3843,6 +3953,11 @@ def _dashboard_tiles_context(
                 staleness = "fresh"
             tiles.append({
                 "kind": "entity", "entity_id": e["entity_id"],
+                # Eigene Zeilen-ID der Kachel (nicht der Entität!) — macht
+                # mehrere Kacheln derselben Entität einzeln identifizierbar
+                # (Einstellungen, Umsortieren, Entfernen), siehe
+                # pin_entity_to_dashboard() in index.py.
+                "pin_id": p["item_id"],
                 "name": p["title"] or entity_display_name(e["entity_id"], e["friendly_name"], e["custom_name"]),
                 # Roher Override fürs Titel-Eingabefeld im Kachelmenü — anders
                 # als "name" oben (mit friendly_name-Fallback) soll das Feld
@@ -3892,7 +4007,10 @@ def _dashboard_tiles_context(
         # unabhängig vom Präzisen Modus, beide lassen sich frei kombinieren.
         "dashboard_fill_gaps": dashboard_fill_gaps,
         "groups": groups,
-        "auto_open_entity_id": auto_open_entity_id,
+        "auto_open_pin_id": auto_open_pin_id,
+        # "pinned" ist rein informativ (Hinweis im Picker) — eine bereits
+        # angeheftete Entität lässt sich seit dem Mehrfach-Anheften-Feature
+        # trotzdem erneut wählen, statt ausgeschlossen zu werden.
         "entity_pin_options": [
             {**row, "pinned": row["entity_id"] in pinned_entity_ids}
             for row in all_entities
@@ -3903,11 +4021,6 @@ def _dashboard_tiles_context(
         "can_add_tile": len(tiles) < index.DASHBOARD_TILE_LIMIT and not dashboard_locked,
         "unpinned_charts": [c for c in index.list_saved_charts() if c["id"] not in pinned_chart_ids],
         "unpinned_tables": [t for t in index.list_saved_tables() if t["id"] not in pinned_table_ids],
-        # Werte-Kachel-Picker filtert client-seitig per Suchfeld (siehe
-        # dashboard-tiles.js setupEntityPinSearch()) statt eines eigenen
-        # Server-Roundtrips — dieselbe Größenordnung wie die Entitätenliste
-        # anderswo in der App (Tabellen-Editor-Picker), kein Pagination-Bedarf.
-        "unpinned_entities": [row for row in all_entities if row["entity_id"] not in pinned_entity_ids],
     }
 
 
@@ -4058,51 +4171,51 @@ def dashboard_legend(body: _LegendDashboardTileBody) -> dict:
 
 # -- Werte-Kacheln (item_type='entity'): eine Entität direkt anheften, ohne
 # zuerst ein Chart/eine Tabelle anzulegen (Konzept-Erweiterung). Eigene Routen
-# statt die obigen chart/table-Endpunkte zu erweitern, weil eine entity_id
-# (TEXT) statt einer Integer-item_id identifiziert wird. ---------------------
+# statt die obigen chart/table-Endpunkte zu erweitern, weil neu Angeheftetes
+# über eine entity_id (TEXT) statt einer Integer-item_id identifiziert wird
+# — bestehende Kacheln danach aber über pin_id (dieselbe item_id-Spalte wie
+# bei Chart/Tabelle, siehe pin_entity_to_dashboard() in index.py), damit
+# dieselbe Entität mehrfach mit unterschiedlichen Einstellungen angeheftet
+# werden kann, ohne dass eine Änderung mehrere Kacheln träfe. -------------
 
 @app.post("/dashboard/pin-entity/{entity_id}", response_class=HTMLResponse)
 def dashboard_pin_entity(request: Request, entity_id: str, dashboard_id: int = 1) -> HTMLResponse:
     _require_entity(entity_id)
     _get_dashboard_or_404(dashboard_id)
     _require_dashboard_unlocked(dashboard_id)
-    index.pin_entity_to_dashboard(dashboard_id, entity_id)
+    new_pin_id = index.pin_entity_to_dashboard(dashboard_id, entity_id)
     return templates.TemplateResponse(
         request, "_dashboard_tiles.html",
-        _dashboard_tiles_context(dashboard_id, auto_open_entity_id=entity_id),
+        _dashboard_tiles_context(dashboard_id, auto_open_pin_id=new_pin_id),
     )
 
 
-@app.post("/dashboard/entity/{entity_id}", response_class=HTMLResponse)
+@app.post("/dashboard/entity/{pin_id}", response_class=HTMLResponse)
 async def dashboard_entity_change(
-    request: Request, entity_id: str, dashboard_id: int = 1
+    request: Request, pin_id: int, dashboard_id: int = 1
 ) -> HTMLResponse:
     _require_dashboard_unlocked(dashboard_id)
     form = await request.form()
     new_entity_id = str(form.get("new_entity_id", "")).strip()
     _require_entity(new_entity_id)
-    try:
-        updated = index.set_dashboard_entity_pin_entity(dashboard_id, entity_id, new_entity_id)
-    except ValueError as err:
-        raise HTTPException(status_code=409, detail=str(err)) from err
-    if not updated:
+    if not index.set_dashboard_entity_pin_entity(dashboard_id, pin_id, new_entity_id):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return templates.TemplateResponse(
         request, "_dashboard_tiles.html",
-        _dashboard_tiles_context(dashboard_id, auto_open_entity_id=new_entity_id),
+        _dashboard_tiles_context(dashboard_id, auto_open_pin_id=pin_id),
     )
 
 
-@app.post("/dashboard/unpin-entity/{entity_id}", response_class=HTMLResponse)
-def dashboard_unpin_entity(request: Request, entity_id: str, dashboard_id: int = 1) -> HTMLResponse:
+@app.post("/dashboard/unpin-entity/{pin_id}", response_class=HTMLResponse)
+def dashboard_unpin_entity(request: Request, pin_id: int, dashboard_id: int = 1) -> HTMLResponse:
     _require_dashboard_unlocked(dashboard_id)
-    index.unpin_entity_from_dashboard(dashboard_id, entity_id)
+    index.unpin_entity_from_dashboard(dashboard_id, pin_id)
     return templates.TemplateResponse(request, "_dashboard_tiles.html", _dashboard_tiles_context(dashboard_id))
 
 
 class _ResizeDashboardEntityTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     grid_cols: int = Field(ge=1, le=6)
     grid_rows: int = Field(ge=1, le=6)
 
@@ -4114,7 +4227,7 @@ def dashboard_entity_size(body: _ResizeDashboardEntityTileBody) -> dict:
     max_size = 6 if dashboard and dashboard["precise_mode"] else 3
     try:
         updated = index.set_dashboard_entity_pin_size(
-            body.dashboard_id, body.entity_id, body.grid_cols, body.grid_rows, max_size=max_size
+            body.dashboard_id, body.pin_id, body.grid_cols, body.grid_rows, max_size=max_size
         )
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
@@ -4125,21 +4238,21 @@ def dashboard_entity_size(body: _ResizeDashboardEntityTileBody) -> dict:
 
 class _SparklineDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     show_sparkline: bool
 
 
 @app.post("/dashboard/sparkline")
 def dashboard_sparkline(body: _SparklineDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
-    if not index.set_dashboard_entity_pin_sparkline(body.dashboard_id, body.entity_id, body.show_sparkline):
+    if not index.set_dashboard_entity_pin_sparkline(body.dashboard_id, body.pin_id, body.show_sparkline):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return {"ok": True, "show_sparkline": body.show_sparkline}
 
 
 class _SparklineResolutionDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     resolution: str
 
 
@@ -4148,7 +4261,7 @@ def dashboard_sparkline_resolution(body: _SparklineResolutionDashboardTileBody) 
     _require_dashboard_unlocked(body.dashboard_id)
     try:
         updated = index.set_dashboard_entity_pin_sparkline_resolution(
-            body.dashboard_id, body.entity_id, body.resolution
+            body.dashboard_id, body.pin_id, body.resolution
         )
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
@@ -4159,21 +4272,60 @@ def dashboard_sparkline_resolution(body: _SparklineResolutionDashboardTileBody) 
 
 class _ShowAgeDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     show_age: bool
 
 
 @app.post("/dashboard/entity-show-age")
 def dashboard_entity_show_age(body: _ShowAgeDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
-    if not index.set_dashboard_entity_pin_show_age(body.dashboard_id, body.entity_id, body.show_age):
+    if not index.set_dashboard_entity_pin_show_age(body.dashboard_id, body.pin_id, body.show_age):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return {"ok": True, "show_age": body.show_age}
 
 
+class _ShowPeriodDashboardTileBody(BaseModel):
+    dashboard_id: int = 1
+    pin_id: int
+    show_period: bool
+
+
+def _get_dashboard_entity_pin(dashboard_id: int, pin_id: int) -> dict | None:
+    """Eine einzelne Werte-Kachel per Pin-ID (statt entity_id, die seit dem
+    Mehrfach-Anheften-Feature auf mehrere Kacheln zutreffen kann) — gemeinsam
+    von den beiden Endpunkten genutzt, die nach dem Speichern den vollen
+    Kachel-Kontext zurückgeben."""
+    return next(
+        (p for p in index.list_dashboard_pins(dashboard_id)
+         if p["item_type"] == "entity" and p["item_id"] == pin_id),
+        None,
+    )
+
+
+@app.post("/dashboard/entity-show-period")
+def dashboard_entity_show_period(body: _ShowPeriodDashboardTileBody) -> dict:
+    _require_dashboard_unlocked(body.dashboard_id)
+    if not index.set_dashboard_entity_pin_show_period(body.dashboard_id, body.pin_id, body.show_period):
+        raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
+    # Voller Kachel-Kontext statt nur {"show_period": ...} zurück: anders als
+    # show_age (rein additiv, eigenes <span>) wirkt show_period auf dieselbe
+    # Stelle wie Zeitraum/Hauptwert/Kennzahlen-Zeile (Kennzahlen-Zeile ODER
+    # Wert-Bereich, siehe _tile_metric_context()) — der Browser kann das
+    # deshalb mit derselben uebernehmen(ctx)-Logik anwenden wie
+    # /dashboard/entity-metrics, statt eine dritte Variante zu bauen.
+    pin = _get_dashboard_entity_pin(body.dashboard_id, body.pin_id)
+    if pin is None:
+        raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
+    entity = index.get_entity(pin["item_entity_id"])
+    return {
+        "ok": True,
+        **_tile_metric_context(pin, entity["aggregation_type"] if entity else None),
+    }
+
+
 class _DecimalsDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     decimals: str
 
 
@@ -4181,7 +4333,7 @@ class _DecimalsDashboardTileBody(BaseModel):
 def dashboard_entity_decimals(body: _DecimalsDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
     try:
-        updated = index.set_dashboard_entity_pin_decimals(body.dashboard_id, body.entity_id, body.decimals)
+        updated = index.set_dashboard_entity_pin_decimals(body.dashboard_id, body.pin_id, body.decimals)
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
     if not updated:
@@ -4191,7 +4343,7 @@ def dashboard_entity_decimals(body: _DecimalsDashboardTileBody) -> dict:
 
 class _TitleDashboardTileBody(BaseModel):
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     title: str = ""
 
 
@@ -4199,7 +4351,7 @@ class _TitleDashboardTileBody(BaseModel):
 def dashboard_entity_title(body: _TitleDashboardTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
     title = body.title.strip()
-    if not index.set_dashboard_entity_pin_title(body.dashboard_id, body.entity_id, title or None):
+    if not index.set_dashboard_entity_pin_title(body.dashboard_id, body.pin_id, title or None):
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
     return {"ok": True, "title": title}
 
@@ -4215,7 +4367,7 @@ class _MetricsDashboardTileBody(BaseModel):
     """
 
     dashboard_id: int = 1
-    entity_id: str
+    pin_id: int
     range_key: str | None = None
     continuous: bool | None = None
     primary_metric: str | None = None
@@ -4228,7 +4380,7 @@ def dashboard_entity_metrics(body: _MetricsDashboardTileBody) -> dict:
     try:
         geaendert = index.set_dashboard_entity_pin_metrics(
             body.dashboard_id,
-            body.entity_id,
+            body.pin_id,
             range_key=body.range_key,
             continuous=body.continuous,
             primary_metric=body.primary_metric,
@@ -4238,14 +4390,10 @@ def dashboard_entity_metrics(body: _MetricsDashboardTileBody) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not geaendert:
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
-    pin = next(
-        (p for p in index.list_dashboard_pins(body.dashboard_id)
-         if p["item_type"] == "entity" and p["item_entity_id"] == body.entity_id),
-        None,
-    )
+    pin = _get_dashboard_entity_pin(body.dashboard_id, body.pin_id)
     if pin is None:
         raise HTTPException(status_code=404, detail="Dashboard-Kachel nicht gefunden")
-    entity = index.get_entity(body.entity_id)
+    entity = index.get_entity(pin["item_entity_id"])
     # Den fertigen Anzeigezustand zurückgeben statt nur "ok": der Browser muss
     # das Zeitraum-Etikett und die um Hauptwert und Entitätstyp bereinigte
     # Kennzahlen-Liste sonst selbst nachbilden — genau die Regeln, die hier

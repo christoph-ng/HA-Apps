@@ -7,8 +7,10 @@ from __future__ import annotations
 from app.tips import TIPS, rotation_order
 
 
-def test_rotation_order_cycles_through_all_tips_over_30_days() -> None:
-    seen = {rotation_order(day, 1)[0]["slug"] for day in range(30)}
+def test_rotation_order_cycles_through_all_tips() -> None:
+    """range(len(TIPS)) statt einer festen Zahl — sonst reißt der Test bei
+    jedem neuen Tipp, sobald die Liste die feste Zahl überschreitet."""
+    seen = {rotation_order(day, 1)[0]["slug"] for day in range(len(TIPS))}
     assert seen == {t["slug"] for t in TIPS}
 
 

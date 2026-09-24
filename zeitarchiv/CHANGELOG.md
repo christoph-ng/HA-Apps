@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.0.0 - 2026-09-22
+
+### Neu
+
+- Werte-Kacheln: dieselbe Entität lässt sich jetzt mehrfach mit
+  unterschiedlichen Einstellungen (z. B. Hauptwert oder Zeitraum) anheften.
+- Werte-Kachel: Zeitraum-Etikett lässt sich ein-/ausblenden, unabhängig von
+  „Letzte Aktualisierung" — beide gleichzeitig anzeigbar.
+- Laufende, noch nicht abgeschlossene Zeiträume (Woche/Monat/Jahr) sind
+  jetzt überall als solche erkennbar: Energiedashboard-Periodenzeile und
+  Energiebericht-Kopf zeigen, bis wann die Daten tatsächlich reichen, statt
+  den vollen Kalenderzeitraum zu behaupten. Vergleichstabellen markieren
+  betroffene Spaltenköpfe zusätzlich mit einem sichtbaren Hinweis-Symbol
+  (Tooltip mit Cutoff-Datum, bei Tages-/Stundenansicht als Uhrzeit).
+- Tabellen-Editor: Spalten sind jetzt wie die Zeilen nummeriert, auch in der
+  Vorschau-Tabelle sichtbar.
+- Backup/Restore: nach einer vorgemerkten Wiederherstellung fragt ein
+  Dialog aktiv nach einem Neustart. Der vorherige Stand lässt sich jetzt
+  direkt wiederherstellen statt nur gelöscht zu werden, und erscheint im
+  Ausführungsverlauf.
+- Housekeeping → Speicherplatz: neuer Bereich „Datenintegrität" zeigt, ob
+  die gespeicherten Rohdaten selbst noch lesbar sind.
+- Housekeeping → Speicherplatz: Liste „Markierte Datensätze" jetzt
+  seitenweise blätterbar.
+
+### Geändert
+
+- Housekeeping → Speicherplatz: Knopf „Index prüfen" heißt jetzt „Speicher
+  prüfen".
+- Ein paar neue Tipps im Meldungs-Center.
+
+### Behoben
+
+- Index-Optimierung konnte in seltenen Fällen (großer Index, gleichzeitiger
+  Schreibzugriff während des Laufs) die lokale Datenbank beschädigen und
+  einen Neustart mit Datenverlust bis zum letzten Backup erzwingen. Der
+  Vorgang läuft jetzt wieder wie ursprünglich vorgesehen unter kurzzeitiger
+  Schreibsperre, mit Bestätigungsdialog vorher und sichtbarem
+  Fortschritt/Ergebnis während des Laufs statt eines stillen Seitenwechsels.
+- Die Kachel „Größe" auf der Übersichts- und der Statistik-Seite zeigte nur
+  die Größe des komprimierten Archivs, nicht die tatsächliche Gesamtgröße
+  inklusive Rollups und des noch unkomprimierten laufenden Monats (Hot
+  Buffer) — der ausgewiesene Speicherverbrauch war dadurch spürbar zu
+  niedrig. Beide Kacheln zeigen jetzt dieselbe, vollständige Summe.
+- Nach dem Löschen eines Backups oder dem Start eines neuen Backups
+  erschien manchmal fälschlich erneut die Erfolgsmeldung einer früheren
+  Wiederherstellung („… wurde wiederhergestellt"), obwohl gerade gar kein
+  Restore lief — die Meldung war eigentlich nur für die erste Ansicht nach
+  einem Neustart mit vorgemerktem Restore gedacht. Erscheint jetzt
+  tatsächlich nur noch einmal.
+- Eine durch einen Stromausfall oder einen harten Neustart beschädigte
+  Zeile im Hot Buffer (laufender Monat, unkomprimiert) konnte Abfragen auf
+  die betroffene Entität sowie den Wartungsplaner dauerhaft zum Absturz
+  bringen — Letzterer versuchte es alle 30 Sekunden erneut und scheiterte
+  jedes Mal an derselben Stelle. Eine solche Zeile wird jetzt übersprungen
+  statt die App zu blockieren; der neue Bereich „Datenintegrität" zeigt an,
+  falls das passiert ist.
+
 ## 0.99.0 - 2026-09-20
 
 ### Neu

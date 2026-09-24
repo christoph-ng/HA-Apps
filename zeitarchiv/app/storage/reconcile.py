@@ -57,11 +57,16 @@ def _entity_storage_stats(data_dir: Path, entity_id: str) -> dict:
 
     hot_dir = storage_area_dir(data_dir, "hot")
     hot_files = sorted(hot_dir.glob(f"{entity_id}-*.csv")) if hot_dir.exists() else []
+    corrupt_line_count = 0
+    corrupt_months: list[str] = []
     for path in hot_files:
         hot_count = 0
         hot_first: float | None = None
         hot_last: float | None = None
-        for ts, _value, _event_id, _min_value, _max_value in hotbuffer.iter_records(path):
+        file_corrupt_lines: list[str] = []
+        for ts, _value, _event_id, _min_value, _max_value in hotbuffer.iter_records(
+            path, corrupt_lines=file_corrupt_lines
+        ):
             hot_count += 1
             hot_first = ts if hot_first is None else min(hot_first, ts)
             hot_last = ts if hot_last is None else max(hot_last, ts)
@@ -69,6 +74,12 @@ def _entity_storage_stats(data_dir: Path, entity_id: str) -> dict:
         if hot_first is not None:
             first_values.append(hot_first)
             last_values.append(hot_last)
+        if file_corrupt_lines:
+            corrupt_line_count += len(file_corrupt_lines)
+            # Dateiname ist {entity_id}-{YYYY-MM}.csv (siehe paths.py) — der
+            # Glob oben garantiert das Präfix, also reicht ein fester Schnitt
+            # statt einer erneuten Validierung.
+            corrupt_months.append(path.stem[len(entity_id) + 1:])
 
     return {
         "row_count": row_count,
@@ -79,6 +90,13 @@ def _entity_storage_stats(data_dir: Path, entity_id: str) -> dict:
         "last_ts": max(last_values) if last_values else None,
         "archive_files": len(archive_files),
         "hot_files": len(hot_files),
+        # Übersprungene, nicht mehr rekonstruierbare Hot-Buffer-Zeilen (siehe
+        # hotbuffer.iter_records) — zählt und verortet hier mit, damit ein
+        # Datenverlust nicht lautlos im Log verschwindet, sondern im
+        # Abgleichsbericht auftaucht (audit_storage_metadata() sammelt daraus
+        # "corrupted", inklusive der betroffenen Monate).
+        "corrupt_line_count": corrupt_line_count,
+        "corrupt_months": corrupt_months,
     }
 
 
@@ -111,6 +129,7 @@ def audit_storage_metadata(
     ]
     mismatches: list[dict] = []
     errors: list[dict] = []
+    corrupted: list[dict] = []
 
     for entity in entities:
         entity_id = entity["entity_id"]
@@ -119,6 +138,18 @@ def audit_storage_metadata(
         except (OSError, ValueError, KeyError, IndexError) as exc:
             errors.append({"entity_id": entity_id, "error": str(exc) or exc.__class__.__name__})
             continue
+
+        # Unabhängig von changed_fields unten erfasst: eine übersprungene
+        # kaputte Zeile kann den row_count zufällig unverändert lassen (z. B.
+        # wenn deleted_count das bereits ausgleicht) und würde sonst gar
+        # nicht erst als mismatch auftauchen, obwohl Daten verloren gingen.
+        if actual.get("corrupt_line_count"):
+            corrupted.append({
+                "entity_id": entity_id,
+                "friendly_name": entity["friendly_name"],
+                "corrupt_line_count": actual["corrupt_line_count"],
+                "months": actual.get("corrupt_months", []),
+            })
 
         deleted_count = int(entity["deleted_count"] or 0)
         indexed_rows = int(entity["row_count"] or 0)
@@ -160,5 +191,6 @@ def audit_storage_metadata(
         "entities_checked": len(entities),
         "mismatches": mismatches,
         "errors": errors,
+        "corrupted": corrupted,
         "repaired": bool(repair and mismatches),
     }

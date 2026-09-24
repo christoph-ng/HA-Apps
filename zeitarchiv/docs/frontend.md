@@ -822,7 +822,8 @@ die Liste im Panel sagt ohnehin, was.
   Tabellen-/Chart-Seite.
 - **`sortable-table.js`**: einheitliches Sortierverhalten für längere
   Listen-/Verwaltungstabellen (Bereinigungs-Vorschau, Indexkonsistenz,
-  Ausführungsverläufe, Duplikate je Entität, Symcon-Zuordnungsbericht),
+  Datenintegrität, Ausführungsverläufe, Duplikate je Entität,
+  Symcon-Zuordnungsbericht),
   inklusive automatischer Seitenumbrüche bei vielen Zeilen — neue Tabellen
   dieser Art sollten dieses Modul statt einer eigenen Sortierlogik nutzen.
 - **Badge + Popup** (Energiedashboard): eine kompakte, farbige Kennzahl im

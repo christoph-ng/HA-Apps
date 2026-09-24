@@ -147,7 +147,7 @@
       </div>
       {% else %}
       <div class="dtile dtile-entity{{ ' is-warn' if tile.staleness == 'warn' else '' }}{{ ' is-stale' if tile.staleness == 'stale' else '' }}"
-           draggable="{{ 'false' if dashboard_locked else 'true' }}" data-item-type="entity" data-item-id="0"
+           draggable="{{ 'false' if dashboard_locked else 'true' }}" data-item-type="entity" data-item-id="{{ tile.pin_id }}"
            data-item-entity-id="{{ tile.entity_id }}"
            data-grid-cols="{{ tile.grid_cols }}" data-grid-rows="{{ tile.grid_rows }}"
            style="--tile-cols:{{ tile.grid_cols }};--tile-rows:{{ tile.grid_rows }}"
@@ -157,6 +157,7 @@
            data-entity-id="{{ tile.entity_id }}" data-is-switch="{{ 'true' if tile.is_switch else 'false' }}"
            data-decimals="{{ tile.decimals }}" data-show-sparkline="{{ 'true' if tile.show_sparkline else 'false' }}"
            data-show-age="{{ 'true' if tile.show_age else 'false' }}"
+           data-show-period="{{ 'true' if tile.show_period else 'false' }}"
            data-sparkline-resolution="{{ tile.sparkline_resolution }}"
            data-range="{{ tile.range_key }}" data-continuous="{{ 'true' if tile.continuous else 'false' }}"
            data-primary-metric="{{ tile.primary_metric }}"
@@ -171,12 +172,19 @@
               <span class="dtile-entity-number">{{ tile.value_text }}</span>
               {% if tile.unit %}<span class="dtile-entity-unit">{{ tile.unit }}</span>{% endif %}
             </span>
-            {# Der Zeitraum steht genau einmal auf der Kachel (siehe
-               _tile_metric_context() in main.py): hier nur, wenn es keine
-               Kennzahlen-Zeile gibt, die ihn sonst trägt. #}
+            {# Zeitraum (siehe _tile_metric_context() in main.py, nur wenn es
+               keine Kennzahlen-Zeile gibt, die ihn sonst trägt) und Alter
+               sind unabhängig voneinander — schließen sich nicht aus. Anders
+               als anfangs angenommen ist "vor X" keine Aussage über den
+               angezeigten Wert (der bei einem Aggregations-Hauptwert ein
+               Zeitraum-Durchschnitt sein kann), sondern über die Aktualität
+               der Entität selbst — sinnvoll unabhängig vom Hauptwert
+               (Nutzer-Feedback 2026-09-22, nachdem beide Angaben nebeneinander
+               zu sehen waren: "da schliesst sich nichts gegenseitig aus"). #}
             {% if tile.show_period_in_value_row %}
             <span class="dtile-entity-period">{{ tile.range_label }}</span>
-            {% elif tile.show_age %}
+            {% endif %}
+            {% if tile.show_age %}
             <span class="dtile-entity-age" title="Letzte Aktualisierung">{{ tile.age_text }}</span>
             {% endif %}
           </div>
@@ -192,7 +200,7 @@
               <span class="k">{{ tile.metric_labels[metric] }}</span><span class="v">&ndash;</span>
             </span>
             {% endfor %}
-            <span class="dtile-entity-period">{{ tile.range_label }}</span>
+            {% if tile.show_period %}<span class="dtile-entity-period">{{ tile.range_label }}</span>{% endif %}
           </div>
           {% endif %}
           {% if tile.show_sparkline %}
@@ -251,12 +259,13 @@
                 <a class="dtile-picker-item dtile-picker-new" href="{{ href_base }}tables/new">+ Neue Tabelle</a>
               </div>
               <div x-show="tab === 'entity'">
-                {% for e in unpinned_entities %}
+                {% for e in entity_pin_options %}
                 <button type="button" class="dtile-picker-item"
                         x-show='!search || {{ (e.label ~ " " ~ e.entity_id) | lower | tojson }}.includes(search.toLowerCase())'
                         hx-post="{{ href_base }}dashboard/pin-entity/{{ e.entity_id }}?dashboard_id={{ dashboard_id }}"
                         hx-target="#dashboard-grid" hx-swap="outerHTML" @click="open = false">
                   {{ e.label }}{% if e.is_custom %}{{ custom_name_icon() }}{% endif %}
+                  {% if e.pinned %}<span class="dtile-picker-pinned-hint">bereits angeheftet</span>{% endif %}
                 </button>
                 {% endfor %}
               </div>

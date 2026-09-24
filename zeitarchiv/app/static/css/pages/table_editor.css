@@ -59,6 +59,24 @@
     color:var(--ink-faint);margin-bottom:-3px;
   }
   .tbl-col-top{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;}
+  /* Ziehgriff + Nummer als EIN Flex-Kind, statt beide lose neben den
+     Aktions-Buttons zu setzen — sonst verteilt justify-content:space-between
+     den neu hinzugekommenen Abstand über die ganze (schmale, 190px) Kopfzeile
+     der Karte und alles rückt auseinander. */
+  .tbl-col-top-left{display:flex;align-items:center;gap:6px;flex:none;}
+  /* Spalten-Kürzel, analog zum Zeilen-Kürzel (.tbl-row-letter) — eigenes
+     Alphabet läuft dort auf Buchstaben, Spalten laufen bewusst auf Zahlen:
+     die Zeilen-Buchstaben sind gleichzeitig Formel-Referenzen (A / B * 100,
+     siehe evalFormula() in table-compute.js), eine Formel kennt Zahlen
+     dagegen ausschließlich als Konstanten — Spalten-Zahlen kollidieren damit
+     nicht, weil Formeln nie eine Spalte referenzieren (sie gelten ohnehin
+     automatisch für jede Spalte gleich). Dasselbe Badge an zwei Stellen:
+     als Flex-Kind von .tbl-col-top-left (Editor-Karte) und als Kind von
+     .tbl-col-number-slot (schwebende Vorschau-Kennzeichnung, siehe dort). */
+  .tbl-col-number{
+    flex:none;width:18px;height:18px;border-radius:999px;background:var(--surface-alt);color:var(--ink-muted);
+    font-family:var(--font-mono);font-size:calc(10.5px * var(--font-scale, 1));font-weight:600;display:flex;align-items:center;justify-content:center;
+  }
   .tbl-col-remove{background:none;border:none;color:var(--ink-faint);cursor:pointer;font-size:calc(15px * var(--font-scale, 1));padding:0;line-height:1;}
   .tbl-col-remove:hover{color:var(--danger);}
   .tbl-col-move{display:flex;gap:2px;flex:none;}
@@ -289,6 +307,25 @@
      das entweder schon über .tbl-label-col (sticky) oder bekommt es hier
      explizit für die übrigen Kopfzellen. */
   .tbl-preview th{position:relative;}
+  /* Sichtbarer Hinweis, dass ein Spaltenkopf einen Tooltip trägt (laufende
+     Basis-Spalte/Vorjahresvergleich, siehe columnPeriodTooltip() in
+     table_editor.js) — ohne ihn war der Tooltip nur per Zufallshover zu
+     entdecken. Inline statt frei positioniert: bei der (Standard-)
+     rechtsbündigen Kopfausrichtung ging ein absolut oben-rechts platzierter
+     Punkt im Text unter — beide wollen dieselbe Ecke. Rein dekorativ
+     (pointer-events:none): der Hover-Auslöser bleibt der ganze th
+     (data-tooltip-fixed sitzt dort). Zweite Farbe für die hervorgehobene
+     Kopfzeile (--accent-line-Hintergrund, siehe .tbl-style-header-accent
+     unten) — --ink-faint wäre dort auf dem Akzent kaum zu erkennen. */
+  .tbl-period-hint{
+    display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
+    border-radius:999px;margin:0 0 1px 5px;vertical-align:middle;pointer-events:none;
+    border:1px solid var(--ink-faint);color:var(--ink-faint);
+    font-family:var(--font-mono);font-size:9px;font-weight:600;
+  }
+  .tbl-style-header-accent .tbl-period-hint{
+    border-color:color-mix(in srgb, var(--accent-contrast) 70%, transparent);color:var(--accent-contrast);
+  }
   .tbl-col-resize-handle{
     position:absolute;top:0;right:-4px;bottom:0;width:8px;cursor:col-resize;
     z-index:4;user-select:none;
@@ -375,6 +412,23 @@
      das 24px-Standard-Badge einen deutlich niedrigeren Kompakt-Zeilenschlitz
      optisch sprengt. */
   .tbl-row-letter-sm{width:18px !important;height:18px !important;margin-top:0 !important;font-size:calc(10.5px * var(--font-scale, 1)) !important;}
+
+  /* Spalten-Kürzel — Pendant zu .tbl-letters-gutter, ebenfalls außerhalb von
+     .tbl-wrap (schwebt auf der Kartenfläche statt innerhalb des
+     Tabellenrahmens zu stehen). .tbl-numbers-spacer hält denselben 26px-
+     Abstand wie .tbl-letters-gutter, damit die Zahlen über der richtigen,
+     um den Buchstaben-Gutter versetzten Spalte stehen. .tbl-numbers-gutter
+     clippt (overflow:hidden) auf die sichtbare Breite; ihr Inhalt
+     (.tbl-numbers-track, volle Tabellenbreite, per JS mit
+     transform:translateX() verschoben, siehe onPreviewScroll() in
+     table_editor.js) folgt dadurch exakt dem horizontalen Scrollen von
+     .tbl-wrap, ohne selbst ein zweites Scroll-Element mit eigener
+     Bedienung zu sein. */
+  .tbl-preview-numbers-row{display:flex;gap:14px;margin-bottom:6px;}
+  .tbl-numbers-spacer{flex:none;width:26px;}
+  .tbl-numbers-gutter{flex:1;min-width:0;overflow:hidden;position:relative;height:22px;}
+  .tbl-numbers-track{position:relative;height:100%;}
+  .tbl-col-number-slot{position:absolute;top:0;height:100%;display:flex;align-items:center;justify-content:center;}
 
   /* Darstellungs-Optionen (Konzept-Erweiterung "professionelles UI-Design")
      — dieselben Klassennamen wie auf der Dashboard-Kachel (entities.html),

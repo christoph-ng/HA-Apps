@@ -1080,9 +1080,9 @@
       return;
     }
     const base = el.closest('#dashboard-grid')?.dataset.appRoot || '';
-    let values, windowStarts, elapsedSeconds;
+    let values, windowStarts, windowEnds, isCurrent, elapsedSeconds;
     try {
-      ({values, windowStarts, elapsedSeconds} = await TableCompute.computeValues(base, visibleCols, visibleRows));
+      ({values, windowStarts, windowEnds, isCurrent, elapsedSeconds} = await TableCompute.computeValues(base, visibleCols, visibleRows));
     } catch (e) {
       previewEl.innerHTML = '<div class="dtile-loading">Fehler beim Laden</div>';
       return;
@@ -1239,7 +1239,15 @@
     // Wert zeigen statt sich mit der Zeit automatisch zu aktualisieren.
     visibleCols.forEach((c, ci) => {
       const comparisonClass = TableCompute.isComparisonColumn(c) ? ' class="tbl-comparison-col"' : '';
-      html += `<th${comparisonClass}${colWidthAttr(c.width)}>${escapeHtml(TableCompute.resolveLabel(c.label, windowStarts[ci]))}</th>`;
+      // Hinweis auf eine noch laufende (unvollständige) Woche/Monat/Jahr-
+      // Spalte, dieselbe Kennzeichnung wie in table_editor.html —
+      // data-tooltip-fixed (nicht das gewöhnliche data-tooltip), weil
+      // .dtile-table-preview überläuft/scrollt und einen normalen
+      // CSS-::after-Tooltip abschneiden würde (siehe fixed-tooltip.js).
+      const periodNote = TableCompute.currentPeriodNote(c, isCurrent[ci], windowEnds[ci]);
+      const periodTooltipAttr = periodNote ? ` data-tooltip-fixed="${escapeHtml(periodNote)}"` : '';
+      const periodHint = periodNote ? '<span class="tbl-period-hint">i</span>' : '';
+      html += `<th${comparisonClass}${colWidthAttr(c.width)}${periodTooltipAttr}>${escapeHtml(TableCompute.resolveLabel(c.label, windowStarts[ci]))}${periodHint}</th>`;
     });
     html += '</tr></thead><tbody>';
     let dataRowIndex = 0;
@@ -1282,7 +1290,9 @@
         const comparisonValueStr = comparisonIndex >= 0
           ? TableCompute.comparisonValueText(comparisonCell, visibleCols[comparisonIndex].decimals) : '';
         const comparisonTimeStr = comparisonIndex >= 0
-          ? TableCompute.comparisonElapsedTimeText(windowStarts[comparisonIndex], elapsedSeconds[comparisonIndex]) : null;
+          ? TableCompute.comparisonElapsedTimeText(
+              windowStarts[comparisonIndex], elapsedSeconds[comparisonIndex], visibleCols[comparisonIndex].range_key)
+          : null;
         const deviationTitle = comparisonIndex < 0 ? '' : comparisonValueStr
           ? `Gegenüber ${comparisonLabel}${comparisonTimeStr ? ` bis ${comparisonTimeStr}` : ''}: ${comparisonValueStr}`
           : `Gegenüber ${comparisonLabel}`;
@@ -1411,16 +1421,32 @@
   // beim Scrollen ihre eigene Gruppe.
   const pendingEntityTiles = new Set();
   let entityFlushScheduled = false;
+  let entityFlushPromise = null;
 
   function renderEntityTile(el) {
     pendingEntityTiles.add(el);
-    if (entityFlushScheduled) return;
+    if (entityFlushScheduled) return entityFlushPromise;
     entityFlushScheduled = true;
     // setTimeout(0) statt eines Microtasks: der IntersectionObserver liefert
     // zwar alle gleichzeitig sichtbaren Kacheln in EINEM Callback, der
     // Auto-Refresh ruft aber je Kachel einzeln in einer forEach-Schleife.
     // Beide Fälle landen so im selben Sammelfenster.
-    setTimeout(flushEntityTiles, 0);
+    // Das zurückgegebene Promise löst sich erst nach dem eigentlichen Fetch
+    // auf (flushEntityTiles() ist async) — mehrere Menü-Handler hängen ein
+    // `await renderEntityTile(...)` dran, um nach dem Speichern sofort den
+    // frischen Wert zu zeigen, statt bis zum nächsten Auto-Refresh zu warten.
+    entityFlushPromise = new Promise(resolve => {
+      setTimeout(() => resolve(flushEntityTiles()), 0);
+    });
+    return entityFlushPromise;
+  }
+
+  function tileNeedsAggregates(el) {
+    // Aggregate braucht es nicht nur für die Kennzahlen-Zeile, sondern auch,
+    // wenn der Hauptwert selbst eine Aggregation ist (Min/Ø/Max/Σ) — sonst
+    // bleibt applyEntityTile() ohne serie.aggregates und rührt den Hauptwert
+    // gar nicht an (Kachel bleibt leer, bis die Kennzahlen-Zeile aktiviert wird).
+    return !!el.dataset.statsMetrics || (el.dataset.primaryMetric && el.dataset.primaryMetric !== 'last');
   }
 
   function tileGroupKey(el) {
@@ -1428,7 +1454,7 @@
       el.dataset.range || 'day',
       el.dataset.continuous === 'true' ? '1' : '0',
       el.dataset.sparklineResolution || 'raw',
-      el.dataset.statsMetrics ? '1' : '0',
+      tileNeedsAggregates(el) ? '1' : '0',
     ].join('|');
   }
 
@@ -1453,7 +1479,7 @@
       range: erste.dataset.range || 'day',
       continuous: erste.dataset.continuous === 'true' ? 'true' : 'false',
       resolution: erste.dataset.sparklineResolution || 'raw',
-      stats: erste.dataset.statsMetrics ? 'true' : 'false',
+      stats: tileNeedsAggregates(erste) ? 'true' : 'false',
     });
     // MAX_MULTI_QUERY_ENTITIES (25, siehe limits.py) — ein großes Dashboard
     // überschreitet das sonst und bekäme statt Daten eine 413.
@@ -1639,6 +1665,7 @@
       const sparklineCheckbox = control.querySelector('.dtile-sparkline-checkbox');
       const sparklineResolutionCells = Array.from(control.querySelectorAll('.dtile-sparkline-resolution-cell'));
       const showAgeCheckbox = control.querySelector('.dtile-show-age-checkbox');
+      const showPeriodCheckbox = control.querySelector('.dtile-show-period-checkbox');
       const legendCheckbox = control.querySelector('.dtile-legend-checkbox');
       const dtileBody = tile.querySelector('.dtile-body');
 
@@ -1674,7 +1701,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(isEntityTile ? {
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10),
                 grid_cols: gridCols, grid_rows: gridRows,
               } : {
                 dashboard_id: dashboardId,
@@ -1761,7 +1788,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, show_sparkline: showSparkline,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), show_sparkline: showSparkline,
               }),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1797,7 +1824,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, resolution,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), resolution,
               }),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1823,7 +1850,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, show_age: showAge,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), show_age: showAge,
               }),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1927,29 +1954,31 @@
               stat.querySelector('.k').textContent = kuerzel[metric] || metric;
               zeile.appendChild(stat);
             });
-            const periode = document.createElement('span');
-            periode.className = 'dtile-entity-period';
-            periode.textContent = ctx.range_label;
-            zeile.appendChild(periode);
+            if (ctx.show_period) {
+              const periode = document.createElement('span');
+              periode.className = 'dtile-entity-period';
+              periode.textContent = ctx.range_label;
+              zeile.appendChild(periode);
+            }
             body.querySelector('.dtile-entity-sparkline')
               ? body.insertBefore(zeile, body.querySelector('.dtile-entity-sparkline'))
               : body.appendChild(zeile);
           }
 
-          // Der Zeitraum steht genau einmal — in der Wert-Zeile nur dann,
-          // wenn es keine Kennzahlen-Zeile gibt, die ihn trägt.
+          // Zeitraum (in der Wert-Zeile nur dann, wenn es keine
+          // Kennzahlen-Zeile gibt, die ihn trägt) und Alter sind unabhängig
+          // voneinander — schließen sich nicht aus (siehe gleichlautender
+          // Kommentar in _dashboard_tiles.html).
           const wertZeile = body.querySelector('.dtile-entity-value');
           wertZeile?.querySelector('.dtile-entity-period')?.remove();
-          const alter = wertZeile?.querySelector('.dtile-entity-age');
           if (ctx.show_period_in_value_row) {
-            if (alter) alter.hidden = true;
             const periode = document.createElement('span');
             periode.className = 'dtile-entity-period';
             periode.textContent = ctx.range_label;
             wertZeile?.appendChild(periode);
-          } else if (alter) {
-            alter.hidden = body.dataset.showAge !== 'true';
           }
+          const alter = wertZeile?.querySelector('.dtile-entity-age');
+          if (alter) alter.hidden = body.dataset.showAge !== 'true';
 
           // Popup-Zustand nachziehen: der Hauptwert sperrt seinen Eintrag in
           // der Kennzahlen-Zeile, deshalb reicht kein reines Umfärben.
@@ -1976,7 +2005,7 @@
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
-                dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, ...aenderung,
+                dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), ...aenderung,
               }),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1985,6 +2014,33 @@
             trigger.title = 'Kennzahlen konnten nicht gespeichert werden';
           }
         };
+
+        // Eigener Endpunkt (nicht über senden()/entity-metrics, siehe
+        // Kommentar dort), aber dieselbe uebernehmen()-Anwendung: show_period
+        // wirkt auf dieselbe Stelle (Kennzahlen-Zeile ODER Wert-Bereich) wie
+        // Zeitraum/Hauptwert/Kennzahlen-Zeile.
+        if (showPeriodCheckbox) {
+          showPeriodCheckbox.addEventListener('change', async () => {
+            const showPeriod = showPeriodCheckbox.checked;
+            showPeriodCheckbox.disabled = true;
+            try {
+              const response = await fetch(`${base}/dashboard/entity-show-period`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                  dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), show_period: showPeriod,
+                }),
+              });
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              uebernehmen(await response.json());
+            } catch (e) {
+              showPeriodCheckbox.checked = !showPeriod;
+              trigger.title = 'Zeitraum-Anzeige konnte nicht gespeichert werden';
+            } finally {
+              showPeriodCheckbox.disabled = false;
+            }
+          });
+        }
 
         rangeCells.forEach(c => c.addEventListener('click', () => senden({range_key: c.dataset.range})));
         continuousCells.forEach(c => c.addEventListener('click', () => senden({continuous: c.dataset.continuous === 'true'})));
@@ -2027,7 +2083,7 @@
             const response = await fetch(`${base}/dashboard/entity-decimals`, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, decimals}),
+              body: JSON.stringify({dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), decimals}),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             decimalsCells.forEach(option => option.classList.toggle('is-selected', option === cell));
@@ -2056,7 +2112,7 @@
             const response = await fetch(`${base}/dashboard/entity-title`, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({dashboard_id: dashboardId, entity_id: tile.dataset.itemEntityId, title}),
+              body: JSON.stringify({dashboard_id: dashboardId, pin_id: parseInt(tile.dataset.itemId, 10), title}),
             });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             if (titleEl) titleEl.textContent = title || titleInput.placeholder;
@@ -2278,6 +2334,41 @@
     setup();
     applySectionCollapseState(document);
   }
+  // Jeder #dashboard-grid-weite Swap (Sektion umbenennen/entfernen, Chart/
+  // Tabelle/Entität anpinnen …) baut ALLE Kachelmenüs aus ihrem x-data neu
+  // auf — ein gerade offenes Bearbeiten-Popup einer ANDEREN Kachel (der
+  // Nutzer tippt dort z.B. gerade an den Einstellungen, während irgendwo
+  // sonst auf der Seite eine dieser Aktionen feuert) verschwindet dabei
+  // kommentarlos, weil der Server dessen offenen Zustand nicht kennt (nur
+  // die eigene Kachel des jeweiligen Endpunkts kennt `auto_open_pin_id`,
+  // siehe _dashboard_tile_menu.html). Deshalb hier vor jedem solchen Swap
+  // merken, welche Kachel-Menüs offen waren (Kachel-Identität überlebt den
+  // Swap: data-item-type + data-item-id), und sie danach wieder öffnen.
+  // data-item-id ist für Entitäts-Kacheln seit dem Mehrfach-Anheften-Feature
+  // die eigene Pin-ID statt eines Platzhalters — kein Sonderfall mehr nötig,
+  // derselbe generische Schlüssel wie bei Chart/Tabelle identifiziert jede
+  // Kachel eindeutig, auch mehrere derselben Entität.
+  function tileIdentity(dtileEl) {
+    if (!dtileEl) return null;
+    return {type: dtileEl.dataset.itemType, id: dtileEl.dataset.itemId};
+  }
+
+  function findTileByIdentity(identity) {
+    if (!identity) return null;
+    const grid = document.getElementById('dashboard-grid');
+    if (!grid) return null;
+    return grid.querySelector(`.dtile[data-item-type="${identity.type}"][data-item-id="${CSS.escape(identity.id || '')}"]`);
+  }
+
+  let openMenusBeforeSwap = [];
+
+  document.body.addEventListener('htmx:beforeRequest', (e) => {
+    if (e.detail?.target?.id !== 'dashboard-grid') return;
+    openMenusBeforeSwap = [...document.querySelectorAll('#dashboard-grid .dtile-menu.is-open')]
+      .map(menu => tileIdentity(menu.closest('.dtile')))
+      .filter(Boolean);
+  });
+
   // Nach Pin/Unpin ersetzt htmx #dashboard-grid komplett (outerHTML) — alte
   // ECharts-Instanzen zeigen dann auf längst entfernte DOM-Knoten, deshalb
   // hier verwerfen statt sie weiter zu behalten; neue Kacheln bekommen beim
@@ -2288,6 +2379,14 @@
       instances.clear();
       setup();
       applySectionCollapseState(document);
+      // Die entfernte Kachel (falls die ausgelöste Aktion selbst ein
+      // "Vom Dashboard entfernen" war) findet findTileByIdentity() nicht
+      // mehr — dann bleibt ihr Menü zu Recht zu, statt sich neu zu öffnen.
+      openMenusBeforeSwap.forEach(identity => {
+        const menu = findTileByIdentity(identity)?.querySelector('.dtile-menu');
+        if (menu && typeof Alpine !== 'undefined') Alpine.$data(menu).menuOpen = true;
+      });
+      openMenusBeforeSwap = [];
     }
   });
 })();

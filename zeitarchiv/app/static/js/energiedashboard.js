@@ -192,6 +192,15 @@
   // "Stunde" nach demselben Muster wie formatPeriodLabel() in
   // entity_detail.html ("27.08.2026 · 14:00–15:00 Uhr") — windowEnd ist
   // exklusiv, dieselbe Sekunde-zurück-Korrektur wie dort.
+  // Woche/Monat/Jahr mit offset 0 sind noch laufende, unvollständige
+  // Perioden (window_end_ts liegt bei "jetzt", nicht an der Kalendergrenze
+  // — siehe _window()/_cap() in storage/query.py), zeigen bisher aber nur
+  // die reine Periodenbezeichnung ("2026"), als wäre sie bereits
+  // abgeschlossen. Stunde/Tag brauchen den Zusatz nicht: eine Stunde zeigt
+  // ohnehin schon ihr eigenes Start-Ende, ein Tag ist durch sein Datum
+  // bereits eindeutig als "genau dieser eine Tag" identifiziert.
+  const CURRENT_PERIOD_SUFFIX_RANGES = new Set(['week', 'month', 'year']);
+
   function periodLabel(data) {
     const start = new Date(data.window_start_ts * 1000);
     if (data.range === 'hour') {
@@ -203,7 +212,12 @@
     let opts = {weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric'};
     if (data.range === 'month') opts = {month: 'long', year: 'numeric'};
     if (data.range === 'year') opts = {year: 'numeric'};
-    return start.toLocaleDateString('de-DE', opts);
+    let label = start.toLocaleDateString('de-DE', opts);
+    if (data.offset === 0 && CURRENT_PERIOD_SUFFIX_RANGES.has(data.range)) {
+      const end = new Date(data.window_end_ts * 1000);
+      label += ` · bis ${end.toLocaleDateString('de-DE', {day: '2-digit', month: '2-digit'})}`;
+    }
+    return label;
   }
 
   let chartInstance = null;

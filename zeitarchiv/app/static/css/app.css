@@ -1837,6 +1837,15 @@ button[data-tooltip]{cursor:pointer;}
 .settings-panel p.settings-section-description{margin:0 0 18px;color:var(--ink-muted);}
 .settings-subsection{min-width:0;}
 .settings-subsection + .settings-subsection{margin-top:24px;padding-top:20px;border-top:1px solid var(--border);}
+/* #storage-index-form (housekeeping.html) ist ein nackter Wrapper-Div um ZWEI
+   .settings-subsection ("Indexkonsistenz"/"Datenintegrität", siehe
+   _settings_storage_index_form.html) — die Trennlinie ZWISCHEN ihnen liefert
+   die Regel oben (direkte Geschwister im Wrapper), aber der Wrapper selbst
+   ist kein .settings-subsection und bricht damit die Geschwister-Kette zu
+   "Host-Dateisystem" davor und "Endgültige Bereinigung" danach. Ohne diese
+   Ergänzung fehlten dort beide Trennlinien. */
+.settings-subsection + #storage-index-form,
+#storage-index-form + .settings-subsection{margin-top:24px;padding-top:20px;border-top:1px solid var(--border);}
 .settings-panel .settings-subsection-title{
   margin:0 0 6px;font-size:calc(14.5px * var(--font-scale, 1));font-weight:700;line-height:1.35;color:var(--ink-muted);
 }

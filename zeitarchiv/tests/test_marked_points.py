@@ -75,3 +75,31 @@ def test_the_second_level_shows_the_value_of_each_marker(client) -> None:
 def test_the_second_level_for_an_unknown_entity_is_a_404(client) -> None:
     response = client.get("/settings/purge/marked/sensor.does_not_exist_at_all")
     assert response.status_code == 404
+
+
+def test_the_first_level_paginates_at_20_per_page_by_default(client) -> None:
+    from app.main import index
+
+    for i in range(25):
+        entity_id = f"sensor.pytest_marked_page_{i:02d}"
+        index.get_or_create_entity(entity_id, "sensor", "measurement", "°C")
+        index.mark_deleted(entity_id, [1.0])
+
+    # Suche auf das eigene Präfix eingeschränkt — der client-Fixture teilt
+    # den Index mit den anderen Tests dieser Datei, ohne Filter wären deren
+    # Entitäten mit in der Zählung/Sortierung.
+    erste_seite = client.get("/settings/purge/marked?search=pytest_marked_page_").text
+    tabelle = erste_seite[erste_seite.index("<tbody>"):erste_seite.index("</tbody>")]
+    # Sortiert nach Markierungsanzahl (gleich hier) dann entity_id ASC — die
+    # ersten 20 von 25 landen alphabetisch auf Seite 1.
+    assert "sensor.pytest_marked_page_00" in tabelle
+    assert "sensor.pytest_marked_page_19" in tabelle
+    assert "sensor.pytest_marked_page_20" not in tabelle
+    assert "1&ndash;20 von 25" in erste_seite
+    assert 'value="20"' in erste_seite  # page_size-Auswahl steht auf 20
+
+    zweite_seite = client.get("/settings/purge/marked?search=pytest_marked_page_&page=2").text
+    tabelle_2 = zweite_seite[zweite_seite.index("<tbody>"):zweite_seite.index("</tbody>")]
+    assert "sensor.pytest_marked_page_20" in tabelle_2
+    assert "sensor.pytest_marked_page_24" in tabelle_2
+    assert "21&ndash;25 von 25" in zweite_seite

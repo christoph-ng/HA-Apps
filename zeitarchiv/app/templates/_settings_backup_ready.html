@@ -7,7 +7,20 @@
      unten), landete als Banner aber immer an derselben Stelle, oft weit weg
      von der Aktion, die man gerade ausgelöst hat. Ein Popup ist garantiert
      sichtbar, unabhängig von der Scroll-Position. #}
+  {% if backup_offer_restart %}
+  {# Nach einem vorgemerkten Restore (Backup oder Rollback): appConfirm()
+     statt appAlert() — der Restore wird erst beim nächsten Start
+     eingespielt, bis dahin läuft die alte Datenbank unverändert weiter.
+     Bestätigung stößt /system/restart an (Supervisor-Selbst-Neustart);
+     "Später" tut nichts, der Restore bleibt trotzdem vorgemerkt. #}
+  <script>
+    window.appConfirm({{ backup_message | tojson }}, {confirmLabel: "Jetzt neu starten"}).then((ok) => {
+      if (ok) htmx.ajax('POST', '{{ app_root }}/system/restart', {target: '#backup-status', swap: 'outerHTML'});
+    });
+  </script>
+  {% else %}
   <script>window.appAlert({{ backup_message | tojson }});</script>
+  {% endif %}
   {% endif %}
   {# backup_error (dauerhafter "letzter Lauf fehlgeschlagen"-Zustand, kein
      einmaliges Aktionsergebnis wie backup_message) bewusst nicht mehr als
@@ -60,18 +73,35 @@
   </div>
   {% endif %}
   {% if backup_rollbacks %}
-  <h3 style="margin:24px 0 10px;">Restore-Rollbacks {{ hint_button('Restore-Rollbacks') }}</h3>
-  {% call hint_body() %}Diese Verzeichnisse enthalten den Datenstand unmittelbar vor einer Wiederherstellung.{% endcall %}
-  {% for rollback in backup_rollbacks %}
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid var(--border);">
-    <code>{{ rollback }}</code>
-    <button type="button" class="btn btn-danger"
-            hx-post="backup/rollback/delete/{{ rollback }}"
-            hx-target="#backup-status" hx-swap="outerHTML"
-            hx-confirm="Rollback {{ rollback }} endgültig löschen?">
-      Rollback löschen
-    </button>
+  <h3 style="margin:24px 0 10px;">Restore-Rollback {{ hint_button('Restore-Rollback') }}</h3>
+  {% call hint_body() %}Enthält den Datenstand unmittelbar vor der letzten Wiederherstellung — ein neuer Restore
+  ersetzt ihn automatisch.{% endcall %}
+  <div class="tbl-wrap" style="margin-top:14px;">
+    <table class="dt">
+      <tr><th>Zeitpunkt</th><th>Größe</th><th></th></tr>
+      {% for rollback in backup_rollbacks %}
+      <tr>
+        <td>{{ rollback.created_at }}</td>
+        <td>{{ rollback.size }}</td>
+        <td style="text-align:right;">
+          <span style="display:inline-flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:10px;">
+            <button type="button" class="btn"
+                    hx-post="backup/rollback/restore/{{ rollback.name }}"
+                    hx-target="#backup-status" hx-swap="outerHTML" hx-disabled-elt="this"
+                    hx-confirm="Stand {{ rollback.name }} nach dem nächsten Add-on-Neustart wiederherstellen? Der aktuelle Datenstand wird dabei selbst als neuer Rollback behalten.">
+              Diesen Stand wiederherstellen
+            </button>
+            <button type="button" class="btn btn-danger"
+                    hx-post="backup/rollback/delete/{{ rollback.name }}"
+                    hx-target="#backup-status" hx-swap="outerHTML"
+                    hx-confirm="Rollback {{ rollback.name }} endgültig löschen?">
+              Rollback löschen
+            </button>
+          </span>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
   </div>
-  {% endfor %}
   {% endif %}
 </div>

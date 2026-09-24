@@ -261,15 +261,15 @@ def test_delete_repoints_dashboard_pin_and_keeps_tile_settings(tmp_path: Path) -
         _make_entity(index, tmp_path, "sensor.source", "sensor", "measurement", "°C", [(_ts(2020, 1, 1), 1.0)])
         _make_entity(index, tmp_path, "sensor.target", "sensor", "measurement", "°C", [])
         dashboard_id = index.get_default_dashboard_id()
-        assert index.pin_entity_to_dashboard(dashboard_id, "sensor.source")
-        index.set_dashboard_entity_pin_sparkline_resolution(dashboard_id, "sensor.source", "5min")
+        pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.source")
+        assert pin_id
+        index.set_dashboard_entity_pin_sparkline_resolution(dashboard_id, pin_id, "5min")
 
         result = entity_migration.execute_migration(
             tmp_path, index, "sensor.source", "sensor.target", TZ, post_action="delete",
         )
 
         assert result.repointed_dashboards
-        assert result.duplicate_pin_dashboards == []
         pins = index.list_dashboard_pins(dashboard_id)
         assert len(pins) == 1
         assert pins[0]["item_entity_id"] == "sensor.target"
@@ -278,7 +278,12 @@ def test_delete_repoints_dashboard_pin_and_keeps_tile_settings(tmp_path: Path) -
         index.close()
 
 
-def test_delete_drops_source_pin_instead_of_duplicating_when_target_already_pinned(tmp_path: Path) -> None:
+def test_delete_repoints_source_pin_even_when_target_already_pinned(tmp_path: Path) -> None:
+    """Seit dem Mehrfach-Anheften-Feature (Nutzer-Wunsch: dieselbe Entität mit
+    unterschiedlichen Einstellungen mehrfach zeigen) ist eine bereits
+    angeheftete Zielentität kein Sonderfall mehr — das Umhängen legt eine
+    zweite, unabhängig konfigurierte Kachel der Zielentität an, statt die
+    Quell-Kachel ersatzlos zu entfernen."""
     index = Index(tmp_path / "index.sqlite")
     try:
         _make_entity(index, tmp_path, "sensor.source", "sensor", "measurement", "°C", [(_ts(2020, 1, 1), 1.0)])
@@ -291,10 +296,9 @@ def test_delete_drops_source_pin_instead_of_duplicating_when_target_already_pinn
             tmp_path, index, "sensor.source", "sensor.target", TZ, post_action="delete",
         )
 
-        assert result.repointed_dashboards == []
-        assert result.duplicate_pin_dashboards
+        assert result.repointed_dashboards
         pins = index.list_dashboard_pins(dashboard_id)
-        assert [p["item_entity_id"] for p in pins] == ["sensor.target"]
+        assert [p["item_entity_id"] for p in pins] == ["sensor.target", "sensor.target"]
     finally:
         index.close()
 

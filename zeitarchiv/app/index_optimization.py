@@ -18,12 +18,12 @@ logger = logging.getLogger(__name__)
 #: gerenderte Seite. Sichtbar sein muss es trotzdem: Unter
 #: storage_coordinator.exclusive() pausieren Archiv-/Rollup-/Hot-Datei-
 #: Operationen (einschließlich der Aufnahme aus Home Assistant) für die
-#: Dauer. Reine Index-Zugriffe (Dashboards, Energiedashboard, Einstellungen)
-#: pausieren dagegen NICHT mehr — index.vacuum_database() kompaktiert seit
-#: der VACUUM-INTO-Umstellung auf einer isolierten Kopie, ohne den
-#: Index-Lock für die eigentliche Laufzeit zu halten (siehe dortige
-#: Docstring). Ohne diesen Eintrag sähe trotzdem jeder andere Tab nur einen
-#: Server, der bei der Datei-Aufnahme ohne erkennbaren Grund nicht mehr
+#: Dauer. Seit dem Korruptionsfix vom 22.09.2026 (siehe
+#: index.vacuum_database()) läuft das VACUUM wieder synchron in-place unter
+#: self._lock statt lock-frei auf einer isolierten Kopie — reine
+#: Index-Zugriffe (Dashboards, Energiedashboard, Einstellungen) pausieren
+#: für die Dauer also WIEDER mit. Ohne diesen Eintrag sähe trotzdem jeder
+#: andere Tab nur einen Server, der ohne erkennbaren Grund nicht mehr
 #: antwortet.
 _optimize_progress = JobProgress("index-optimize", label="Index-Optimierung")
 

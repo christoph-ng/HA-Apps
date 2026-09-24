@@ -76,10 +76,10 @@ def test_tile_metrics_endpoint_resolves_the_dependencies_itself(client) -> None:
 
     index.get_or_create_entity("sensor.kacheltest", "sensor", "measurement", "°C")
     dashboard_id = index.get_default_dashboard_id()
-    index.pin_entity_to_dashboard(dashboard_id, "sensor.kacheltest")
+    pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.kacheltest")
     try:
         antwort = client.post("/dashboard/entity-metrics", json={
-            "dashboard_id": dashboard_id, "entity_id": "sensor.kacheltest",
+            "dashboard_id": dashboard_id, "pin_id": pin_id,
             "range_key": "month", "continuous": True,
             "primary_metric": "avg", "stats_metrics": ["min", "avg", "max", "sum"],
         })
@@ -93,9 +93,27 @@ def test_tile_metrics_endpoint_resolves_the_dependencies_itself(client) -> None:
         assert daten["range_label"] == "30 Tage"
 
         ungueltig = client.post("/dashboard/entity-metrics", json={
-            "dashboard_id": dashboard_id, "entity_id": "sensor.kacheltest",
+            "dashboard_id": dashboard_id, "pin_id": pin_id,
             "range_key": "decade",
         })
         assert ungueltig.status_code == 400
     finally:
-        index.unpin_entity_from_dashboard(dashboard_id, "sensor.kacheltest")
+        index.unpin_entity_from_dashboard(dashboard_id, pin_id)
+
+
+def test_the_restart_restore_banner_shows_once_and_then_gets_out_of_the_way(client, monkeypatch) -> None:
+    """_restore_startup_result wird einmalig beim Modul-Import gesetzt (ein
+    Restore direkt vor diesem Start) und blieb bisher für die gesamte
+    Prozesslaufzeit stehen — jede spätere Aktion ohne eigene message
+    (Backup löschen, Backup erstellen, Fortschritts-Polling) zeigte die
+    Wiederherstellungs-Meldung samt Rollback-Pfad dadurch fälschlich erneut."""
+    import app.main as main
+
+    monkeypatch.setattr(main, "_restore_startup_result", {
+        "success": True, "source": "test.zip", "rollback": ".zeitarchiv-restore-rollback-test",
+    })
+    erste = client.get("/backup")
+    assert "test.zip" in erste.text and "wurde wiederhergestellt" in erste.text
+
+    zweite = client.get("/backup")
+    assert "wurde wiederhergestellt" not in zweite.text

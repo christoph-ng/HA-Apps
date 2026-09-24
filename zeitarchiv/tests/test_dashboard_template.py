@@ -136,7 +136,7 @@ def test_value_tile_editor_and_sparkline_defaults_are_exposed() -> None:
     menu = (TEMPLATES_DIR / "_dashboard_tile_menu.html").read_text(encoding="utf-8")
     tiles = (TEMPLATES_DIR / "_dashboard_tiles.html").read_text(encoding="utf-8")
     script = (TEMPLATES_DIR.parent / "static" / "js" / "dashboard-tiles.js").read_text(encoding="utf-8")
-    assert "auto_open_entity_id == tile.entity_id" in menu
+    assert "auto_open_pin_id == tile.pin_id" in menu
     assert 'name="new_entity_id"' in menu
     assert "entityPicker(" in menu
     assert 'placeholder="Entität suchen …"' in menu

@@ -281,6 +281,8 @@
         style: {...DEFAULT_STYLE, ...INITIAL_STYLE},
         values: {},  // col.uid -> row.uid -> {value, unit, error} | null
         windowStarts: {},  // col.uid -> tatsächlich aufgelöster Fensterbeginn (Sekunden) | null
+        windowEnds: {},  // col.uid -> tatsächlich aufgelöstes (ggf. gedecktes) Fensterende (Sekunden) | null
+        isCurrent: {},  // col.uid -> offset===0 (siehe currentPeriodNote() in table-compute.js)
         elapsedSeconds: {},  // col.uid -> same_elapsed-Kappung ab windowStarts[uid] (Sekunden) | null
         loading: false,
         saving: false,
@@ -292,6 +294,8 @@
         valueAlignPickerOpen: false,
         letterPositions: {},  // row.uid -> {top, height} in px, aus der echten Tabelle gemessen
         gutterHeight: 0,
+        colNumberPositions: {},  // col.uid -> {left, width} in px, aus der echten Tabelle gemessen
+        numbersTrackWidth: 0,  // Gesamtbreite der Tabelle — Breite von .tbl-numbers-track
 
         // Buchstaben-Zuordnung bewusst über ALLE Zeilen (auch ausgeblendete)
         // — sonst würde eine Formel, die auf eine versteckte Hilfszeile
@@ -416,7 +420,7 @@
           const cols = this.columns.filter(c => !c.hidden);
           const csvEscape = s => `"${String(s).replace(/"/g, '""')}"`;
           const lines = [];
-          lines.push(['', ...cols.map(c => csvEscape(this.renderedColumnLabel(c)))].join(';'));
+          lines.push(['', ...cols.map(c => csvEscape(this.columnExportLabel(c)))].join(';'));
           this.rows.forEach(row => {
             if (row.row_type === 'separator' || !this.rowVisible(row)) return;
             const cells = cols.map(col => {
@@ -577,6 +581,19 @@
           if (!raw) return suggestColumnLabel(col);
           return TableCompute.resolveLabel(raw, this.windowStarts[col.uid]);
         },
+        // Tooltip für die Kopfzelle einer noch laufenden (unvollständigen)
+        // Woche/Monat/Jahr-Spalte — z. B. "im laufenden Jahr · bis 21.09."
+        // statt stillschweigend "Jahr" zu zeigen, obwohl erst ein Teil des
+        // Jahres vorliegt (Konzept "laufendes Jahr"). null (kein Tooltip)
+        // bei einer abgeschlossenen Vor-Spalte oder bei Stunde/Tag.
+        columnPeriodTooltip(col) {
+          return TableCompute.currentPeriodNote(col, this.isCurrent[col.uid], this.windowEnds[col.uid]);
+        },
+        // Dieselbe Kennzeichnung wie columnPeriodTooltip(), aber als
+        // Klartext-Zusatz für den CSV-Export (kein Hover verfügbar).
+        columnExportLabel(col) {
+          return this.renderedColumnLabel(col) + TableCompute.currentPeriodShortSuffix(col, this.isCurrent[col.uid], this.windowEnds[col.uid]);
+        },
         suggestFormulaUnit(row) {
           for (const col of this.columns) {
             const cell = this.values[col.uid] && this.values[col.uid][row.uid];
@@ -725,7 +742,7 @@
           const comparisonValueStr = TableCompute.comparisonValueText(comparisonCell, comparisonCol.decimals);
           if (!comparisonValueStr) return `Gegenüber ${comparisonLabel}`;
           const comparisonTimeStr = TableCompute.comparisonElapsedTimeText(
-            this.windowStarts[comparisonCol.uid], this.elapsedSeconds[comparisonCol.uid]);
+            this.windowStarts[comparisonCol.uid], this.elapsedSeconds[comparisonCol.uid], comparisonCol.range_key);
           return `Gegenüber ${comparisonLabel}${comparisonTimeStr ? ` bis ${comparisonTimeStr}` : ''}: ${comparisonValueStr}`;
         },
 
@@ -736,7 +753,10 @@
         // hier nur die Umwandlung dorthin und die Ergebnisse zurück in
         // this.values[col.uid][row.uid].
         async load() {
-          if (!this.columns.length || !this.rows.length) { this.values = {}; this.windowStarts = {}; this.elapsedSeconds = {}; return; }
+          if (!this.columns.length || !this.rows.length) {
+            this.values = {}; this.windowStarts = {}; this.windowEnds = {}; this.isCurrent = {}; this.elapsedSeconds = {};
+            return;
+          }
           const requestId = ++this._loadSeq;
           this.loading = true;
           const plainColumns = this.columns.map(c => ({range_key: c.range_key, offset: c.offset, year_over_year: c.year_over_year}));
@@ -744,19 +764,26 @@
             row_type: r.row_type, entity_ids: r.entity_ids, formula: r.formula,
             formula_unit: r.formula_unit || '', aggregation: r.aggregation || 'auto',
           }));
-          const {values: computed, windowStarts, elapsedSeconds} = await TableCompute.computeValues(BASE, plainColumns, plainRows);
+          const {values: computed, windowStarts, windowEnds, isCurrent, elapsedSeconds} =
+            await TableCompute.computeValues(BASE, plainColumns, plainRows);
           if (requestId !== this._loadSeq) return;  // überholt von einer neueren Anfrage
           const newValues = {};
           const newWindowStarts = {};
+          const newWindowEnds = {};
+          const newIsCurrent = {};
           const newElapsedSeconds = {};
           this.columns.forEach((col, ci) => {
             newValues[col.uid] = {};
             this.rows.forEach((row, ri) => { newValues[col.uid][row.uid] = computed[ci][ri]; });
             newWindowStarts[col.uid] = windowStarts[ci];
+            newWindowEnds[col.uid] = windowEnds[ci];
+            newIsCurrent[col.uid] = isCurrent[ci];
             newElapsedSeconds[col.uid] = elapsedSeconds[ci];
           });
           this.values = newValues;
           this.windowStarts = newWindowStarts;
+          this.windowEnds = newWindowEnds;
+          this.isCurrent = newIsCurrent;
           this.elapsedSeconds = newElapsedSeconds;
           this.loading = false;
         },
@@ -881,13 +908,64 @@
           table.style.setProperty('--tbl-group-header-h', groupH + 'px');
         },
 
+        // Position/Breite EINES Zahlen-Badges in .tbl-numbers-track — aus
+        // colNumberPositions (von syncColumnNumberPositions() gemessen).
+        // Kein top/height wie bei letterSlotStyle() (die Zeile ist immer
+        // gleich hoch), sondern left/width, da Spalten unterschiedlich
+        // breit sind. Ohne Eintrag bleibt der Slot unsichtbar statt bei 0/0
+        // zu "kleben" — dieselbe Begründung wie letterSlotStyle().
+        colNumberSlotStyle(colUid) {
+          const p = this.colNumberPositions[colUid];
+          if (!p) return 'display:none;';
+          return `left:${p.left}px;width:${p.width}px;`;
+        },
+        // Liest die TATSÄCHLICH gerenderten Spalten-Positionen der echten
+        // Tabelle aus (analog zu syncLetterPositions() oben, nur horizontal
+        // statt vertikal — der Kopfzeilen-th trägt dafür data-col-uid).
+        // left ist relativ zum linken Tabellenrand, bleibt also unabhängig
+        // vom aktuellen Scroll-Stand korrekt (Tabelle UND th verschieben
+        // sich beim Scrollen um denselben Betrag, die Differenz ändert sich
+        // nicht) — nur das SICHTBARE Fenster (.tbl-numbers-gutter,
+        // overflow:hidden) muss dem Scrollen folgen, siehe
+        // onPreviewScroll() unten.
+        syncColumnNumberPositions() {
+          const table = this.$refs.previewTable;
+          if (!table || !table.isConnected) return;
+          const tableRect = table.getBoundingClientRect();
+          const headerRow = Array.from(table.querySelectorAll('tr.tbl-header-row'))
+            .find(tr => !tr.classList.contains('tbl-group-header-row'));
+          if (!headerRow) return;
+          const positions = {};
+          headerRow.querySelectorAll('th[data-col-uid]').forEach(th => {
+            if (th.offsetParent === null) return;
+            const r = th.getBoundingClientRect();
+            positions[th.dataset.colUid] = {left: r.left - tableRect.left, width: r.width};
+          });
+          this.colNumberPositions = positions;
+          this.numbersTrackWidth = tableRect.width;
+          this.onPreviewScroll();
+        },
+        // .tbl-numbers-gutter clippt (overflow:hidden) auf die sichtbare
+        // Breite von .tbl-wrap — ihr Inhalt (.tbl-numbers-track, dieselbe
+        // Gesamtbreite wie die echte Tabelle) folgt per transform exakt
+        // demselben scrollLeft, statt selbst zu scrollen. Dieselbe Technik
+        // wie ein "eingefrorener" Tabellenkopf, ohne die echte Tabelle
+        // anzufassen.
+        onPreviewScroll() {
+          const wrap = this.$refs.previewWrap;
+          const track = this.$refs.numbersTrack;
+          if (wrap && track) track.style.transform = `translateX(${-wrap.scrollLeft}px)`;
+        },
+
         init() {
           this.load();
           // .tbl-columns/.tbl-rows stecken in einem x-if="editing" — bei
           // jedem Wechsel auf "editing" wird der Container neu erzeugt (der
           // dragBound-Marker geht dabei verloren), deshalb hier neu binden,
           // nicht nur einmalig beim ersten Laden.
-          this.$watch('editing', v => { if (v) this.$nextTick(() => { setupColumnDrag(); setupRowDrag(); this.syncLetterPositions(); }); });
+          this.$watch('editing', v => {
+            if (v) this.$nextTick(() => { setupColumnDrag(); setupRowDrag(); this.syncLetterPositions(); this.syncColumnNumberPositions(); });
+          });
           if (this.editing) this.$nextTick(() => { setupColumnDrag(); setupRowDrag(); });
           // ResizeObserver statt einzelner Watcher auf rows/columns/style —
           // jede Änderung, die die Zeilenhöhen der echten Tabelle beeinflussen
@@ -895,13 +973,17 @@
           // geladene Werte ändern die Zellenbreite/Umbruch, Schriftgrößen-
           // Skalierung), ändert zwangsläufig auch deren Gesamthöhe — genau
           // das beobachtet der ResizeObserver, ganz ohne jede einzelne
-          // mögliche Ursache selbst auflisten zu müssen.
+          // mögliche Ursache selbst auflisten zu müssen. Dieselbe Größen-
+          // änderung kann auch Spaltenbreiten verschieben (z. B. Spalte
+          // hinzugefügt/entfernt/versteckt), deshalb hier auch die
+          // Spalten-Positionen neu messen.
           this.$nextTick(() => {
             const table = this.$refs.previewTable;
             if (table && window.ResizeObserver) {
-              new ResizeObserver(() => this.syncLetterPositions()).observe(table);
+              new ResizeObserver(() => { this.syncLetterPositions(); this.syncColumnNumberPositions(); }).observe(table);
             }
             this.syncLetterPositions();
+            this.syncColumnNumberPositions();
           });
         },
       };

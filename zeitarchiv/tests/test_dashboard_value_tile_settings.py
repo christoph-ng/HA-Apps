@@ -26,19 +26,64 @@ def test_new_value_tile_enables_sparkline_and_uses_raw_resolution(tmp_path: Path
         index.close()
 
 
+def test_pinning_the_same_entity_twice_creates_independent_tiles(tmp_path: Path) -> None:
+    """Nutzer-Wunsch: dieselbe Entität mit unterschiedlichem Hauptwert/Titel
+    mehrfach zeigen können. Vorher war ein zweites Anheften ein stiller
+    No-op, und jeder Setter traf per item_entity_id ALLE Kacheln derselben
+    Entität gleichzeitig (kein LIMIT 1 in der WHERE) — dieser Test schützt
+    genau davor: eine Änderung/das Entfernen einer Kachel darf die andere
+    nicht mit anfassen."""
+    index = Index(tmp_path / "index.sqlite")
+    try:
+        index.get_or_create_entity("sensor.one", "sensor", "measurement", "°C")
+        dashboard_id = index.get_default_dashboard_id()
+
+        pin_a = index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
+        pin_b = index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
+        assert pin_a and pin_b and pin_a != pin_b
+        assert len(index.list_dashboard_pins(dashboard_id)) == 2
+
+        assert index.set_dashboard_entity_pin_metrics(dashboard_id, pin_a, primary_metric="avg")
+        pins_by_id = {p["id"]: p for p in index.list_dashboard_pins(dashboard_id)}
+        assert pins_by_id[pin_a]["primary_metric"] == "avg"
+        assert pins_by_id[pin_b]["primary_metric"] == "last"
+
+        assert index.set_dashboard_entity_pin_title(dashboard_id, pin_b, "Zweite Kachel")
+        pins_by_id = {p["id"]: p for p in index.list_dashboard_pins(dashboard_id)}
+        assert pins_by_id[pin_a]["title"] is None
+        assert pins_by_id[pin_b]["title"] == "Zweite Kachel"
+
+        # Umsortieren trifft nur die genannte Kachel, nicht beide — item_id
+        # ist für Entitäts-Pins seit dem Mehrfach-Anheften-Feature die eigene
+        # Pin-ID statt eines für alle gleichen Platzhalters.
+        index.reorder_dashboard_pins(
+            dashboard_id, [("entity", pin_b, "sensor.one"), ("entity", pin_a, "sensor.one")]
+        )
+        assert [p["id"] for p in index.list_dashboard_pins(dashboard_id)] == [pin_b, pin_a]
+
+        # Löschen entfernt nur die genannte Kachel.
+        index.unpin_entity_from_dashboard(dashboard_id, pin_a)
+        remaining = index.list_dashboard_pins(dashboard_id)
+        assert len(remaining) == 1
+        assert remaining[0]["id"] == pin_b
+        assert remaining[0]["title"] == "Zweite Kachel"
+    finally:
+        index.close()
+
+
 def test_value_tile_resolution_and_entity_can_be_changed(tmp_path: Path) -> None:
     index = Index(tmp_path / "index.sqlite")
     try:
         index.get_or_create_entity("sensor.one", "sensor", "measurement", "°C")
         index.get_or_create_entity("sensor.two", "sensor", "measurement", "°C")
         dashboard_id = index.get_default_dashboard_id()
-        index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
+        pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
 
         assert index.set_dashboard_entity_pin_sparkline_resolution(
-            dashboard_id, "sensor.one", "5min"
+            dashboard_id, pin_id, "5min"
         )
         assert index.set_dashboard_entity_pin_entity(
-            dashboard_id, "sensor.one", "sensor.two"
+            dashboard_id, pin_id, "sensor.two"
         )
         pin = index.list_dashboard_pins(dashboard_id)[0]
         assert pin["item_entity_id"] == "sensor.two"
@@ -73,10 +118,10 @@ def test_metrics_are_stored_in_display_order_without_duplicates(tmp_path: Path) 
     try:
         index.get_or_create_entity("sensor.one", "sensor", "measurement", "°C")
         dashboard_id = index.get_default_dashboard_id()
-        index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
+        pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
 
         assert index.set_dashboard_entity_pin_metrics(
-            dashboard_id, "sensor.one", stats_metrics=["max", "min", "min"]
+            dashboard_id, pin_id, stats_metrics=["max", "min", "min"]
         )
         pin = index.list_dashboard_pins(dashboard_id)[0]
         assert pin["stats_metrics"] == "min,max"
@@ -91,13 +136,13 @@ def test_metrics_setter_leaves_unnamed_fields_untouched(tmp_path: Path) -> None:
     try:
         index.get_or_create_entity("sensor.one", "sensor", "measurement", "°C")
         dashboard_id = index.get_default_dashboard_id()
-        index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
+        pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
 
         index.set_dashboard_entity_pin_metrics(
-            dashboard_id, "sensor.one", range_key="month", continuous=True,
+            dashboard_id, pin_id, range_key="month", continuous=True,
             primary_metric="avg", stats_metrics=["min", "max"],
         )
-        index.set_dashboard_entity_pin_metrics(dashboard_id, "sensor.one", range_key="year")
+        index.set_dashboard_entity_pin_metrics(dashboard_id, pin_id, range_key="year")
 
         pin = index.list_dashboard_pins(dashboard_id)[0]
         assert pin["range_key"] == "year"
@@ -113,17 +158,17 @@ def test_metrics_setter_rejects_values_the_tile_cannot_show(tmp_path: Path) -> N
     try:
         index.get_or_create_entity("sensor.one", "sensor", "measurement", "°C")
         dashboard_id = index.get_default_dashboard_id()
-        index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
+        pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
 
         # "decade" gibt es als Zeitraum der Abfrage, aber nicht auf der Kachel.
         with pytest.raises(ValueError):
-            index.set_dashboard_entity_pin_metrics(dashboard_id, "sensor.one", range_key="decade")
+            index.set_dashboard_entity_pin_metrics(dashboard_id, pin_id, range_key="decade")
         # "auto" kennt _table_aggregates(), ist als Hauptwert aber keine Aussage.
         with pytest.raises(ValueError):
-            index.set_dashboard_entity_pin_metrics(dashboard_id, "sensor.one", primary_metric="auto")
+            index.set_dashboard_entity_pin_metrics(dashboard_id, pin_id, primary_metric="auto")
         # "last" ist der Hauptwert, keine Kennzahl der Zeile.
         with pytest.raises(ValueError):
-            index.set_dashboard_entity_pin_metrics(dashboard_id, "sensor.one", stats_metrics=["last"])
+            index.set_dashboard_entity_pin_metrics(dashboard_id, pin_id, stats_metrics=["last"])
 
         pin = index.list_dashboard_pins(dashboard_id)[0]
         assert (pin["range_key"], pin["primary_metric"], pin["stats_metrics"]) == ("day", "last", "")
@@ -139,9 +184,9 @@ def test_duplicating_a_dashboard_keeps_the_metric_settings(tmp_path: Path) -> No
     try:
         index.get_or_create_entity("sensor.one", "sensor", "measurement", "°C")
         dashboard_id = index.get_default_dashboard_id()
-        index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
+        pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.one")
         index.set_dashboard_entity_pin_metrics(
-            dashboard_id, "sensor.one", range_key="month", continuous=True,
+            dashboard_id, pin_id, range_key="month", continuous=True,
             primary_metric="max", stats_metrics=["avg"],
         )
 
@@ -364,9 +409,9 @@ def test_an_existing_tile_keeps_the_main_value_it_had(tmp_path: Path) -> None:
     try:
         index.get_or_create_entity("sensor.pv", "sensor", "total_increasing", "kWh")
         dashboard_id = index.get_default_dashboard_id()
-        index.pin_entity_to_dashboard(dashboard_id, "sensor.pv")
+        pin_id = index.pin_entity_to_dashboard(dashboard_id, "sensor.pv")
         assert index.set_dashboard_entity_pin_metrics(
-            dashboard_id, "sensor.pv", primary_metric="last"
+            dashboard_id, pin_id, primary_metric="last"
         )
         pin = index.list_dashboard_pins(dashboard_id)[0]
         assert pin["primary_metric"] == "last"

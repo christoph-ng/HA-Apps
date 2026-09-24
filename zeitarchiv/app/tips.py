@@ -216,6 +216,41 @@ TIPS = [
         "meta": "Import",
         "link": "/import?tab=reports",
     },
+    {
+        "slug": "entitaet_migrieren",
+        "title": "Tipp: Datensätze in eine andere Entität übertragen",
+        "detail": "Über Entität → Konfiguration → „Datensätze in andere Entität übertragen“ lässt sich der komplette archivierte Verlauf umziehen — praktisch, wenn Home Assistant ein Gerät ersetzt oder umbenannt hat.",
+        "meta": "Entitäten",
+        "link": "/entities",
+    },
+    {
+        "slug": "jahresvergleich_laufsumme",
+        "title": "Tipp: Laufsumme und Ziellinie im Jahresvergleich",
+        "detail": "Der Jahresvergleich im Chart-Editor lässt sich um eine Laufsumme und eine frei wählbare Soll-Entität als Ziellinie erweitern — beide unabhängig voneinander zuschaltbar.",
+        "meta": "Charts",
+        "link": "/charts/new",
+    },
+    {
+        "slug": "archiv_verdichten",
+        "title": "Tipp: Archivierte Monate nachträglich verdichten",
+        "detail": "Bereits archivierte Monate lassen sich auf eine gröbere Auflösung reduzieren — manuell mit Vorschau im Bearbeitungsbereich einer Entität, oder automatisch über ein Mindestalter in Housekeeping → Verdichten.",
+        "meta": "Housekeeping",
+        "link": "/housekeeping#verdichten",
+    },
+    {
+        "slug": "aktivitaet_protokoll",
+        "title": "Tipp: Korrekturen und Verdichtungen im Blick",
+        "detail": "Der Housekeeping-Tab „Aktivität“ listet Korrekturen, hinzugefügte Werte, Bereinigungen und Verdichtungen, filterbar nach Entität, Aktionstyp und Zeitraum.",
+        "meta": "Housekeeping",
+        "link": "/housekeeping#aktivitaet",
+    },
+    {
+        "slug": "kachel_mehrfach_anheften",
+        "title": "Tipp: Eine Entität mehrfach als Kachel zeigen",
+        "detail": "Dieselbe Entität lässt sich mehrfach als Werte-Kachel anheften — z. B. einmal mit dem aktuellen Wert, einmal mit dem Durchschnitt, jede mit eigenen Einstellungen.",
+        "meta": "Dashboards",
+        "link": "/dashboards",
+    },
 ]
 
 
