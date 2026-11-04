@@ -33,8 +33,16 @@ für Schritt, aufgabenorientiert, jede Seite im Detail. Für einen kurzen
   - [Status, Datenqualität und Auffälligkeiten](#status-datenqualität-und-auffälligkeiten)
   - [Tageslastprofil](#tageslastprofil)
   - [Energiebericht](#energiebericht)
+- [Wetterdashboard](#wetterdashboard)
+  - [Rollen](#rollen)
+  - [Kacheln und Vergleichstabelle](#kacheln-und-vergleichstabelle)
+  - [Reiter Niederschlag](#reiter-niederschlag)
+  - [Monatsvergleich](#monatsvergleich)
+  - [Reiter Langzeit](#reiter-langzeit)
+  - [Reiter Heizen](#reiter-heizen)
 - [Entitäten und Verläufe](#entitäten-und-verläufe)
   - [Mehrere Entitäten löschen](#mehrere-entitäten-löschen)
+  - [Kategorien](#kategorien)
   - [Zeitraum-Navigation](#zeitraum-navigation)
   - [Darstellung](#darstellung)
   - [In einen Ausschnitt hineinzoomen](#in-einen-ausschnitt-hineinzoomen)
@@ -213,8 +221,8 @@ Kachel-Ansicht wie unter **Dashboards**, nur fest der Übersicht zugeordnet
 und nicht umbenennbar oder löschbar. Es lässt sich wie jedes andere
 Dashboard mit Kacheln bestücken, umsortieren und fixieren (siehe unten).
 
-Was beim Öffnen von Zeitarchiv über die HA-Sidebar erscheint (Übersicht
-oder direkt das Energiedashboard), legt **Einstellungen → Darstellung →
+Was beim Öffnen von Zeitarchiv über die HA-Sidebar erscheint (Übersicht,
+Energiedashboard oder Wetterdashboard), legt **Einstellungen → Darstellung →
 Startseite** fest. Der „Übersicht"-Eintrag in der Kopfzeile führt davon
 unabhängig immer zur Übersicht selbst.
 
@@ -314,7 +322,8 @@ etwas kommt; er erscheint nur, wenn es tatsächlich etwas zu scrollen gibt.
   Standard-Dashboard trägt einen farbigen Kopfstreifen zur leichteren
   Wiedererkennung (dieselbe Idee wie bei der Energiedashboard-Kachel oben in
   der Liste); steht **Einstellungen → Darstellung → Startseite** auf
-  Energiedashboard, zeigt dessen Kachel zusätzlich ein kleines Haus-Symbol.
+  Energiedashboard oder Wetterdashboard, zeigt dessen Kachel zusätzlich ein kleines
+  Haus-Symbol.
 - Ein Klick auf die Kachel öffnet das Dashboard; „Bearbeiten“, „Duplizieren“,
   „Als Standard festlegen“ und „Löschen“ stehen im Kachelmenü (⋮).
   Suchfeld, Sortierung und der Schalter „Favoriten zuerst“ über den Kacheln
@@ -618,11 +627,20 @@ selbst, nie zusätzlich seine Geräte.
 Direkt unter dem Sankey stehen fünf KPI-Kacheln (Erzeugung, Verbrauch,
 Netzbezug, Speicher, Einspeisung) für den gewählten Zeitraum; bei mehreren
 Speichern oder Erzeugern zeigt ihr Tooltip zusätzlich die Aufschlüsselung je
-Gerät. Ein Klick auf eine Kachel führt zum Chart der zugrundeliegenden
-Entität, mit demselben Zeitraum, der gerade im Energiedashboard eingestellt
-ist; steckt mehr als eine Entität dahinter (mehrere Erzeuger/Verbraucher,
-oder ein Speicher mit getrennter Lade-/Entlade-Entität), öffnet sich
-stattdessen ein kurzes Auswahlfenster. Der Link „← zurück zum
+Gerät. Ein Klick auf eine Kachel öffnet ein Diagramm-Popup für den gerade
+eingestellten Zeitraum: bei Erzeugung und Verbrauch gestapelte Balken je Quelle
+(beim Verbrauch samt Grundlast; umschaltbar auf Linie und Anteile in Prozent),
+beim Speicher Ladung und Entladung nebeneinander, bei Stunde und Tag mit
+SOC-Sensor zusätzlich der Ladestand als Linie, bei Netzbezug und Einspeisung
+Balken (umschaltbar auf Linie) mit dem Vorzeitraum (Vortag, Vormonat …) als
+gestrichelte Linie; der Vorzeitraum ist dabei der Kalenderzeitraum, die
+Prozentzahl in der Kachel vergleicht dagegen rollierend, beide können sich
+bei laufendem Zeitraum leicht unterscheiden. Die Zeilen darunter, bei
+Netzbezug und Einspeisung „Entität öffnen“, führen zur Entität mit demselben
+Zeitraum; das Popup lädt beim Öffnen und aktualisiert sich nicht von selbst.
+Erzeugung, Netzbezug und Einspeisung ohne konfigurierte Quelle sind
+deaktiviert, der Speicher erscheint nur, wenn einer konfiguriert ist.
+Der Link „← zurück zum
 Energiedashboard“ auf der Entitätsseite (ebenso der aus dem Energiebericht,
 siehe unten) führt wieder genau zu diesem Zeitraum zurück, nicht zur
 Standardansicht.
@@ -679,6 +697,106 @@ bei Monat/Jahr stattdessen den nach Wochentag gemittelten Verbrauch (Mo–So)
 über den gewählten Zeitraum, sodass erkennbar wird, an welchen Wochentagen
 typischerweise mehr verbraucht wird.
 
+### Reiter „Langzeit“
+
+Unter Titel und Untertitel stehen zwei Reiter: **Übersicht** (der Energiefluss
+mit allen Karten, unverändert) und **Langzeit**. Der Reiter Langzeit
+vergleicht Zeiträume mit dem Vorjahr, im Aufbau wie die Vergleichstabelle des
+Wetterdashboards: Spaltengruppen **Letzter Monat**, **Dieser Monat** und
+**Dieses Jahr**, daneben jeweils das Vorjahr, darunter die Differenz zum Wert
+des Vorjahres. Die Zeilen sind Erzeugung, Einspeisung, Netzbezug und Verbrauch.
+Grün heißt günstig (mehr Erzeugung und Einspeisung, weniger Netzbezug und
+Verbrauch), rot ungünstig.
+
+- **Stichtag:** die Leiste „‹ Datum ›“ mit Kalender und „Heute“ oben in der
+  Karte zeigt die Zeiträume zu einem früheren Tag. Der Stichtag steht in der
+  Adresse (`?date=`) und gilt nur für diesen Reiter; die Übersicht hat ihre
+  eigene Zeitraum-Auswahl.
+- **Vorjahr:** „Bis jetzt“ vergleicht einen laufenden Zeitraum mit demselben
+  Stück des Vorjahres, „Komplett“ mit dem ganzen Vorjahreszeitraum; der letzte
+  Monat ist in beiden Fällen gleich. „Differenz anzeigen“ blendet die
+  Differenzzeile ein oder aus. Die Auswahl (Spalten, Vorjahr, Differenz) merkt
+  sich der Browser.
+- **Quoten und Speicher:** Unter dem Verbrauch stehen Eigenverbrauch und Autarkie
+  (wie in der Übersicht gerechnet); ihre Differenz zum Vorjahr steht in
+  Prozentpunkten (PP). Mit zugeordneten Speichern kommen die Zeilen Ladung und
+  Entladung dazu, ohne Wertung in Grün oder Rot.
+- **PV-Anlage, wetterbereinigt:** Trägt ein Erzeuger in der Einrichtung eine
+  **Anlagenleistung** (kWp), erscheint der **spezifische Ertrag** (kWh je kWp).
+  Ist im Wetterdashboard zusätzlich die **Strahlung** (W/m²) zugeordnet, zeigt
+  **Ertrag je Einstrahlung**, wie viel der eingestrahlten Energie die Anlage
+  erzeugt hat; damit lässt sich ein schwächeres Jahr von einem schlechteren
+  Sommer unterscheiden. Es zählen nur Erzeuger mit Leistung. Hat der Sensor in
+  einem Zeitraum weniger als 80 % der Stundenwerte, steht dort „–“. Der Sensor
+  misst waagerecht, die Dachflächen sind unterschiedlich geneigt; der Wert ist
+  deshalb ein Vergleichswert über die Jahre, kein Wirkungsgrad.
+- **Verbrauch** ist hier die Bilanz Erzeugung + Netzbezug + Speicherentladung −
+  Einspeisung − Speicherladung, dieselbe Rechnung wie in den Trends und im
+  Monatsverlauf des Berichts. „Dieses Jahr“ vergleicht kalendarisch (1.1. bis
+  zum Stichtag); die Kacheln der Übersicht vergleichen dagegen rollierend über
+  365 Tage, ihre Prozentwerte weichen deshalb ab.
+- **Fehlende Daten** sind kein 0: Liegt in einem Zeitraum kein Wert, steht dort
+  „–“, mit dem Beginn des Archivs als Hinweis, wenn er im Zeitraum liegt.
+- **Was hat sich verändert?** Eine Karte mit den Verbrauchern, die sich gegenüber
+  dem Vorjahr am stärksten geändert haben (Zeitraum Dieses Jahr, Stichtag und
+  Vorjahr-Modus wie die Tabelle). Balken nach rechts (rot) heißen mehr Verbrauch,
+  nach links (grün) weniger. Geräte hinter einem Zwischenzähler stehen im
+  Zwischenzähler; „Übrige (Grundlast)“ ist der Rest bis zum Verbrauch laut
+  Bilanz. Ein Verbraucher, der nur in einem der beiden Zeiträume Werte hat, steht
+  nicht in der Liste.
+- **Rekorde:** Stärkster Erzeugungstag, höchste Einspeisung, höchster Verbrauch und
+  höchster Netzbezug als Tageswerte seit Beginn des Archivs, mit Datum und einem
+  Link auf den Tag (bei Rollen mit genau einer Entität). Rekorde erscheinen erst
+  ab einem Jahr Archiv. Tage direkt nach einem fehlenden Tag zählen nicht mit,
+  weil der nächste Messwert dort die Differenz mehrerer Tage trägt und einen
+  Schein-Rekord ergäbe; bei Gleichstand gilt der frühere Tag.
+- **Jahre:** Über dem Monatsvergleich stellt „Letzte 5“, „Letzte 10“ oder „Alle“
+  ein, wie viele Jahre Monatsvergleich, „Jahre × Monate“ und Kenntage zeigen.
+  Ø und Spanne bilden sich nur aus diesen Jahren. Die Rekorde zählen immer seit
+  Archivbeginn. Die Auswahl merkt sich der Browser.
+- **Kenntage je Jahr:** Sechs Kenntage in drei Paaren, je Jahr ein Balken mit
+  der Zahl der Tage und ihrem Anteil an den ausgewerteten Tagen: **Fast autark**
+  (Autarkie ab 90 %, also Netzbezug höchstens 10 % des Verbrauchs bei mindestens
+  0,5 kWh Verbrauch) und **Überschusstage** (mehr Einspeisung als Verbrauch),
+  **Sonnentage** (ab 4 kWh je kWp, braucht bei jedem Erzeuger die Anlagenleistung)
+  und **Trübe Tage** (unter 10 % des Tagesmittels des Jahres), **Speicher stark
+  genutzt** (ab 80 % der Speicherkapazität als Entladung) und **Speicher kaum
+  genutzt** (unter 10 %). Ein Feld erscheint nur, wenn die Rollen dafür
+  eingerichtet sind; das Speicherpaar braucht außerdem die Kapazität des
+  Speichers (bei mehreren Speichern die Summe).
+  „Ganzes Jahr“ zählt die Kalenderjahre, „Bis heute“ in jedem Jahr nur bis zum
+  heutigen Kalendertag, damit das laufende Jahr vergleichbar ist. Ein Klick auf
+  eine Zeile öffnet den Jahreskalender: 12 Monate mit 31 Tagen, die Kenntage sind
+  gefüllt, ein Klick auf einen Tag öffnet ihn im Energiedashboard. Es zählen nur
+  Tage mit allen Werten, ohne den Tag nach einem fehlenden Tag. Die Schwellen
+  stellt ihr im Setup unter „Kenntage“ ein, ein leeres Feld nimmt die Vorgabe.
+- **Bereiche ausblenden:** Im Setup unter „Langzeit“ lässt sich jeder Block der
+  Tabelle „Zeiträume im Vergleich“ (Quoten, Speicher, PV-Anlage wetterbereinigt)
+  und jede Karte des Reiters (Monatsvergleich, Jahre × Monate, Was hat sich
+  verändert?, Rekorde, Kenntage je Jahr) ein- und ausschalten. Der Block Energie
+  bleibt immer sichtbar. Abgewählte Karten laden ihre Daten gar nicht erst.
+- Summen ab 10.000 kWh erscheinen in MWh. Die Zähler müssen in kWh liefern,
+  wie in der Übersicht.
+- **Monatsvergleich:** Darunter zeigt ein Liniendiagramm die Monatswerte je Jahr
+  (Erzeugung, Einspeisung, Netzbezug oder Verbrauch in kWh), eine Linie je Jahr.
+  Die gestrichelte Linie ist das Mittel der abgeschlossenen Jahre, die Fläche
+  ihre Spanne („Spanne der Vorjahre“ schaltet sie ab). Der laufende Monat ist
+  noch nicht abgeschlossen und steht nur im Tooltip.
+- **Jahre × Monate:** Die Tabelle legt alle Jahre des Archivs untereinander
+  (neuestes oben), ein Feld je Monat: oben der Monatswert, darunter die
+  Abweichung vom Mittel dieses Monats über die abgeschlossenen Jahre, farbig
+  nach Günstigkeit. Rechts steht die Jahressumme, unten das Mittel. Ein Klick auf
+  ein Feld öffnet den Monat der Entität (bei Rollen mit genau einer Entität). Ein
+  Dreieck oben rechts im Feld markiert Messlücken oder Zählerrückgänge in diesem
+  Monat; der Tooltip nennt die Anzahl. Messlücken markieren nur Monate, die
+  deutlich über dem Üblichen der Rolle liegen (mindestens 10 und das Dreifache
+  des Medians), weil Zähler, die selten melden, in jedem Monat viele Lücken
+  haben; Zählerrückgänge markieren immer. Der Monat, in dem das Archiv mitten
+  im Monat beginnt, ist nur zum Teil erfasst und geht in kein Mittel ein. Die
+  Befunde stammen aus den Tageszählern der Datenqualität; Entitäten, die dort noch nicht gemessen wurden, sind nicht
+  geprüft und erscheinen nicht als „ohne Befund“. Monate vor dem Archivbeginn
+  stehen als „–“, nie als 0.
+
 ### Energiebericht
 
 Ein Symbol neben der Zeitraum-Navigation (nur bei Monat/Jahr aktiv) öffnet
@@ -693,6 +811,150 @@ Button **„Drucken / Als PDF speichern"** ruft lediglich den Druckdialog des
 Browsers auf, dort lässt sich wie gewohnt „Als PDF speichern“ statt eines
 echten Druckers wählen. Es gibt keinen automatischen Versand per E-Mail —
 der Bericht bleibt, wie alles in Zeitarchiv, ausschließlich lokal.
+
+## Wetterdashboard
+
+Eigenständige Ansicht für Wetterwerte, aufgebaut wie das Energiedashboard:
+Ihr ordnet Rollen (Außentemperatur, Niederschlag, Luftfeuchte, …) jeweils einer
+Entität zu, die Seite entsteht daraus. Sie wird über eine feste Kachel auf der
+Dashboard-Übersicht ein- und ausgeschaltet und ist danach im Menü
+**Dashboards** direkt unter dem Energiedashboard erreichbar.
+
+### Rollen
+
+Die Rolle legt fest, wie gerechnet wird; die Einrichtung zeigt je Rolle nur
+Entitäten des passenden Typs und lehnt falsche Zuordnungen ab.
+
+| Rolle | Typ | Kennzahlen |
+|---|---|---|
+| Außentemperatur (Pflicht) | Messwert | Max und Min mit Zeitpunkt, Ø |
+| Niederschlag (Menge) | Zähler | Summe, Regentage, nassester Tag |
+| Regen (ein/aus) | Schalter | Regenminuten, Regentage, regenreichster Tag |
+| Luftfeuchte, Luftdruck, Wind, Böe, Strahlung | Messwert | Max und Min mit Zeitpunkt, Ø |
+
+Ein Regensensor, der nur ein und aus meldet, reicht: Dann zeigt die Seite
+Regenminuten und Regentage statt Millimeter. Habt ihr beides, stehen beide
+Zeilen nebeneinander. Viele Ein/Aus-Sensoren melden auch bei Nebel, Tau oder
+nassem Sensor „Regen“, die Trocknungszeit zählt dann mit. Ab wann ein Tag als
+Regentag zählt, stellt ihr in der Einrichtung ein (Standard 1 mm bzw. 10 min).
+Im Bereich **Anzeige** lassen sich Blöcke der Vergleichstabelle ausblenden (Kenntage, Niederschlag, Regen, Luftfeuchte, Luftdruck, Wind, Böe, Strahlung); die Außentemperatur und weitere Sensoren bleiben immer sichtbar, die Kacheln oben ändern sich nicht. Der Zeitraum einer Spalte steht im Tooltip der Überschrift („ⓘ“), nicht als eigene Zeile. Bei Max und Min steht in Monat, Vormonat und Jahr der Tag als kleine Zeile unter dem Wert; die Differenz zum Vorjahr lässt sich im Menü „Vorjahr“ mit „Differenz anzeigen“ aus- und einschalten (merkt sich der Browser).
+
+Der Knopf **Vorschlagen** im Bereich Messwerte füllt die noch leeren Rollen: aus Geräteklasse, Einheit, Namen („außen“, „Regen“, „Böe“) und der Wetter-Integration; gleiche Geräte wie die Außentemperatur werden bevorzugt. Bereits belegte Rollen bleiben unverändert, gespeichert wird erst mit „Speichern“. Bei knappen Entscheidungen steht „prüfen“ und es werden weitere Kandidaten genannt. Auch Heizzähler (Name mit Heizung, Wärmepumpe, Heizstab …) werden vorgeschlagen, ebenso weitere Temperatur- und Feuchtesensoren (auch Innenräume) für „Weitere Sensoren“, solange dort noch keiner steht. Passende Entitäten, die noch nicht archiviert sind, werden genannt; ein Link führt direkt in den Auswahl-Assistenten (Thema Wetter).
+
+**Weitere Sensoren** (Temperatur oder Feuchte, zum Beispiel Keller oder Dachboden) werden eigene Zeilen und nie mit der Außentemperatur
+gemittelt; sie stehen auf dem eigenen Reiter **Temperatur & Klima**. Backups sichern die Zuordnung mit; der selektive Restore stellt sie
+als Ganzes („Wetterdashboard-Konfiguration“) wieder her.
+
+### Kacheln und Vergleichstabelle
+
+Kacheln und Vergleichstabelle stehen in einer Karte, deren Titel den Tag nennt (Heute, Gestern, sonst Rückblick; ein Klick darauf springt zurück auf heute). Die Kacheln zeigen je Rolle den aktuellen Wert und den Verlauf des Tages. Die **Übersicht** enthält Temperatur, Niederschlag, Regen, Luftfeuchte und Luftdruck; Wind, Böe und Strahlung stehen auf dem eigenen Reiter **Wind & Sonne**, weitere Sensoren auf **Temperatur & Klima** (beide erscheinen nur, wenn dafür etwas zugeordnet ist), jeweils mit denselben Kacheln und derselben Vergleichstabelle. Auf **Temperatur & Klima** zeigt außerdem das Diagramm **Temperaturen im Vergleich** die Tagesmittel der Außentemperatur und aller weiteren Sensoren für 7, 30 oder 90 Tage.
+Die Tabelle darunter hat die Spalten **Heute, Gestern, Dieser Monat, Letzter
+Monat** und **Dieses Jahr**, jeweils auf Wunsch mit einer **Vorjahr**-Spalte
+daneben; im Kopf steht der konkrete Zeitraum („November“, „2026“). Die
+Differenz zum Vorjahr steht neben dem aktuellen Wert und ist bewusst neutral
+gefärbt, weil wärmer nicht automatisch besser ist. Bei Max und Min zeigt ein Tooltip, wann der Wert auftrat (bei Heute und Gestern die Stunde, sonst der
+Tag); der Zeitraum des Vorjahres steht im Tooltip der Spaltenüberschrift „Vorjahr“.
+
+Das **Vorjahr** wählt ihr über den Knopf „Vorjahr ▾“ (Aus, Bis jetzt, Komplett); er zeigt den Zustand auch zugeklappt.
+Über die **Stichtag-Leiste** (wie bei den Dashboards: ‹ Datum ›, Kalender; ohne Schrittweiten-Knöpfe, ‹ › geht immer einen Tag, „Heute“ erscheint, sobald ein früherer Tag gewählt ist) zeigt die Tabelle die Zeiträume zu einem früheren Tag: Heute, Gestern,
+Monat, Letzter Monat und Jahr beziehen sich dann auf ihn, der Vorjahres-Ausschnitt endet am
+selben Kalendertag. Das Datum steht in der Adresse (`?date=2026-01-15`), die Ansicht lässt sich
+also verlinken; „Heute“ stellt zurück. Die Leiste gilt auch für die Kacheln: Für einen früheren Tag zeigen sie den Wert am Tagesende, Tiefst- und Höchstwert dieses Tages und bei Niederschlag und Regen den Vortag. Die
+Spalten wählt ihr über **Spalten ▾**; ein Klick auf eine Kachel öffnet die Entität.
+
+**Bis jetzt** vergleicht den laufenden Zeitraum mit demselben Stück des
+Vorjahres (1.–2.11.2026 gegen 1.–2.11.2025), **Komplett** mit dem ganzen
+Vorjahreszeitraum. Abgeschlossene Zeiträume (Gestern, Letzter Monat) sind in
+beiden Fällen gleich. Fehlen für einen Zeitraum Daten, steht „–“, nie 0; ein
+Tooltip nennt, ab wann das Archiv beginnt. Die Auswahl der Spalten merkt sich
+der Browser.
+
+### Reiter Niederschlag
+
+Sobald ein Niederschlag zugeordnet ist, zeigt der Reiter **Niederschlag** die
+Laufsumme seit Jahresbeginn als Linie, dazu das Vorjahr und den Durchschnitt
+der abgeschlossenen Vorjahre (gestrichelt, mit der Spanne von der trockensten bis
+zur nassesten Kurve). Ein Kopfsatz fasst es zusammen, zum Beispiel „412 mm bis
+02.11., 21 % unter dem Ø (520 mm, aus 3 Jahren)“; den Vergleich mit dem Ø gibt es
+erst ab zwei abgeschlossenen Vorjahren. Die Balken am unteren Rand sind die
+Tageswerte. Kacheln nennen Regentage, nassesten bzw. regenreichsten Tag, die
+längste Trockenphase und eine laufende Trockenphase. Mit Regensensor (ein/aus)
+zählt die Seite Regenzeit in Stunden und Regenminuten; sind beide Arten
+zugeordnet, schaltet **Menge/Dauer** um. Der 29. Februar zählt zum 28. Februar,
+eine Lücke hält die Laufsumme, nach dem letzten echten Wert endet die Linie.
+
+### Monatsvergleich
+
+Auf der Übersicht steht unter der Tabelle der Monatsvergleich: ein Linienzug je
+Jahr, das letzte Vorjahr kräftiger, das laufende Jahr am stärksten, dazu der
+Durchschnitt (gestrichelt) und auf Wunsch die Spanne der Vorjahre. Der Durchschnitt
+enthält nur abgeschlossene Vorjahre und nennt, aus wie vielen Jahren er stammt; der
+laufende Monat zeigt nur seinen bisherigen Stand. Über der Grafik steht für die
+Temperatur ein Satz wie „November bisher Ø 3,6 °C, 1,2 K kälter als der Ø 2023–2025
+(1.–2., aus 3 Jahren)“: der laufende Monat bis gestern gegen dasselbe Stück der
+Vorjahre. Er erscheint ab zwei Vorjahren mit genug Werten.
+
+### Reiter Langzeit
+
+**Kenntage je Jahr** zählt nach den festen Schwellen des Deutschen
+Wetterdienstes: Frosttag (Tiefstwert unter 0 °C), Eistag (Höchstwert unter 0 °C),
+Sommertag (Höchstwert ab 25 °C), heißer Tag (ab 30 °C). Je Art gibt es ein kleines Diagramm mit eigener Achse und einem Balken je Jahr (jeder Eistag ist auch ein
+Frosttag, jeder heiße Tag auch ein Sommertag), damit seltene Arten neben den
+Frosttagen lesbar bleiben; die gestrichelte Linie ist der Durchschnitt der
+abgeschlossenen Jahre. Über „Alle Jahre“ oder „Letzte 5“ begrenzt ihr die Auswahl. Das
+laufende Jahr ist mit * markiert. Zeigt man auf einen Balken, steht im Tooltip die Verteilung
+auf die Monate. Gezählt werden nur abgeschlossene Tage mit mindestens 18 Stunden Werten. Dieselben Zahlen stehen
+als Zeilen **Kenntage** unter der Außentemperatur in der Vergleichstabelle (bei
+Monats- und Jahresspalten).
+
+**Mitteltemperatur je Monat und Jahr** zeigt eine Zeile je Jahr und eine Spalte je Monat
+sowie das Jahresmittel rechts. Die Farbe zeigt, wie weit ein Monat vom Mittel dieses
+Monats über alle abgeschlossenen Jahre im Archiv abweicht (blau kälter, rot wärmer);
+Jede Zelle zeigt oben die Temperatur und darunter die Differenz in Kelvin. Ein Vergleich entsteht erst, wenn es für den Monat mindestens zwei
+abgeschlossene Jahre gibt; bis dahin stehen die Werte ungefärbt da. Das Jahresmittel
+erscheint ab sechs Monaten mit Werten, das laufende Jahr ist mit * markiert und
+zählt nicht zum Mittel. Gezeigt werden höchstens die letzten zehn Jahre.
+
+**Jahre im Vergleich, Tag für Tag** legt alle Jahre als Matrix untereinander: eine
+Zeile je Jahr (das neueste oben), eine Spalte je Kalendertag, gefärbt nach dem
+Tageswert. Wählbar sind Ø, Max, Min der Außentemperatur und der Niederschlag
+(weiß bis blau). So fallen Saisonverschiebungen auf: Eine Hitzewelle oder ein früher
+Frost liegt in allen Zeilen senkrecht übereinander. Graue Felder sind Tage ohne
+ausreichende Werte, leer ist es vor dem Archivbeginn und ab heute; ein Tag ohne Wert
+wird nie als 0 gezeichnet. Ein Klick öffnet den Tag in der Entität. Der 29. Februar hat
+eine eigene Spalte.
+
+**Rekorde** (wärmster und kältester Tag, höchster und tiefster Wert, stärkste Böe,
+nassester Tag) erscheinen, sobald das Archiv mindestens ein Jahr Tageswerte
+enthält, und gelten seit Archivbeginn. Ein einzelner Messfehler kann einen
+Rekord setzen: über **Tag öffnen** springt ihr direkt in die Entität an diesem
+Tag. Fehlerhafte Werte lassen sich dort markieren; erst nach dem endgültigen
+Löschen rechnen die Rekorde ohne sie.
+
+### Reiter Heizen
+
+Sobald unter **Rollen bearbeiten → Heizenergie** ein oder mehrere Energiezähler der
+Heizung zugeordnet sind (Wärmepumpe, Heizstab, Konvektoren, elektrische Fußbodenheizung),
+erscheint der Reiter **Heizen**. Die Zähler werden zu einer Summe addiert; Zähler in Wh
+oder MWh rechnet die Seite in kWh um.
+
+Das **Streudiagramm** zeigt jeden Heiztag als Punkt: Tages-Ø der Außentemperatur gegen
+kWh, je Heizperiode in einer Farbe. Die Ausgleichsgerade läuft nur über die Tage unter der
+**Heizgrenze** (Standard 15 °C, als senkrechte Linie); ihre Steigung steht als „kWh je Kelvin“
+darunter. Raumtemperatur (Standard 20 °C) und Heizgrenze lassen sich oben ändern, ebenso die
+Auswahl der Zähler, ohne neu zu laden; der Browser merkt sich die Werte.
+
+Die **Gradtagzahl** (G20/15 nach VDI 3807) zählt je Tag Raumtemperatur minus Tagesmittel,
+aber nur an Tagen unter der Heizgrenze. **kWh je Gradtag** ist der witterungsbereinigte
+Verbrauch: Er lässt kalte und milde Winter vergleichen, was die reine Summe nicht kann.
+Die Tabelle zeigt je Monat und für die ganze Heizperiode (fest 1.10. bis 30.4.) Gradtage,
+kWh und kWh je Gradtag der letzten drei Perioden, dazu die Veränderung gegenüber der
+Vorperiode. Eine Zeile „1.10.–gestern“ vergleicht die laufende Periode mit demselben
+Stück der Vorperioden, damit ein Winteranfang nicht wie ein Einbruch wirkt. Ein Satz oben
+fasst es zusammen. Nur abgeschlossene Tage mit ausreichend Temperaturwerten zählen.
+
+Bei mehreren Zählern zeigt **Anteil je Zähler** gestapelte Balken je Monat für eine wählbare
+Heizperiode, mit dem Anteil jedes Zählers in Prozent.
 
 ## Entitäten und Verläufe
 
@@ -745,6 +1007,57 @@ fehlt“** — als Abzeichen in der Chart- und Tabellenliste, als Hinweis über
 bewusst nicht entfernt: Sendet Home Assistant weiter Werte, legt die
 Integration die Entität neu an. Wer sie nicht mehr braucht, nimmt sie im
 Editor des Charts bzw. der Tabelle heraus.
+
+### Kategorien
+
+Kategorien ordnen die Entitäten nach Thema, zum Beispiel Wärmepumpe, Solar oder
+Wetter. Sie sind unabhängig vom Favoriten-Stern: Der Stern sagt „wichtig“, die
+Kategorie „gehört zu“. Jede Entität hat höchstens eine Kategorie, neue
+Entitäten kommen ohne an.
+
+Angelegt und geordnet werden sie im Reiter **Kategorien** neben „Liste“ und
+„Auswahl & Verlauf“. Beim ersten Öffnen bietet er Vorschläge zum Übernehmen an
+(Solar, Wärmepumpe, Batterie, E-Auto, Wetter, Verbraucher, Netz); abgewählt
+wird, was nicht passt. Danach sind es ganz normale, eigene Kategorien. Jede
+Zeile lässt sich umbenennen, einfärben (die Farbe stammt aus der
+Diagrammpalette) und löschen; beim Löschen verlieren die zugeordneten Entitäten
+ihre Kategorie, die Entitäten selbst bleiben unberührt. Die **Reihenfolge**
+der Zeilen legt die Sortierung in der Liste fest: Sie lässt sich am Griff
+ziehen oder mit den Pfeilen ändern. Höchstens 30 Kategorien, Namen bis 40
+Zeichen und je Name nur einmal; Farben dürfen sich wiederholen.
+
+In der Liste erscheint die Spalte **Kategorie**, sobald es mindestens eine gibt;
+über **Spalten ▾** lässt sie sich ausblenden. Ein Klick auf die Überschrift
+sortiert nach der Reihenfolge der Kategorien (nicht alphabetisch), Entitäten
+ohne Kategorie stehen am Ende. Zugeordnet wird im Auswahlmodus: Entitäten
+markieren, **Kategorie setzen ▾** wählen und die Kategorie anklicken (oder
+„Keine Kategorie“ zum Lösen). Einzeln geht es in der Konfiguration einer
+Entität im Feld **Kategorie**.
+
+Neben der Spalte erscheint der Filter **Kategorie: Alle ▾**: mehrere
+Kategorien lassen sich zugleich wählen, **Ohne Kategorie** zeigt, was noch
+einzuordnen ist. Blendest du die Spalte aus, wird der Filter zurückgesetzt.
+
+Im **Auswahl-Assistenten** hat der Bestätigungsschritt ein Feld **Kategorie
+setzen**. Es ist mit der gleichnamigen Kategorie zum Thema vorbelegt, fehlt
+sie, wird sie als „neu“ angeboten und beim Übernehmen angelegt (steht im
+Schritt dabei). Solange du noch keine Kategorien nutzt, bleibt das Feld auf
+„Keine Kategorie“. Die Kategorie gilt für die Entitäten, die jetzt neu in die
+Auswahl kommen, auch bevor ihr erster Wert da ist; schon einsortierte behalten
+ihre Kategorie, außer du setzt den Haken **Auch bereits einsortierte
+Entitäten umsortieren**. Thema und Kategorie bleiben getrennt.
+
+Im Reiter **Auswahl & Verlauf** steht unter der Suche eine Zeile **Nach Kategorie
+filtern** (nur Anzeige, wie in der Liste samt „Ohne Kategorie“); die Kategorie
+steht dort auch unter dem Namen jeder Entität.
+
+Auch der **Export** hat den Filter **Kategorie**, damit sich zum Beispiel alle
+Entitäten der Wärmepumpe mit „Alle Entitäten wählen“ in einem Zug exportieren
+lassen. Backups sichern die Zuordnung mit. Der selektive Restore stellt sie
+über den Namen der Kategorie wieder her (eine fehlende Kategorie wird dabei
+angelegt): bei einer Entität, die es lokal nicht mehr gibt, zusammen mit ihr,
+bei vorhandenen Entitäten als eigene Feldgruppe **Kategorie** unter
+„Einstellungen“.
 
 ### Zeitraum-Navigation
 
@@ -1052,7 +1365,11 @@ eines bestehenden (Kachelmenü ⋮).
   Ist schon etwas gewählt, stehen Treffer mit passender Einheit oben
   („Passt zu vorhandener Achse"). Unter **Ausgewählt** lassen sich die
   gewählten Entitäten umbenennen, umsortieren, ausblenden und mit ✕
-  entfernen.
+  entfernen. Ein Klick auf den
+  Farbpunkt öffnet die Farbwahl: „Auto“ (Palette nach Reihenfolge), eine der
+  acht Palettenfarben oder eine eigene Farbe. Die Farbe gilt im Chart und in
+  den Dashboard-Kacheln dazu; Palettenfarben passen sich dem Theme an,
+  eigene Farben bleiben gleich.
 - Beliebig viele Entitäten überlagern; unterschiedliche Einheiten erhalten
   automatisch getrennte Y-Achsen, sodass z. B. Temperatur und Luftfeuchte
   in einem Chart sinnvoll lesbar bleiben.
@@ -1343,6 +1660,17 @@ Rein optische Einstellungen, wirken sich nie auf die berechneten Werte aus:
 - **Vergleich:** Vergleichsspalten (Vortag, Vormonat, Vorjahr …) optisch
   absetzen, prozentuale Abweichung zur zugehörigen Vergleichsspalte
   anzeigen.
+- **Summenspalte:** Eine zusätzliche Spalte (links oder rechts der
+  Zeiträume, Beschriftung frei wählbar) zeigt je Zeile die Summe über die
+  Zeiträume. In jeder Spaltenkarte steht „In Summe einrechnen“, so lässt
+  sich z. B. bei 8 Tagen der älteste herausnehmen. Ausgeblendete Spalten
+  zählen nie mit. Summiert werden Zähler und Schalter sowie Zeilen mit
+  Aggregation „Σ Summe“; Durchschnitt, Minimum, Maximum und Zustände zeigen
+  „–“. Formelzeilen rechnen ihre Formel noch einmal auf den Summen, ein
+  Quotient wie „A / B“ ergibt also ΣA ÷ ΣB. Überschneiden sich einbezogene
+  Spalten zeitlich (z. B. Woche und Tag), warnt die Kopfzelle, weil dann
+  doppelt gezählt wird. Die Spalte erscheint auch in Dashboard-Kacheln und
+  im CSV-Export.
 - **Zahlen / Einheiten:** Einheiten ein-/ausblenden, in einer festen Spalte
   ausrichten oder kleiner darstellen, Dezimaltrennzeichen spaltenweise
   ausrichten, fehlende Werte als „Keine Daten“ statt als Gedankenstrich
@@ -1436,6 +1764,15 @@ diese eine Entität** und
 überschreibt den globalen Standard aus **Einstellungen → Archivierung**. Neue
 globale Standards wirken nie rückwirkend auf bereits angelegte Entitäten.
 
+Die Seite ist in fünf Abschnitte gegliedert: **Allgemein**, **Erfassung**,
+**Aufbewahrung**, **Darstellung** und **Prüfung**, mit einer Sprungzeile oben.
+Jedes Feld ist eine Zeile mit einer Kurzzeile; der ausführliche Text steht
+hinter dem Info-Knopf (i). Das Abzeichen **angepasst** zeigt, dass ein Wert vom
+aktuellen globalen Standard abweicht (der Standard steht im Tooltip), ein Klick darauf setzt das Feld nach einer Rückfrage auf den
+Standard zurück, und die Sprungzeile und der Abschnittskopf zählen solche Felder. Felder, die für den
+Typ der Entität nicht einstellbar sind, zeigen ihren festen Wert mit dem
+Abzeichen **fest**; der Grund steht hinter dem Info-Knopf.
+
 ### Womit fange ich an?
 
 Die Felder greifen an sehr unterschiedlichen Stellen an. Diese Einteilung
@@ -1462,6 +1799,12 @@ Optional, bis 40 Zeichen. Überschreibt die Darstellung **nur in Zeitarchiv**
 `friendly_name` und die Entitäts-ID bleiben unangetastet. Ein Tag-Symbol
 markiert überall, wo ein eigener Name aktiv ist. Leer lassen stellt den
 HA-Namen wieder her.
+
+### Kategorie
+
+Ordnet die Entität einem Thema zu, zum Beispiel Wärmepumpe oder Solar (siehe
+[Kategorien](#kategorien)). Die Auswahl gilt sofort. Ohne angelegte Kategorien
+führt das Feld zur Verwaltung.
 
 ### Historisch
 
@@ -2444,7 +2787,7 @@ Eigener Menüpunkt **System → Backup / Restore** (nicht unter Einstellungen):
     Austauschs pausieren die Schreibzugriffe kurz.
   - **Einstellungen:** holt Dashboards, Charts, Vergleichstabellen,
     Feldgruppen der Entitäts-Einstellungen (Name, Aufbewahrung, Filter,
-    Zähler, Anzeige) und allgemeine Einstellungen einzeln zurück, ebenfalls
+    Zähler, Anzeige, Kategorie) und allgemeine Einstellungen einzeln zurück, ebenfalls
     ohne Neustart. Der Abgleich läuft über den Namen. Standardmäßig kommt ein
     Objekt, das es aktuell nicht oder anders gibt, als **Kopie** dazu und
     nichts Bestehendes wird verändert; optional lässt sich ein abweichendes
@@ -2612,7 +2955,7 @@ will, lädt es vorher herunter.
 
 | Bereich | Enthält |
 | --- | --- |
-| **Darstellung** | Sprache (Automatisch/Deutsch/English — Standard Deutsch; „Automatisch“ folgt der Browsersprache; nicht übersetzte Stellen erscheinen auf Deutsch), Zahlen- und Datumsformat (Automatisch/Deutsch/English UK/English US — „Automatisch“ folgt dem Browser: `en-GB` → `1,234.5` und `07/10/2026`, `en-US` → `10/07/2026` mit 12-Stunden-Uhr, `de-*` → `1.234,5` und `07.10.2026`; unabhängig von der Sprache; CSV-Exporte und Dateinamen bleiben unverändert), Währung (Automatisch/EUR/GBP/USD/CHF — „Automatisch“ übernimmt sie aus Home Assistant, sonst Euro; Beträge werden nicht umgerechnet, nach einem Wechsel die Preise neu eintragen), Startseite (Übersicht/Energiedashboard), Farbschema (Zeitarchiv/Home Assistant/Modern), Hell/Dunkel/Automatisch, Schriftgröße, Dashboard-Kachel-Ein-/Ausblendanimation, Startwerte für die Chart-Optionen der Entität-Verlaufsansicht |
+| **Darstellung** | Sprache (Automatisch/Deutsch/English — Standard Deutsch; „Automatisch“ folgt der Browsersprache; nicht übersetzte Stellen erscheinen auf Deutsch), Zahlen- und Datumsformat (Automatisch/Deutsch/English UK/English US — „Automatisch“ folgt dem Browser: `en-GB` → `1,234.5` und `07/10/2026`, `en-US` → `10/07/2026` mit 12-Stunden-Uhr, `de-*` → `1.234,5` und `07.10.2026`; unabhängig von der Sprache; CSV-Exporte und Dateinamen bleiben unverändert), Währung (Automatisch/EUR/GBP/USD/CHF — „Automatisch“ übernimmt sie aus Home Assistant, sonst Euro; Beträge werden nicht umgerechnet, nach einem Wechsel die Preise neu eintragen), Startseite (Übersicht/Energiedashboard/Wetterdashboard), Farbschema (Zeitarchiv/Home Assistant/Modern), Hell/Dunkel/Automatisch, Schriftgröße, Dashboard-Kachel-Ein-/Ausblendanimation, Startwerte für die Chart-Optionen der Entität-Verlaufsansicht |
 | **Archivierung** | Standardwerte für neu erkannte Entitäten (wirken nie rückwirkend auf bestehende Entitäten): Auflösung, Aufbewahrung, Nachkommastellen, Wertänderungsfilter, Lücken-/Ausreißer-Erkennung |
 | **Meldungen** | Tipp-Anzeige an-/ausschalten und Dialog mit allen Tipps (siehe [Housekeeping](#housekeeping)); Übersicht stummgeschalteter Systemmeldungen mit verbleibender Dauer, einzeln vorzeitig wieder aktivierbar |
 | **Verbindung** | API-Token anzeigen/neu erzeugen, letzter empfangener Wert, Anzahl Schreibzugriffe und Auth-Fehler seit Start, verbundene Integrationsversion mit Zeitpunkt "zuletzt gesehen" (Hinweis bei veralteter oder neu verfügbarer Version) |

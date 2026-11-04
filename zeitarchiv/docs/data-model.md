@@ -82,19 +82,29 @@ Hot-CSV-Datei gelöscht. Eine Entität, die aufhört zu senden, würde ihre
 letzte Hot-Datei sonst nie automatisch archivieren — daher der manuelle
 Nachzieh-Mechanismus.
 
+Gibt es für den Monat schon ein Archiv (verspätete Werte legen die Hot-Datei
+eines vergangenen Monats neu an), wird es **ergänzt**: beide Bestände nach Zeit
+zusammengeführt, vollständig identische Zeilen nur einmal, die Rollup-Zeilen des
+Monats über `rollup.replace_month()` aus dem Ergebnis neu berechnet. Das
+Archiv wird dabei nie durch die wenigen späten Zeilen ersetzt.
+
 ## Rollups (vorberechnete Aggregate)
 
 Nur **abgeschlossene** Perioden werden vorberechnet; die laufende Periode
 berechnet `query.py` immer live aus dem Hot Buffer. Bucket-Größe hängt vom
 Aggregationstyp der Entität ab:
 
-| Aggregationstyp | Feine Bucket-Größe | Datei | Bedient |
+| Aggregationstyp | Persistierte Bucket-Größe | Datei | Bedient |
 | --- | --- | --- | --- |
-| `counter` (Zähler, `total`/`total_increasing`) | 5 Min. | `tag.parquet` | Woche, Monat |
-| `standard` / `switch` (Messwert/Schalter) | 1 Min. | `stunde.parquet` | Woche, Monat |
+| `counter` (Zähler, `total`/`total_increasing`) | 1 Tag | `tag.parquet` | Woche, Monat |
+| `standard` / `switch` (Messwert/Schalter) | 1 Stunde | `stunde.parquet` | Woche, Monat |
 
-Zusätzlich je Entität `monat.parquet` (bedient Jahr, bei Zählern auch
-Dekade) und bei Standard/Schalter `jahr.parquet` (bedient Dekade). Jede
+(Die feineren Buckets der Stunden- und Tagesansicht, 1 bzw. 5 Min. bei
+Messwerten und 5 Min. bzw. 1 Std. bei Zählern, werden nicht persistiert,
+sondern live aus dem Hot Buffer bzw. dem Archiv berechnet.)
+
+Zusätzlich je Entität `monat.parquet` (bedient Jahr, bei Standard/Schalter
+auch Dekade) und nur bei Zählern `jahr.parquet` (bedient Dekade). Jede
 Zeile trägt `bucket_start` (Unix-Timestamp UTC) plus, je nach Typ,
 `value`/`min_value`/`max_value` (Zähler: Summe bzw. Bucket-Extremwerte;
 Standard: Mittelwert bzw. Extremwerte) oder `on_seconds` (Schalter:
@@ -124,6 +134,18 @@ nachgebaut: eine Warteschlange (Setting
 Entität je 30-Sekunden-Tick abgearbeitet
 (`energiedashboard_routes.process_pending_hourly_backfill()`, nutzt
 `rollup.rebuild_entity_rollups(..., hourly_rollup=True)`).
+
+**Tagesreihe (`query.query_daily_series()`).** Für Auswertungen über viele Jahre
+(Wetterdashboard) verdichtet diese Funktion die feine Rollup-Stufe zu Tageswerten
+je lokalem Kalendertag: bei Messwerten Ø, Min und Max, bei Zählern die
+Tagessumme, bei Schaltern die Einschaltdauer. Ein Messwert-Tag gilt nur bei
+mindestens 18 Stunden mit Werten als belegt (`covered`). Vollständige,
+abgeschlossene Kalenderjahre hält ein Speicher-Cache; er prüft bei jedem Aufruf
+Name, Änderungszeit und Größe der zwölf Monatssegmente und rechnet neu, sobald
+eines davon neu geschrieben wurde (Löschen markierter Werte, Neuberechnung,
+Import, Typwechsel). Ein Jahr, dessen Dezember noch nicht rotiert ist, wird nie
+zwischengespeichert. Zehn Jahre Stundendaten (rund 87.600 Zeilen) kosten kalt
+etwa 0,4 s, aus dem Cache etwa 0,06 s (Messung auf einem Entwicklungsrechner).
 
 ## Soft-Delete und Purge
 
@@ -217,7 +239,7 @@ Existenz-Check in `Index.__init__()`.
 | `settings` | Generischer Key-Value-Store: globale Auflösungs-/Aufbewahrungs-Standards, Loglevel, Farbschema, API-Token, sowie **gecachte teure Vorschauen** und **HA-Integrations-Status** (siehe unten) |
 | `stats_snapshots`, `memory_snapshots` | Stündliche Schnappschüsse für Statistik-Verlaufsgrafiken |
 | `backup_jobs`, `retention_jobs` | Dauerhafte Job-Historie (Status, Fehler, Kennzahlen) — überlebt Neustarts, im Gegensatz zu einem reinen "letzter Lauf"-Zeitstempel. `backup_jobs` ist außerdem Grundlage für `Index.get_last_successful_backup_job()` — das `latest_backup`-Feld in `/api/notices` (siehe [api-reference.md](api-reference.md)) |
-| `saved_charts` | Gespeicherte Chart-**Abfragen** (Entitäten + Zeitraum-Einstellungen, Darstellungsoptionen wie `area_fill`, `show_points`), kein Datenschnappschuss — Werte werden bei jedem Aufruf live nachgeladen. `period_anchor` (JJJJ-MM-TT, optional) hält einen festen Zeitraum fest, leer = immer die laufende Periode. `compare_settings` (JSON) ist der gespeicherte Vergleich |
+| `saved_charts` | Gespeicherte Chart-**Abfragen** (Entitäten + Zeitraum-Einstellungen, Darstellungsoptionen wie `area_fill`, `show_points`), kein Datenschnappschuss — Werte werden bei jedem Aufruf live nachgeladen. `period_anchor` (JJJJ-MM-TT, optional) hält einen festen Zeitraum fest, leer = immer die laufende Periode. `compare_settings` (JSON) ist der gespeicherte Vergleich. `series_colors` (JSON `{entity_id: "palette:N" \| "#rrggbb"}`) hält eigene Serienfarben, fehlender Eintrag = Palettenfarbe nach Position |
 | `saved_tables`, `table_columns`, `table_rows` | Vergleichstabellen: Struktur (Zeilen=Größen, Spalten=Zeiträume) getrennt von `style_json` (rein optische Darstellung, siehe [frontend.md](frontend.md)) |
 | `dashboards`, `dashboard_pins` | Mehrere benannte Dashboards (Favorit, Standard, Präziser Modus, Lücken auffüllen, Zeitraum-Navigation); eine gemeinsame Pin-Tabelle für Charts, Tabellen, direkt gepinnte Entitäten ("Werte-Kacheln") UND Sektions-Trenner (`item_type`/`item_id`/`item_entity_id`; `item_type='section'` trägt den Sektionsnamen in `title`, ohne eigenen `item_entity_id`), da alle gemeinsam sortiert werden müssen |
 

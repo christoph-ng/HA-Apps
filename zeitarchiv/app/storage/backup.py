@@ -194,12 +194,18 @@ def delete_backup(backups_dir: Path, filename: str) -> bool:
     return True
 
 
-def delete_all_backups(backups_dir: Path) -> int:
+def delete_all_backups(backups_dir: Path, protected: set[str] | None = None) -> int:
     """Löscht alle vorhandenen Backup-ZIPs (nicht Rollbacks/Ausführungsverlauf,
-    siehe delete_restore_rollback()); gibt die Anzahl gelöschter Dateien zurück."""
+    siehe delete_restore_rollback()); gibt die Anzahl gelöschter Dateien zurück.
+
+    protected: Dateinamen, die stehen bleiben (noch nicht auf das externe Ziel übertragene Backups, wie bei
+    prune_backups()). Ist das Ziel ausgefallen, gäbe es diese Sicherungen sonst nirgends mehr."""
     if not backups_dir.exists():
         return 0
-    files = [p for p in backups_dir.glob("zeitarchiv-backup-*.zip") if p.is_file()]
+    files = [
+        p for p in backups_dir.glob("zeitarchiv-backup-*.zip")
+        if p.is_file() and p.name not in (protected or ())
+    ]
     for path in files:
         path.unlink()
     return len(files)
@@ -382,10 +388,18 @@ def validate_backup(path: Path, *, check_sqlite: bool = True, verify_checksums: 
                 return manifest
             if "index.sqlite" not in names:
                 raise ValueError(tr("index.sqlite fehlt im Backup"))
-            with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
+            # Neben dem Backup statt in /tmp: Das ist die Platte mit den Daten, und /tmp ist im Container oft klein.
+            with tempfile.NamedTemporaryFile(
+                suffix=".sqlite", prefix=".validate-", dir=path.parent, delete=False
+            ) as tmp:
                 sqlite_path = Path(tmp.name)
-                with zf.open("index.sqlite") as source:
-                    shutil.copyfileobj(source, tmp)
+                try:
+                    with zf.open("index.sqlite") as source:
+                        shutil.copyfileobj(source, tmp)
+                except BaseException:
+                    # Volle Platte o. Ä. beim Kopieren: sonst bliebe jedes Mal eine Teil-Datei liegen.
+                    sqlite_path.unlink(missing_ok=True)
+                    raise
         try:
             connection = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
             try:

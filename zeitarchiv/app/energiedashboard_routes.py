@@ -34,7 +34,10 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+from . import energie_langzeit, wetter_routes
+from . import energiedashboard_buckets as eb
 from . import formats
+from .chart_period import calendar_bounds
 from .formatting import entity_display_name
 from .limits import MAX_RAW_QUERY_POINTS
 from .progress import JobProgress
@@ -121,6 +124,9 @@ STALE_SECONDS = 2 * 24 * 60 * 60
 # MAX_RAW_QUERY_POINTS (100.000, siehe limits.py) — hier reicht ein
 # günstiger, schneller Scan, kein vollständiger Chart-Datenabruf.
 RESET_CHECK_MAX_ROWS = 20_000
+# Mindestanteil des Zeitraums mit archivierten Werten, ab dem die Speicher-
+# Wirkungsgrad-Prüfung (ohne SOC-Sensor) in Monat/Jahr aussagekräftig ist.
+STORAGE_CHECK_MIN_COVERAGE = 0.9
 
 # Sparkline-Verfeinerung für die noch laufende Periode (siehe _entity_series):
 # "Monat" bucketet auf Tagesebene, "Jahr" auf Monatsebene — der jeweils
@@ -131,6 +137,10 @@ RESET_CHECK_MAX_ROWS = 20_000
 # wie der laufende Tages-/Monats-Bucket), ersetzt also nur dessen Auflösung,
 # ohne die Summe zu verändern.
 _FINER_RANGE = {"month": "day", "year": "month"}
+
+# Kennzahlen-Kacheln mit Diagramm-Popup (compute_tile). Netzbezug und Einspeisung sind genau eine Entität und
+# brauchen keinen compute_flow-Lauf (compute_single_tile).
+TILE_KPIS = ("erzeugung", "netzbezug", "einspeisung", "verbrauch", "speicher")
 
 # Umgekehrte Richtung: der nächstgröbere Zeitraum, dessen EINZELNE Buckets
 # jeweils genau eine Periode des feineren umfassen ("day" liefert Stunden-,
@@ -156,7 +166,7 @@ _FINER_RANGE = {"month": "day", "year": "month"}
 _COARSER_RANGE = {"hour": "day", "month": "year"}
 
 # Tageslastprofil-Heatmap: datetime.weekday() liefert 0=Montag.
-_WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+_WEEKDAY_LABELS = [N_("Mo"), N_("Di"), N_("Mi"), N_("Do"), N_("Fr"), N_("Sa"), N_("So")]
 HEATMAP_DAYS = 7
 
 # Energiebericht, "Erzeugung & Verbrauch im Detail": feste abstrakte
@@ -189,7 +199,7 @@ DEFAULT_HUB_NAME = N_("Haus")
 # dem Schnitt der Vorperioden — ein Prozentsatz ist dafür die richtige Größe,
 # weil beide Seiten dieselbe Größenordnung haben. Die Ausreißer-Erkennung sucht
 # dagegen unplausible EINZELwerte und misst deshalb in Vielfachen des Üblichen.
-ANOMALIE_SCHWELLE_LABELS = {"off": N_("Aus"), "25": "25 %", "50": "50 %", "100": "100 %"}
+ANOMALIE_SCHWELLE_LABELS = {"off": N_("Aus"), "25": "25 %", "50": "50 %", "100": "100 %", "200": "200 %", "300": "300 %"}
 # Anzahl vorheriger Perioden, deren Schnitt als "üblicher" Vergleichswert
 # dient — mehrere statt nur der einen Vorperiode, damit ein Gerät, das
 # einfach nicht jeden Tag läuft (z. B. Waschmaschine), nicht bei jedem
@@ -199,10 +209,13 @@ ANOMALIE_BASELINE_PERIODS = 3
 # Abstand der Vergleichsperioden in Einheiten des angezeigten Zeitraums. Bei
 # "Tag" ist es der gleiche Wochentag der Vorwochen (Sa gegen die letzten drei
 # Sa, nicht gegen Do/Fr/Fr), bei "Stunde" dieselbe Uhrzeit der Vortage (Mittag
-# gegen die letzten drei Mittage, nicht gegen die drei Stunden davor). Monat
-# und Jahr haben keinen so ausgeprägten Rhythmus und vergleichen mit dem
-# Unmittelbar-davor.
-ANOMALIE_BASELINE_STEP = {"hour": 24, "day": 7}
+# gegen die letzten drei Mittage, nicht gegen die drei Stunden davor), beim Monat
+# derselbe Monat der Vorjahre (Jahreszeiten), beim Jahr die Jahre davor.
+ANOMALIE_BASELINE_STEP = {"hour": 24, "day": 7, "month": 12}
+# Perioden, bei denen der Vergleich auf die unmittelbar vorangehenden zurückfällt, wenn es im
+# gewählten Abstand keine Daten gibt (Monat: kein Vorjahr). Ein Verbraucher mit Jahreszeiten
+# (Wärmepumpe) wäre sonst im Oktober gegen Juli bis September stets „+1000 %“.
+ANOMALIE_BASELINE_FALLBACK_RANGES = {"month"}
 
 # Mindestabstand zum Vergleichswert in kWh, ab dem eine Überschreitung der
 # Prozentschwelle als Auffälligkeit gilt. Ohne ihn wäre ein Gerät, das von
@@ -261,6 +274,12 @@ def _empty_config() -> dict:
         # analog zu den übrigen Kacheln, die ebenfalls per Default sichtbar
         # sind.
         "anomalie_schwelle": "50",
+        # Schwellen der Kenntage im Reiter „Langzeit“ (siehe energie_langzeit.KENNTAGE_DEFAULTS). Nur geänderte Werte
+        # stehen drin, ein fehlender Schlüssel heißt „Vorgabe“.
+        "kenntage": {},
+        # Im Reiter „Langzeit“ abgewählte Bereiche (siehe energie_langzeit.TABLE_BLOCKS und CARD_BLOCKS). Leer heißt: alles
+        # sichtbar, auch für Configs aus älteren Versionen.
+        "langzeit_ausblenden": [],
     }
 
 
@@ -451,22 +470,6 @@ def _is_configured(config: dict) -> bool:
     return bool(config.get("netzbezug"))
 
 
-def _speicher_link_entities(config: dict) -> list[dict]:
-    """Laden/Entladen-Entitäten aller konfigurierten Speicher als
-    {entity_id, name}-Liste fürs Kachel-Auswahlfenster (siehe
-    _page_context()) — dieselbe Rollen-Benennung ("(Ladung)"/"(Entladung)")
-    wie _config_entity_roles() oben, hier eigenständig, weil diese Liste nur
-    die Speicher-Rollen braucht, nicht alle Konfig-Rollen."""
-    entities: list[dict] = []
-    for sp in config.get("speicher") or []:
-        sp_name = sp.get("name") or tr("Speicher")
-        if sp.get("laden_entity_id"):
-            entities.append({"entity_id": sp["laden_entity_id"], "name": f"{sp_name} (Ladung)"})
-        if sp.get("entladen_entity_id"):
-            entities.append({"entity_id": sp["entladen_entity_id"], "name": f"{sp_name} (Entladung)"})
-    return entities
-
-
 def entity_has_energiedashboard_role(index: Index, entity_id: str) -> bool:
     """Ob entity_id irgendeiner Energiedashboard-Rolle zugeordnet ist — für
     main.py: der statische "zurück zum Energiedashboard"-Link auf der
@@ -538,6 +541,25 @@ class EnergieDashboardDependencies:
 class EnergieDashboardService:
     def __init__(self, deps: EnergieDashboardDependencies) -> None:
         self.deps = deps
+        self.langzeit = energie_langzeit.EnergieLangzeitService(
+            deps.data_dir, deps.index, deps.tz, entity_series=self._entity_series,
+            radiation_entity=lambda: wetter_routes.radiation_entity(deps.index),
+            storage_capacity=self._storage_capacity,
+        )
+
+    def _storage_capacity(self, config: dict) -> float | None:
+        """Summe der Kapazität aller Speicher mit Entlade-Entität in kWh (für die Kenntage im Reiter „Langzeit“); None, wenn sie
+        nicht bei jedem dieser Speicher bekannt ist, denn eine halbe Summe ergäbe falsche Prozentwerte."""
+        now = datetime.now(self.deps.tz)
+        read_cache = query_mod.QueryReadCache()
+        total = 0.0
+        speicher = [sp for sp in config.get("speicher") or [] if sp.get("entladen_entity_id")]
+        for sp in speicher:
+            capacity = self._resolve_speicher_capacity(sp, now, read_cache)
+            if not capacity or capacity <= 0:
+                return None
+            total += float(capacity)
+        return total or None
 
     def _entity_options(self) -> list[dict]:
         # "unit"/"aggregation_type" zusätzlich zu den bisherigen Feldern — die
@@ -1158,9 +1180,9 @@ class EnergieDashboardService:
         for sp in config.get("speicher") or []:
             sp_name = sp.get("name") or tr("Speicher")
             if sp.get("laden_entity_id"):
-                roles.append((sp["laden_entity_id"], f"{sp_name} (Ladung)"))
+                roles.append((sp["laden_entity_id"], tr("{name} (Ladung)", name=sp_name)))
             if sp.get("entladen_entity_id"):
-                roles.append((sp["entladen_entity_id"], f"{sp_name} (Entladung)"))
+                roles.append((sp["entladen_entity_id"], tr("{name} (Entladung)", name=sp_name)))
         return roles
 
     def _check_entity_metadata(self, entity_roles: list[tuple[str, str]]) -> dict:
@@ -1201,6 +1223,11 @@ class EnergieDashboardService:
         reset_hits: list[tuple[str, str]] = []
         fully_checked = True
         for entity_id, label in entity_roles:
+            entity = self.deps.index.get_entity(entity_id)
+            # Bewusst erlaubte Rückgänge (Entitäts-Einstellung „Zählerrückgänge erlauben“)
+            # sind keine Auffälligkeit.
+            if entity is not None and entity["counter_decreases"] == "allow":
+                continue
             try:
                 rows = sorted(cleanup_mod.iter_raw_rows(
                     self.deps.data_dir, self.deps.index, entity_id, window_start_ts, window_end_ts,
@@ -1217,6 +1244,24 @@ class EnergieDashboardService:
                     break
                 previous_value = value
         return reset_hits, fully_checked
+
+    def _storage_coverage(
+        self, entity_ids: list[str], window_start: datetime, window_end: datetime, now: datetime,
+    ) -> float:
+        """Anteil des (bis jetzt reichenden) Fensters, der ab dem ersten archivierten Wert
+        der Entitäten liegt; bei mehreren Entitäten gilt der schlechteste Wert."""
+        end_ts = min(window_end, now).timestamp()
+        start_ts = window_start.timestamp()
+        if end_ts <= start_ts:
+            return 1.0
+        coverage = 1.0
+        for entity_id in entity_ids:
+            entity = self.deps.index.get_entity(entity_id)
+            first_ts = entity["first_ts"] if entity is not None else None
+            if first_ts is None:
+                return 0.0
+            coverage = min(coverage, (end_ts - max(start_ts, first_ts)) / (end_ts - start_ts))
+        return coverage
 
     def _grundpreis_zustand(
         self, entity_id: str, window_start: datetime, window_end: datetime, now: datetime,
@@ -1265,9 +1310,13 @@ class EnergieDashboardService:
 
     def compute_flow(
         self, config: dict, range_key: str, offset: int, continuous: bool = False, skip_quality: bool = False,
-        read_cache: query_mod.QueryReadCache | None = None,
+        read_cache: query_mod.QueryReadCache | None = None, with_detail: bool = False,
     ) -> dict:
-        """read_cache optional von außen durchgereicht (main.py/hier unten:
+        """with_detail: legt zusätzlich die Bucket-Serien je Zeile unter "detail" ab (Kachel-Popups, siehe
+        compute_tile). Standardmäßig aus: /energiedashboard/data, Bericht und KI-Werkzeuge bekommen
+        das Feld nicht, sie würden die Serien nur mitschleppen.
+
+        read_cache optional von außen durchgereicht (main.py/hier unten:
         mehrere compute_flow()-Aufrufe desselben Requests teilen sich dann
         einen Cache, statt sich überlappende Hot-Buffer-Dateien mehrfach
         unabhängig voneinander neu einzulesen — QueryReadCache selbst bleibt
@@ -1338,7 +1387,7 @@ class EnergieDashboardService:
             if price_entity_id not in hourly_price_cache:
                 price_entity = self.deps.index.get_entity(price_entity_id)
                 scale = _price_unit_scale(price_entity["unit"]) if price_entity is not None else 1.0
-                hourly_price_cache[price_entity_id] = (
+                series: dict[float, float] = (
                     {
                         ts: value * scale
                         for ts, value in query_mod.query_hourly_counter_series(
@@ -1349,6 +1398,18 @@ class EnergieDashboardService:
                     if price_entity is not None and price_entity["aggregation_type"] == "standard"
                     else {}
                 )
+                start_ts = window_start.timestamp()
+                if series and min(series) > start_ts:
+                    # Ein Preis gilt bis zum nächsten Wert. Die Stundenreihe enthält aber nur Stunden mit einem
+                    # Rohwert; der Preis, der schon am Fensteranfang galt (Tarif-Helfer, der sich selten ändert),
+                    # fehlt. Ersetzt sie die Bucket-Reihe (die diesen Randpunkt hat), gälten alle Stunden vor der
+                    # ersten Änderung als "ohne Preis" und die Kosten wären entsprechend zu niedrig.
+                    vorher = query_mod._boundary_value(  # noqa: SLF001 — siehe Modul-Docstring
+                        self.deps.data_dir, price_entity_id, start_ts, self.deps.tz, read_cache
+                    )
+                    if vorher is not None:
+                        series[start_ts] = vorher * scale
+                hourly_price_cache[price_entity_id] = series
             return hourly_price_cache[price_entity_id]
 
         def hourly_merge(parts: list[dict[float, float] | None], factors: list[float] | None = None) -> dict[float, float] | None:
@@ -1488,11 +1549,13 @@ class EnergieDashboardService:
             sp_name = sp.get("name") or tr("Speicher")
             sp_entladen_val = 0.0
             sp_laden_val = 0.0
+            sp_entladen_series: dict[float, float] = {}
+            sp_laden_series: dict[float, float] = {}
             if sp.get("entladen_entity_id"):
                 sp_entladen_series, stale = entity_series(sp["entladen_entity_id"])
                 sp_entladen_val = self._series_total(sp_entladen_series)
                 speicher_entladen_series_list.append(sp_entladen_series)
-                label = f"{sp_name} (Entladung)"
+                label = tr("{name} (Entladung)", name=sp_name)
                 nodes.append({
                     "name": label, "entity_id": sp["entladen_entity_id"], "role": "source",
                     "kind": "storage_out",
@@ -1505,18 +1568,21 @@ class EnergieDashboardService:
                 sp_laden_series, stale = entity_series(sp["laden_entity_id"])
                 sp_laden_val = self._series_total(sp_laden_series)
                 speicher_laden_series_list.append(sp_laden_series)
-                add_stale_issue(f"{sp_name} (Ladung)", stale)
+                add_stale_issue(tr("{name} (Ladung)", name=sp_name), stale)
             speicher_entladen_val += sp_entladen_val
             speicher_laden_val += sp_laden_val
             speicher_entry = {
                 "name": sp_name, "entladen_val": sp_entladen_val, "laden_val": sp_laden_val,
                 "has_both": bool(sp.get("laden_entity_id")) and bool(sp.get("entladen_entity_id")),
+                "entity_ids": [eid for eid in (sp.get("laden_entity_id"), sp.get("entladen_entity_id")) if eid],
                 # Für die Wirkungsgrad-Plausibilitätsprüfung weiter unten: wie
                 # weit der Ladestand SELBST im Fenster gesunken ist (kWh) —
                 # nur gesetzt, wenn SOC-Sensor + Kapazität vorliegen und
                 # mindestens zwei Messpunkte im Fenster liegen (siehe die
                 # soc_entity_id-Auswertung unten).
                 "soc_delta_kwh": None,
+                "capacity_kwh": None,
+                "laden_series": sp_laden_series, "entladen_series": sp_entladen_series,
             }
             speicher_per_entity.append(speicher_entry)
             speicher_laden_vals.append(sp_laden_val)
@@ -1530,6 +1596,7 @@ class EnergieDashboardService:
             # Entität je Stelle erneut abzufragen.
             capacity_kwh = self._resolve_speicher_capacity(sp, now, read_cache)
             sp["_resolved_capacity_kwh"] = capacity_kwh
+            speicher_entry["capacity_kwh"] = capacity_kwh
             weight = capacity_kwh if capacity_kwh else 1.0
             if sp.get("soc_entity_id"):
                 # SOC ist ein Gauge (%), nicht Zähler — "auto" ist hier der
@@ -1667,33 +1734,52 @@ class EnergieDashboardService:
         # Zeitstempel hängen nur an range_key/offset, nicht an der Entität.
         anomalie_coarser = _COARSER_RANGE.get(range_key)
         anomalie_step = ANOMALIE_BASELINE_STEP.get(range_key, 1)
-        anomalie_starts: list[float] = []
-        anomalie_coarse_offsets: list[int] = []
-        if anomalie_active:
+        # Beim Monat zählen nur Vorjahre MIT Daten; wo es keins gibt, fällt der Vergleich auf
+        # die unmittelbar vorangehenden Perioden zurück (Schritt 1).
+        anomalie_has_fallback = range_key in ANOMALIE_BASELINE_FALLBACK_RANGES
+
+        def _baseline_plan(step: int) -> tuple[list[float], list[int]]:
+            """Anfangszeitpunkte der Vergleichsperioden und die gröberen Abfragefenster, die sie abdecken."""
+            starts: list[float] = []
+            coarse_offsets: list[int] = []
             now_local = now.astimezone(self.deps.tz)
             for i in range(1, ANOMALIE_BASELINE_PERIODS + 1):
                 period_start, _pw_end, _pp_end = query_mod._window(  # noqa: SLF001 — siehe Modul-Docstring
-                    range_key, now_local, offset - i * anomalie_step,
+                    range_key, now_local, offset - i * step,
                 )
-                anomalie_starts.append(period_start.timestamp())
+                starts.append(period_start.timestamp())
             if anomalie_coarser:
                 # Welche groben Fenster decken diese Zeitstempel ab? Meist genau
                 # eines — an einer Monats-/Jahresgrenze zwei (die letzten drei
                 # Tage am 2. eines Monats liegen in zwei Monaten).
-                for start in anomalie_starts:
+                for start in starts:
                     # Bei "Stunde" liegt der Vergleich bis zu drei Tage zurück, dazu der Versatz
                     # der angezeigten Stunde selbst — das grobe Fenster muss so weit reichen.
-                    for coarse_offset in range(0, -(ANOMALIE_BASELINE_PERIODS + 4 + (abs(offset) // anomalie_step if anomalie_step > 1 else 0)), -1):
+                    for coarse_offset in range(0, -(ANOMALIE_BASELINE_PERIODS + 4 + (abs(offset) // step if step > 1 else 0)), -1):
                         cw_start, cw_end, _cp_end = query_mod._window(  # noqa: SLF001
                             anomalie_coarser, now_local, coarse_offset,
                         )
                         if cw_start.timestamp() <= start < cw_end.timestamp():
-                            if coarse_offset not in anomalie_coarse_offsets:
-                                anomalie_coarse_offsets.append(coarse_offset)
+                            if coarse_offset not in coarse_offsets:
+                                coarse_offsets.append(coarse_offset)
                             break
+            return starts, coarse_offsets
 
-        def _anomaly_baseline(entity_id: str) -> float | None:
+        anomalie_plan: tuple[list[float], list[int]] = ([], [])
+        anomalie_fallback_plan: tuple[list[float], list[int]] = ([], [])
+        if anomalie_active:
+            anomalie_plan = _baseline_plan(anomalie_step)
+            if anomalie_has_fallback:
+                anomalie_fallback_plan = _baseline_plan(1)
+
+        def _baseline_from(entity_id: str, plan: tuple[list[float], list[int]], step: int, only_with_data: bool) -> float | None:
+            starts, coarse_offsets = plan
             """Mittel der letzten ANOMALIE_BASELINE_PERIODS Vergleichsperioden (Abstand: ANOMALIE_BASELINE_STEP).
+
+            Beim Monat sind das die gleichen Monate der Vorjahre; nur Jahre MIT Daten zählen
+            (ein fehlendes Jahr als 0 würde den Schnitt senken und bei jeder jungen Installation
+            Fehlalarme auslösen). Hat die Entität kein Vorjahr, gilt der Schnitt der letzten drei
+            Monate (Plan ``fallback``).
 
             Aus einer (selten zwei) gröberen Abfrage abgelesen statt je Periode
             einzeln gestellt — gemessen 15 % eines Requests für einen Wert, der
@@ -1709,29 +1795,42 @@ class EnergieDashboardService:
             Vergleichsperioden. Genau daran ist der erste Anlauf gescheitert
             (bis zu 456 kWh Abweichung an echten Daten).
             """
-            if not anomalie_coarse_offsets:
+            if not coarse_offsets:
                 # Kein gröberer Zeitraum hinterlegt (kann nur passieren, wenn
                 # RANGE_KEYS um einen Wert wächst, den _COARSER_RANGE nicht
                 # kennt) — dann wie bisher je Periode einzeln, langsamer aber
                 # korrekt.
-                values = [
-                    self._series_total(self._entity_series(entity_id, range_key, offset - i * anomalie_step, now, read_cache)[0])
+                serien = [
+                    self._entity_series(entity_id, range_key, offset - i * step, now, read_cache)[0]
                     for i in range(1, ANOMALIE_BASELINE_PERIODS + 1)
                 ]
+                values = [self._series_total(serie) for serie in serien if serie or not only_with_data]
                 return sum(values) / len(values) if values else None
             buckets: dict[float, float] = {}
-            for coarse_offset in anomalie_coarse_offsets:
+            with_data: set[float] = set()
+            for coarse_offset in coarse_offsets:
                 result = query_mod.query_series(
                     self.deps.data_dir, self.deps.index, entity_id, anomalie_coarser,
                     self.deps.tz, now, offset=coarse_offset, read_cache=read_cache,
                 )
                 for point in result["points"]:
                     buckets[point["ts"]] = point["value"] or 0.0
+                    if point["value"] is not None:
+                        with_data.add(point["ts"])
             # round() wie _series_total(), damit beide Wege bis auf die letzte
             # Stelle dasselbe ergeben. Ein fehlender Bucket ist 0 — genau das
             # liefert die Einzelabfrage für eine Periode ohne Daten auch.
-            values = [round(buckets.get(start, 0.0), 3) for start in anomalie_starts]
+            values = [
+                round(buckets.get(start, 0.0), 3) for start in starts
+                if not only_with_data or start in with_data
+            ]
             return sum(values) / len(values) if values else None
+
+        def _anomaly_baseline(entity_id: str) -> float | None:
+            baseline = _baseline_from(entity_id, anomalie_plan, anomalie_step, anomalie_has_fallback)
+            if baseline is None and anomalie_has_fallback:
+                baseline = _baseline_from(entity_id, anomalie_fallback_plan, 1, False)
+            return baseline
 
         verbraucher_sum = 0.0
         verbraucher_display_sum = 0.0
@@ -1741,6 +1840,10 @@ class EnergieDashboardService:
         # Kosten-Spalte in der Verbraucheranteile-Tabelle — Name als Schlüssel
         # statt Index, weil verbraucher_breakdown weiter unten sortiert wird.
         verbraucher_series_by_name: dict[str, dict[float, float]] = {}
+        # Dieselben Serien je Entität: Anzeigenamen müssen nicht eindeutig sein, die Entität ist es.
+        # Das Popup (with_detail) schlägt Entitätszeilen darüber nach, damit keine Serie still von einer
+        # gleichnamigen überschrieben wird.
+        verbraucher_series_by_entity: dict[str, dict[float, float]] = {}
         # Woraus sich die Serie einer Zeile zusammensetzt, damit die Kosten sie aus
         # Stundenreihen nachbauen können: ("entity", id), ("rest", id, [Kind-ids]),
         # ("group", [Namen]) oder ("grundlast",).
@@ -1844,6 +1947,7 @@ class EnergieDashboardService:
                     })
                     nodes.append(kind_node)
                     verbraucher_series_by_name[kind_name] = kind_series
+                    verbraucher_series_by_entity[kind["entity_id"]] = kind_series
                     verbraucher_rezept[kind_name] = ("entity", kind["entity_id"])
                     kinder_summe += kind_display
                     kinder_serien.append(kind_series)
@@ -1895,6 +1999,7 @@ class EnergieDashboardService:
             })
             verbraucher_breakdown.extend(kind_eintraege)
             verbraucher_series_by_name[name] = series
+            verbraucher_series_by_entity[entity_id] = series
         if config.get("verbraucheranteile_gruppieren"):
             # Verbraucheranteile-Tabelle optional nach Gruppe: dieselbe (bereits
             # auf >=2 Mitglieder gefilterte) gruppe wie im Sankey oben. Die
@@ -1921,7 +2026,13 @@ class EnergieDashboardService:
                     grouped_members[gruppe_name] = []
                     grouped_order.append(gruppe_name)
                 grouped_values[gruppe_name] += item["value"]
-                grouped_series[gruppe_name].append(verbraucher_series_by_name.get(item["name"], {}))
+                # Entitätszeilen über die Entität nachschlagen: zwei Mitglieder mit gleichem Anzeigenamen
+                # würden sonst dieselbe (letzte) Serie bekommen.
+                member_entity = item.get("entity_id")
+                grouped_series[gruppe_name].append(
+                    verbraucher_series_by_entity.get(member_entity) if member_entity
+                    else verbraucher_series_by_name.get(item["name"], {})
+                )
                 grouped_members[gruppe_name].append(item["name"])
                 item["parent"] = gruppe_name
             for gruppe_name in grouped_order:
@@ -1971,7 +2082,7 @@ class EnergieDashboardService:
             if not sp.get("laden_entity_id"):
                 continue
             sp_name = sp.get("name") or tr("Speicher")
-            label = f"{sp_name} (Ladung)"
+            label = tr("{name} (Ladung)", name=sp_name)
             nodes.append({
                 "name": label, "entity_id": sp["laden_entity_id"], "role": "sink",
                 "kind": "storage_in",
@@ -1986,8 +2097,8 @@ class EnergieDashboardService:
         grundlast = bus_in - verbraucher_sum - einspeisung_val - speicher_laden_val
         grundlast_negative = grundlast < -0.01
         grundlast_display = max(grundlast, 0.0)
-        nodes.append({"name": "Grundlast", "role": "sink", "blend": True, "value": round(grundlast_display, 3)})
-        links.append({"source": hub_name, "target": "Grundlast", "value": round(grundlast_display, 3)})
+        nodes.append({"name": tr("Grundlast"), "role": "sink", "blend": True, "value": round(grundlast_display, 3)})
+        links.append({"source": hub_name, "target": tr("Grundlast"), "value": round(grundlast_display, 3)})
 
         nodes.insert(0, {"name": hub_name, "role": "bus", "value": round(max(bus_in, 0.0), 3)})
 
@@ -2024,7 +2135,7 @@ class EnergieDashboardService:
         # Verbraucheranteile: dieselben Verbraucher-Werte wie im Sankey, plus
         # Grundlast als gleichwertiger Eintrag (beide zusammen ergeben immer
         # genau die Verbrauch-KPI-Summe) — sortiert nach Anteil, größter zuerst.
-        verbraucher_breakdown.append({"name": "Grundlast", "value": round(grundlast_display, 3)})
+        verbraucher_breakdown.append({"name": tr("Grundlast"), "value": round(grundlast_display, 3)})
         for item in verbraucher_breakdown:
             item["share"] = round(item["value"] / verbrauch_total * 100, 1) if verbrauch_total > 0 else None
         # Oberste Ebene nach Wert; darunter (eingerückt per "level") die Mitglieder einer Gruppe nach Wert,
@@ -2097,8 +2208,8 @@ class EnergieDashboardService:
             factors=[1.0, -1.0, -1.0, -1.0],
         )
         grundlast_series_clamped = {ts: max(v, 0.0) for ts, v in grundlast_series.items()}
-        verbraucher_series_by_name["Grundlast"] = grundlast_series_clamped
-        verbraucher_rezept["Grundlast"] = ("grundlast",)
+        verbraucher_series_by_name[tr("Grundlast")] = grundlast_series_clamped
+        verbraucher_rezept[tr("Grundlast")] = ("grundlast",)
         verbrauch_series = self._series_merge(verbraucher_total_series, grundlast_series_clamped)
         speicher_netto_series = self._series_merge(
             speicher_laden_series, speicher_entladen_series, factors=[1.0, -1.0]
@@ -2508,17 +2619,30 @@ class EnergieDashboardService:
         # nichts vertauscht. Mit SOC-Sensor + Kapazität lässt sich das
         # korrigieren: erlaubt ist Ladung PLUS der tatsächliche Rückgang des
         # Ladestands im Fenster selbst (soc_delta_kwh negativ). Ohne SOC-Sensor
-        # fehlt diese Korrekturgröße — dort läuft die Prüfung nur noch für
-        # Monat/Jahr, wo ein einzelner nicht abgeschlossener Lade-/Entladezyklus
-        # im Verhältnis zur Gesamtmenge kaum noch ins Gewicht fällt.
+        # fehlt diese Korrekturgröße — dort ist die Kapazität der Spielraum (Monat/Jahr);
+        # ohne Kapazität läuft die Prüfung nur noch fürs Jahr, wo ein einzelner nicht
+        # abgeschlossener Zyklus im Verhältnis zur Gesamtmenge kaum noch ins Gewicht fällt.
         speicher_entladen_exceeds_names = []
         for e in speicher_per_entity:
             if not e["has_both"]:
                 continue
+            # Monat/Jahr: nur über einen (fast) vollständig archivierten Zeitraum. Beginnt das
+            # Archiv mitten im Monat, kann ein bei Archivbeginn gefüllter Speicher scheinbar mehr
+            # entladen als laden; die SOC-Korrektur unten deckt nur den Ladestand im Fenster ab,
+            # nicht den vor dem ersten archivierten Wert.
+            if range_key in ("month", "year") and (
+                self._storage_coverage(e["entity_ids"], window_start, window_end, now) < STORAGE_CHECK_MIN_COVERAGE
+            ):
+                continue
             soc_delta_kwh = e.get("soc_delta_kwh")
             if soc_delta_kwh is not None:
                 threshold = e["laden_val"] + max(0.0, -soc_delta_kwh) + 0.05
-            elif range_key in ("month", "year"):
+            elif e.get("capacity_kwh"):
+                # Ohne SOC-Sensor ist der Ladestand zu Fensterbeginn unbekannt: ein bei Monatsbeginn
+                # voller Speicher darf höchstens seine Kapazität mehr entladen als laden (z. B. ein
+                # PV-armer Oktober). Mehr deutet weiter auf vertauschte Zuordnung hin.
+                threshold = e["laden_val"] + e["capacity_kwh"] + 0.05
+            elif range_key == "year":
                 threshold = e["laden_val"] + 0.05
             else:
                 continue
@@ -2634,6 +2758,47 @@ class EnergieDashboardService:
             })
         quality_plausible = all(check["ok"] for check in quality_checks)
 
+        detail: dict | None = None
+        if with_detail:
+            # Nur die oberste Ebene (level 0): Geräte hinter einem Zwischenzähler und Mitglieder einer
+            # Gruppe stecken im Wert ihres Elternteils, gestapelt würden sie doppelt zählen. Entitätszeilen
+            # über die Entität nachschlagen (Namen sind nicht eindeutig), Gruppen und Grundlast über den Namen.
+            verbrauch_rows = []
+            for item in verbraucher_breakdown:
+                if item.get("level", 0) != 0:
+                    continue
+                item_entity = item.get("entity_id")
+                item_series = (
+                    verbraucher_series_by_entity.get(item_entity) if item_entity
+                    else verbraucher_series_by_name.get(item["name"])
+                )
+                # Grundlast hat weder Entität noch kind; das Popup erkennt sie nicht am Namen (ein Gerät kann so heißen).
+                is_grundlast = not item_entity and not item.get("kind") and item["name"] == tr("Grundlast")
+                verbrauch_rows.append({
+                    "name": item["name"], "entity_id": item_entity,
+                    "kind": "grundlast" if is_grundlast else item.get("kind"),
+                    "value": item["value"], "share": item.get("share"), "series": item_series or {},
+                })
+            detail = {
+                "erzeugung": [
+                    {"name": item["name"], "entity_id": item["entity_id"], "value": item["value"], "series": item_series}
+                    for item, item_series in zip(erzeuger_breakdown, erzeuger_series_list)
+                ],
+                "verbrauch": verbrauch_rows,
+                "speicher": {
+                    "laden": speicher_laden_series,
+                    "entladen": speicher_entladen_series,
+                    "units": [
+                        {
+                            "name": entry["name"],
+                            "laden_entity_id": sp.get("laden_entity_id"), "laden": round(entry["laden_val"], 3),
+                            "entladen_entity_id": sp.get("entladen_entity_id"), "entladen": round(entry["entladen_val"], 3),
+                        }
+                        for sp, entry in zip(speicher_list, speicher_per_entity)
+                    ],
+                },
+            }
+
         return {
             "range": range_key,
             "range_label": RANGE_LABELS[range_key],
@@ -2705,8 +2870,159 @@ class EnergieDashboardService:
             "speicher_breakdown": speicher_breakdown,
             "speicher_soc_now_breakdown": soc_now_breakdown,
             "anomalien": anomalien,
+            "anomalien_aktiv": anomalie_schwelle != "off",
             "quality": {"plausible": quality_plausible, "checks": quality_checks},
+            **({"detail": detail} if detail is not None else {}),
         }
+
+    def compute_tile(
+        self, config: dict, kpi: str, range_key: str, offset: int, read_cache: query_mod.QueryReadCache | None = None,
+    ) -> dict:
+        """Daten für das Diagramm-Popup einer Kennzahlen-Kachel (Verbrauch, Speicher) auf der festen
+        Achse aus energiedashboard_buckets: je Serie ein Wert je Achsenposition, ``None`` für Buckets,
+        die es (noch) nicht gibt. Die Zeilen und Summen kommen aus denselben Zahlen wie die Kachel
+        (Breakdown), die Serien aus den Buckets; sie stimmen nur ohne Klammerung der Grundlast je Bucket
+        exakt überein, und nur die Serien sind für das Diagramm gedacht."""
+        if kpi not in TILE_KPIS:
+            raise HTTPException(status_code=400, detail=tr("Ungültige Kennzahl"))
+        # Vorwärts über "jetzt" hinaus gibt es nichts; _window kappt ebenfalls auf 0. Ohne das fragte die Vorperiode
+        # (offset - 1) dasselbe Fenster wie die aktuelle und hieße trotzdem "Vortag".
+        offset = min(offset, 0)
+        if kpi in ("netzbezug", "einspeisung"):
+            return self.compute_single_tile(config, kpi, range_key, offset, read_cache)
+        flow = self.compute_flow(config, range_key, offset, skip_quality=True, read_cache=read_cache, with_detail=True)
+        tz = self.deps.tz
+        window_start = datetime.fromtimestamp(flow["window_start_ts"], tz)
+
+        def values(series: dict[float, float]) -> list[float | None]:
+            return self._tile_nonneg(eb.align(series, {}, range_key, window_start, tz)["current"])
+
+        axis = eb.axis_keys(range_key, window_start)
+        result: dict = {
+            "kpi": kpi, "range": range_key, "offset": offset, "unit": "kWh",
+            "keys": axis, "labels": self._tile_labels(range_key, axis, window_start),
+        }
+        if kpi == "erzeugung":
+            # Anteil an der Summe der gezeigten (auf 0 gekappten) Zeilen: die Kachel summiert ungekappt, ein
+            # Erzeuger mit negativem Wert ließe sonst Zähler und Nenner auseinanderlaufen.
+            total = flow["kpi"]["erzeugung"]
+            rows_total = sum(row["value"] for row in flow["detail"]["erzeugung"])
+            result["series"] = [
+                {
+                    "name": row["name"], "entity_id": row["entity_id"], "kind": None, "value": row["value"],
+                    "share": round(row["value"] / rows_total * 100, 1) if rows_total > 0 else None,
+                    "values": values(row["series"]),
+                }
+                for row in flow["detail"]["erzeugung"]
+            ]
+            result["total"] = total
+        elif kpi == "verbrauch":
+            result["series"] = [
+                {
+                    "name": row["name"], "entity_id": row["entity_id"], "kind": row["kind"],
+                    "value": row["value"], "share": row["share"], "values": values(row["series"]),
+                }
+                for row in flow["detail"]["verbrauch"]
+            ]
+            result["total"] = flow["kpi"]["verbrauch"]
+        else:
+            storage = flow["detail"]["speicher"]
+            result["series"] = [
+                {"name": tr("Ladung"), "role": "laden", "values": values(storage["laden"])},
+                {"name": tr("Entladung"), "role": "entladen", "values": values(storage["entladen"])},
+            ]
+            result["units"] = storage["units"]
+            result["soc"] = self._tile_soc(config, range_key, offset, window_start, read_cache)
+            result["total"] = {
+                "laden": round(sum(storage["laden"].values()), 3),
+                "entladen": round(sum(storage["entladen"].values()), 3),
+            }
+        return result
+
+    def compute_single_tile(
+        self, config: dict, kpi: str, range_key: str, offset: int, read_cache: query_mod.QueryReadCache | None = None,
+    ) -> dict:
+        """Popup von Netzbezug und Einspeisung: genau eine Entität, deshalb ohne compute_flow. Aktueller Zeitraum
+        plus der Vorzeitraum (kalendarisch, ``offset - 1``) auf derselben Achse. Die Prozentzahl der Kachel
+        (rollierend) wird im Popup nicht wiederholt, die Linie ist die Bucket-Sicht auf den Vorzeitraum."""
+        if range_key not in RANGE_KEYS:
+            raise HTTPException(status_code=400, detail=tr("Ungültiger Zeitraum"))
+        offset = min(offset, 0)
+        tz = self.deps.tz
+        now = datetime.now(tz)
+        cache = read_cache if read_cache is not None else query_mod.QueryReadCache()
+        entity_id = config.get(kpi) or ""
+        default_name = tr("Netzbezug") if kpi == "netzbezug" else tr("Einspeisung")
+        name = config.get(f"{kpi}_name") or default_name
+        window_start = query_mod._window(range_key, now.astimezone(tz), offset)[0]  # noqa: SLF001 — siehe Modul-Docstring
+        current = self._entity_series(entity_id, range_key, offset, now, cache)[0] if entity_id else {}
+        previous = self._entity_series(entity_id, range_key, offset - 1, now, cache)[0] if entity_id else {}
+        aligned = eb.align(current, previous, range_key, window_start, tz)
+        aligned = {key: self._tile_nonneg(value) if key != "keys" else value for key, value in aligned.items()}
+        axis = aligned["keys"]
+        previous_label = tr(COMPARE_LABELS.get(range_key, N_("Vorperiode")))
+        return {
+            "kpi": kpi, "range": range_key, "offset": offset, "unit": "kWh",
+            "keys": axis, "labels": self._tile_labels(range_key, axis, window_start),
+            "entity_id": entity_id or None,
+            "series": [{"name": name, "entity_id": entity_id or None, "values": aligned["current"]}] if entity_id else [],
+            "previous": {"name": previous_label, "values": aligned["previous"]} if entity_id else None,
+            "total": round(max(sum(current.values()), 0.0), 3),
+        }
+
+    def _tile_soc(
+        self, config: dict, range_key: str, offset: int, window_start: datetime,
+        read_cache: query_mod.QueryReadCache | None,
+    ) -> list[float | None] | None:
+        """Ladestand in % je Achsenposition, über alle Speicher mit SOC-Sensor kapazitätsgewichtet
+        gemittelt; None ohne SOC-Sensor oder Daten. Nur bei Stunde und Tag: bei Monat und Jahr wäre es
+        ein grober Mittelwert je Bucket, der ein Bild vortäuscht. Eigene Abfrage statt der Serie aus
+        compute_flow, weil _entity_series fehlende Buckets zu 0 macht, was bei einem Messwert als
+        Ladestand 0 % erschiene."""
+        if range_key not in ("hour", "day"):
+            return None
+        now = datetime.now(self.deps.tz)
+        cache = read_cache if read_cache is not None else query_mod.QueryReadCache()
+        weighted: dict[int, list[tuple[float, float]]] = {}
+        for sp in config.get("speicher") or []:
+            soc_id = sp.get("soc_entity_id")
+            if not soc_id:
+                continue
+            result = query_mod.query_series(
+                self.deps.data_dir, self.deps.index, soc_id, range_key, self.deps.tz, now,
+                offset=offset, read_cache=cache,
+            )
+            points = {p["ts"]: p["value"] for p in result["points"] if p["value"] is not None}
+            weight = self._resolve_speicher_capacity(sp, now, cache) or 1.0
+            for key, mean in eb.fold_mean(points, range_key, self.deps.tz).items():
+                weighted.setdefault(key, []).append((mean, weight))
+        if not weighted:
+            return None
+        return [
+            round(self._capacity_weighted_avg(weighted[key]), 1) if key in weighted else None
+            for key in eb.axis_keys(range_key, window_start)
+        ]
+
+    @staticmethod
+    def _tile_nonneg(values: list[float | None]) -> list[float | None]:
+        """Negative Bucket-Werte (nach einem Zählerreset) auf 0 kappen: sie ergäben negative Balkenstücke und in
+        der Prozentansicht Anteile unter 0 oder über 100 %. Lücken (None) bleiben Lücken."""
+        return [None if value is None else max(value, 0.0) for value in values]
+
+    @staticmethod
+    def _tile_labels(range_key: str, axis: list[int], window_start: datetime) -> list[str]:
+        """Beschriftung je Achsenposition: Minute, Uhrzeit, Wochentag, Tag, Monatskürzel, Jahr."""
+        if range_key == "hour":
+            return [f"{window_start.hour:02d}:{key:02d}" for key in axis]
+        if range_key == "day":
+            return [f"{key:02d}:00" for key in axis]
+        if range_key == "week":
+            return [tr(_WEEKDAY_LABELS[key]) for key in axis]
+        if range_key == "year":
+            return [tr(_MONTH_NAMES_DE[key - 1])[:3] for key in axis]
+        if range_key == "decade":
+            return [str(window_start.year + key) for key in axis]
+        return [str(key) for key in axis]
 
     def _speicher_efficiency(
         self, speichers_with_both: list[dict], now: datetime, read_cache: query_mod.QueryReadCache,
@@ -2844,7 +3160,13 @@ class EnergieDashboardService:
             )
         else:
             rolling_current = current
-            rolling_previous = self.compute_flow(config, range_key, offset - 1, read_cache=read_cache)
+            # skip_quality: gebraucht werden nur die Energiemengen und Quoten (Vergleich, Autarkie, Eigenverbrauch).
+            # Ohne die Markierung rechnete die Vorperiode Kosten, Auffälligkeiten (je drei weitere Perioden),
+            # Speicher-Wirkungsgrad und Datenqualität mit und kostete damit etwa das Doppelte. Der laufende Fall
+            # oben (continuous) überspringt dasselbe ohnehin.
+            rolling_previous = self.compute_flow(
+                config, range_key, offset - 1, skip_quality=True, read_cache=read_cache,
+            )
         return (
             self._compare_kpi(rolling_current["kpi"], rolling_previous["kpi"]),
             rolling_current["kpi"],
@@ -3013,7 +3335,7 @@ class EnergieDashboardService:
             while len(hourly) < 24:
                 hourly.append(None)
             day_local = datetime.fromtimestamp(flow["window_start_ts"], self.deps.tz)
-            rows.append({"label": _WEEKDAY_LABELS[day_local.weekday()], "hours": hourly})
+            rows.append({"label": tr(_WEEKDAY_LABELS[day_local.weekday()]), "hours": hourly})
         rows.reverse()  # älteste Tag zuerst
         return {"rows": rows, "max_value": round(max_value, 3)}
 
@@ -3108,7 +3430,7 @@ class EnergieDashboardService:
                 avg = round(sum(values) / len(values), 3)
                 hours.append(avg)
                 max_value = max(max_value, avg)
-            rows.append({"label": _WEEKDAY_LABELS[weekday], "hours": hours})
+            rows.append({"label": tr(_WEEKDAY_LABELS[weekday]), "hours": hours})
 
         return {"rows": rows, "max_value": round(max_value, 3)}
 
@@ -3184,26 +3506,12 @@ class EnergieDashboardService:
 
     def _page_context(self, request: Request) -> dict:
         config = _load_config(self.deps.index)
-        erzeuger = config.get("erzeuger") or []
-        verbraucher = config.get("verbraucher") or []
-        speicher_link_entities = _speicher_link_entities(config)
         return {
             "configured": _is_configured(config),
             "enabled": _is_enabled(self.deps.index),
             "config": config,
-            # KPI-Kacheln verlinken auf den Chart der zugrundeliegenden
-            # Entität — direkt bei GENAU einer Entität (Netzbezug/Einspeisung
-            # immer, da je ein Konfigurationsfeld je Rolle; Erzeugung/
-            # Verbrauch/Speicher nur bei genau einer konfigurierten Quelle
-            # bzw. einer einzigen Laden/Entladen-Entität über alle Speicher),
-            # sonst über ein Auswahlfenster (siehe _energiedashboard_view.html)
-            # — Speicher hat selbst bei einem einzigen konfigurierten Gerät
-            # meist zwei Entitäten (Laden/Entladen), landet also fast immer
-            # im Auswahlfenster-Fall.
-            "single_erzeuger_id": erzeuger[0].get("entity_id") if len(erzeuger) == 1 else None,
-            "single_verbraucher_id": verbraucher[0].get("entity_id") if len(verbraucher) == 1 else None,
-            "single_speicher_id": speicher_link_entities[0]["entity_id"] if len(speicher_link_entities) == 1 else None,
-            "speicher_link_entities": speicher_link_entities,
+            # Erster und letzter Tag des Archivs für den Kalender der Stichtag-Leiste im Reiter „Langzeit“.
+            **calendar_bounds(self.deps.index.list_entities(), self.deps.tz),
             **self.deps.app_root_context(request),
         }
 
@@ -3269,6 +3577,7 @@ class EnergieDashboardService:
             einspeisung_name: str = Form(""),
             erzeuger_entity_id: list[str] = Form([]),
             erzeuger_name: list[str] = Form([]),
+            erzeuger_kwp: list[str] = Form([]),
             speicher_name: list[str] = Form([]),
             speicher_laden_entity_id: list[str] = Form([]),
             speicher_entladen_entity_id: list[str] = Form([]),
@@ -3302,15 +3611,36 @@ class EnergieDashboardService:
             show_sankey_legende: str = Form(""),
             verbraucheranteile_gruppieren: str = Form(""),
             anomalie_schwelle: str = Form("50"),
+            kt_autark: str = Form(""),
+            kt_sonnig: str = Form(""),
+            kt_truebe: str = Form(""),
+            kt_stark: str = Form(""),
+            kt_schwach: str = Form(""),
+            langzeit_zeigen: list[str] = Form([]),
         ) -> HTMLResponse:
             if not netzbezug.strip():
                 raise HTTPException(status_code=422, detail=tr("Netzbezug ist Pflicht"))
             if anomalie_schwelle not in ANOMALIE_SCHWELLE_LABELS:
                 raise HTTPException(status_code=422, detail=tr("Ungültige Auffälligkeiten-Schwelle"))
 
+            # Abgewählt ist, was im Formular nicht angehakt ist; „energie“ lässt sich nicht abwählen.
+            langzeit_ausblenden = [
+                key for key in (*energie_langzeit.TABLE_BLOCKS[1:], *energie_langzeit.CARD_BLOCKS)
+                if key not in langzeit_zeigen
+            ]
+            kenntage: dict[str, float] = {}
+            for key, raw in (
+                ("autark", kt_autark), ("sonnig", kt_sonnig), ("truebe", kt_truebe),
+                ("speicher_stark", kt_stark), ("speicher_schwach", kt_schwach),
+            ):
+                value = _parse_float(raw)
+                low, high = energie_langzeit.KENNTAGE_LIMITS[key]
+                if value is not None and low <= value <= high and value != energie_langzeit.KENNTAGE_DEFAULTS[key]:
+                    kenntage[key] = value
+
             def pairs(
                 entity_ids: list[str], names: list[str], gruppen: list[str] | None = None,
-                parents: list[str] | None = None,
+                parents: list[str] | None = None, kwps: list[str] | None = None,
             ) -> list[dict]:
                 # Reihen ohne gewählte Entität (z. B. eine per "+ hinzufügen"
                 # angelegte, dann leer gelassene Zeile) werden stillschweigend
@@ -3327,6 +3657,11 @@ class EnergieDashboardService:
                         "entity_id": eid.strip(),
                         "name": (names[idx] if idx < len(names) else "").strip(),
                     }
+                    if kwps is not None:
+                        # Anlagenleistung (nur Erzeuger), optional; nicht positiv gilt als nicht angegeben.
+                        kwp = _parse_float(kwps[idx] if idx < len(kwps) else "")
+                        if kwp is not None and kwp > 0:
+                            row["kwp"] = kwp
                     if gruppen is not None:
                         row["gruppe"] = (gruppen[idx] if idx < len(gruppen) else "").strip() or None
                     if parents is not None:
@@ -3442,7 +3777,7 @@ class EnergieDashboardService:
                 "netzbezug_name": netzbezug_name.strip() or None,
                 "einspeisung": einspeisung.strip() or None,
                 "einspeisung_name": einspeisung_name.strip() or None,
-                "erzeuger": pairs(erzeuger_entity_id, erzeuger_name),
+                "erzeuger": pairs(erzeuger_entity_id, erzeuger_name, kwps=erzeuger_kwp),
                 "speicher": speicher,
                 "verbraucher": verbraucher_rows,
                 # dict.fromkeys() statt set() — entfernt Duplikate (z. B. wenn
@@ -3463,26 +3798,18 @@ class EnergieDashboardService:
                 "show_sankey_legende": show_sankey_legende == "on",
                 "verbraucheranteile_gruppieren": verbraucheranteile_gruppieren == "on",
                 "anomalie_schwelle": anomalie_schwelle,
+                "kenntage": kenntage,
+                "langzeit_ausblenden": langzeit_ausblenden,
             }
             _save_config(deps.index, config)
             sync_hourly_rollup_flags(deps.index, [eid for eid, _ in self._config_entity_roles(config)])
             deps.index.invalidate_heatmap_weekday_snapshots()
-            erzeuger = config.get("erzeuger") or []
-            verbraucher = config.get("verbraucher") or []
-            speicher_link_entities = _speicher_link_entities(config)
             return deps.templates.TemplateResponse(
                 request, "_energiedashboard_view.html",
                 {
                     "configured": _is_configured(config),
                     "config": config,
-                    # Dieselbe Regel wie in _page_context() oben — sonst würden
-                    # die KPI-Kacheln-Links direkt nach dem Speichern fehlen
-                    # bzw. ohne Ingress-Präfix zeigen, bis zum nächsten vollen
-                    # Seitenaufruf.
-                    "single_erzeuger_id": erzeuger[0].get("entity_id") if len(erzeuger) == 1 else None,
-                    "single_verbraucher_id": verbraucher[0].get("entity_id") if len(verbraucher) == 1 else None,
-                    "single_speicher_id": speicher_link_entities[0]["entity_id"] if len(speicher_link_entities) == 1 else None,
-                    "speicher_link_entities": speicher_link_entities,
+                    **calendar_bounds(deps.index.list_entities(), deps.tz),
                     **deps.app_root_context(request),
                 },
             )
@@ -3507,6 +3834,19 @@ class EnergieDashboardService:
             )
             current["compare_label"] = COMPARE_LABELS[range]
             return current
+
+        @router.get("/energiedashboard/tile")
+        def energiedashboard_tile(kpi: str, range: str = "day", offset: int = 0) -> dict:  # noqa: A002
+            # Beim ersten Öffnen eines Kachel-Popups geladen (wie /trends), nicht in /data mitgeschleppt.
+            # Nur über den Ingress erreichbar: nginx.conf leitet dort alles weiter, der öffentliche Port
+            # liefert 404 — bewusst KEIN Eintrag in PUBLIC_ENDPOINTS.
+            # Eine unbekannte Kennzahl ist ein Fehler der Anfrage (400), unabhängig vom Stand der Einrichtung.
+            if kpi not in TILE_KPIS:
+                raise HTTPException(status_code=400, detail=tr("Ungültige Kennzahl"))
+            config = _load_config(deps.index)
+            if not _is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            return self.compute_tile(config, kpi, range, offset)
 
         @router.get("/energiedashboard/report", response_class=HTMLResponse)
         def energiedashboard_report(request: Request, range: str = "year", offset: int = 0) -> HTMLResponse:  # noqa: A002
@@ -3621,6 +3961,50 @@ class EnergieDashboardService:
             if not _is_configured(config):
                 raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
             return self.compute_trends(config)
+
+        @router.post("/energiedashboard/langzeit/table")
+        def energiedashboard_langzeit_table(body: energie_langzeit.TableRequest) -> dict:
+            # Reiter „Langzeit“: Vergleichstabelle Zeiträume gegen das Vorjahr, Rechnung in
+            # energie_langzeit.py (nur Zählersummen, kein compute_flow je Spalte).
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            return self.langzeit.compute_table(config, body)
+
+        @router.get("/energiedashboard/langzeit/months")
+        def energiedashboard_langzeit_months() -> dict:
+            # Monatswerte je Rolle über alle Jahre für Monatsvergleich und Matrix „Jahre × Monate“ (Reiter
+            # „Langzeit“). Das Frontend holt sie genau einmal, wenn der Reiter zum ersten Mal geöffnet wird.
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            return self.langzeit.compute_months(config)
+
+        @router.get("/energiedashboard/langzeit/records")
+        def energiedashboard_langzeit_records() -> dict:
+            # Rekordtage und Kenntage je Jahr aus den Tageswerten aller Rollen (Reiter „Langzeit“).
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            return self.langzeit.compute_records(config)
+
+        @router.get("/energiedashboard/langzeit/kenntage")
+        def energiedashboard_langzeit_kenntage(field: str, year: int) -> dict:
+            # Die Tage eines Jahres für den Kalender eines Kenntags (Reiter „Langzeit“).
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            if field not in {key for key, _group, _needs in energie_langzeit.KENNTAGE}:
+                raise HTTPException(status_code=422, detail=tr("Unbekannter Kenntag: {value}", value=field))
+            return self.langzeit.compute_kenntage_days(config, field, year)
+
+        @router.post("/energiedashboard/langzeit/changes")
+        def energiedashboard_langzeit_changes(body: energie_langzeit.TableRequest) -> dict:
+            # „Was hat sich verändert?“: Verbraucher mit der größten Änderung gegenüber dem Vorjahr.
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            return self.langzeit.compute_changes(config, body)
 
         @router.get("/energiedashboard/heatmap")
         def energiedashboard_heatmap(range: str = "week", offset: int = 0) -> dict:  # noqa: A002

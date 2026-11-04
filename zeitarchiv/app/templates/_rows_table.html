@@ -119,12 +119,17 @@
 {% endif %}
 <div class="rows-actionbar">
   {% if mode == 'correct' %}
-  {{ _("✎ auf eine Zeile klicken, um ihren Wert zu korrigieren.") }}
+  <span id="correct-hint" class="correct-hint">{{ _("✎ auf eine Zeile klicken, um ihren Wert zu korrigieren.") }}</span>
+  <span id="correct-bulk" class="correct-bulk" hidden>
+    <strong id="correct-bulk-count"></strong>
+    <button type="button" class="btn" onclick="cancelAllCorrect()">{{ _("Alle verwerfen") }}</button>
+    <button type="button" class="btn btn-primary" id="correct-save-all" onclick="saveAllCorrect(this)"></button>
+  </span>
   {% else %}
   <strong><span id="selected-count">0</span> {{ _("ausgewählt") }}</strong>
   <button class="btn btn-danger needs-selection" disabled
           hx-post="{{ app_root }}/entities/{{ entity_id }}/rows/delete"
-          hx-include="[name=ts]:checked, #controls" hx-target="#rows-table" hx-swap="innerHTML"
+          hx-include="[name=ts]:checked, #controls, [name=page_size]" hx-target="#rows-table" hx-swap="innerHTML"
           hx-disabled-elt="this"
           hx-confirm="{{ _('Ausgewählte Datensätze zur Löschung markieren? Sie werden noch nicht endgültig gelöscht und können mit „Letzte Löschung rückgängig“ oder im Reiter „Markiert“ wiederhergestellt werden.') }}">
     {{ _("Löschen") }}
@@ -138,7 +143,7 @@
     <button class="btn btn-danger-outline"
             {% if counts.duplicates == 0 %}disabled title="{{ _('Keine Duplikate im aktuellen Zeitraum') }}"{% endif %}
             hx-post="{{ app_root }}/entities/{{ entity_id }}/rows/duplicates-preview"
-            hx-include="#controls" hx-target="#rows-table" hx-swap="innerHTML" hx-disabled-elt="this">
+            hx-include="#controls, [name=page_size]" hx-target="#rows-table" hx-swap="innerHTML" hx-disabled-elt="this">
       {{ _("Duplikate automatisch entfernen") }}
     </button>
     {% endif %}
@@ -146,7 +151,7 @@
     <button class="btn btn-danger-outline"
             {% if counts.repetitions == 0 %}disabled title="{{ _('Keine gerundet gleichen Folgewerte im aktuellen Zeitraum') }}"{% endif %}
             hx-post="{{ app_root }}/entities/{{ entity_id }}/rows/repetitions-preview"
-            hx-include="#controls" hx-target="#rows-table" hx-swap="innerHTML" hx-disabled-elt="this">
+            hx-include="#controls, [name=page_size]" hx-target="#rows-table" hx-swap="innerHTML" hx-disabled-elt="this">
       {{ _("Wiederholungen verdichten") }}
     </button>
     {% endif %}
@@ -154,7 +159,7 @@
     <button class="btn btn-danger-outline"
             {% if counts.counter_decreases == 0 %}disabled title="{{ _('Keine Zählerrückgänge im aktuellen Zeitraum') }}"{% endif %}
             hx-post="{{ app_root }}/entities/{{ entity_id }}/rows/counter-returning-delete"
-            hx-include="#controls" hx-target="#rows-table" hx-swap="innerHTML" hx-disabled-elt="this"
+            hx-include="#controls, [name=page_size]" hx-target="#rows-table" hx-swap="innerHTML" hx-disabled-elt="this"
             hx-confirm="{{ _('Alle Rückgänge, die zurückkehren („Vermutlich Fehlwert“), zur Löschung markieren? Rückgänge, nach denen der Stand niedrig bleibt, bleiben unberührt. Es wird nichts endgültig gelöscht; im Reiter „Markiert“ lässt sich alles wiederherstellen.') }}">
       {{ _("Fehlwert-Rückgänge markieren") }}
     </button>
@@ -173,7 +178,7 @@
     {% if last_batch_count %}
     <button class="btn" id="undo-preview-btn"
             hx-post="{{ app_root }}/entities/{{ entity_id }}/rows/undo-preview"
-            hx-include="#controls" hx-target="#rows-table" hx-swap="innerHTML" hx-disabled-elt="this">
+            hx-include="#controls, [name=page_size]" hx-target="#rows-table" hx-swap="innerHTML" hx-disabled-elt="this">
       {{ _("Letzte Löschung rückgängig ({count} Werte)", count=(last_batch_count | format_int)) }}
     </button>
     {% endif %}

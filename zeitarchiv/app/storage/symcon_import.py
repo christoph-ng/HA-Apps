@@ -38,6 +38,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import hotbuffer, rollup, zip_guard
+from .atomic import write_file_atomically
 from ..limits import (
     MAX_IMPORT_ROWS_PER_ENTITY,
     MAX_ZIP_COMPRESSION_RATIO,
@@ -559,6 +560,15 @@ def _classify_months(
     return to_import, to_merge, to_update, to_skip
 
 
+def _unique_by_timestamp(rows: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Behält je Zeitstempel die erste Zeile (die Eingabe ist sortiert): zwei überlappende Exporte würden sonst
+    dieselben Punkte doppelt ins Archiv schreiben. Die Wege zum Ergänzen bestehender Monate tun dasselbe."""
+    unique: dict[float, tuple[float, float]] = {}
+    for row in rows:
+        unique.setdefault(row[0], row)
+    return list(unique.values())
+
+
 def _new_rows_for_merge(
     data_dir: Path, entity_id: str, month_rows: list[tuple[float, float]], tz: ZoneInfo
 ) -> list[tuple[float, float]]:
@@ -840,7 +850,7 @@ def plan_import_rows(
         months_to_merge=[label for _, _, label, _ in to_merge],
         months_to_update=[label for _, _, label, _ in to_update],
         months_to_skip=to_skip,
-        rows_to_import=sum(len(rows) for _, _, _, rows in to_import),
+        rows_to_import=sum(len(_unique_by_timestamp(sorted(rows))) for _, _, _, rows in to_import),
         rows_to_merge=rows_to_merge,
         rows_to_update=rows_to_update,
         current_archives_to_repair=current_repairs,
@@ -980,11 +990,14 @@ def import_rows(
 
     for year, month, label, month_rows in to_import:
         month_rows.sort()
+        unique_rows = _unique_by_timestamp(month_rows)
+        result.duplicate_rows += len(month_rows) - len(unique_rows)
+        month_rows = unique_rows
         table = pa.table(
             {"ts": [r[0] for r in month_rows], "value": [r[1] for r in month_rows]}
         )
         archive_path = archive_dir / f"{label}.parquet"
-        pq.write_table(table, archive_path, compression="zstd")
+        write_file_atomically(archive_path, lambda tmp, table=table: pq.write_table(table, tmp, compression="zstd"))
         index.add_size_bytes(entity_id, archive_path.stat().st_size)
         rollup.append_completed_month(
             data_dir, entity_id, aggregation_type, table, year, month, tz, hourly_rollup=hourly_rollup

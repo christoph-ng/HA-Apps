@@ -85,13 +85,17 @@ Only **completed** periods are precomputed; `query.py` always computes the
 current period live from the hot buffer. Bucket size depends on the entity's
 aggregation type:
 
-| Aggregation type | Fine bucket size | File | Serves |
+| Aggregation type | Persisted bucket size | File | Serves |
 | --- | --- | --- | --- |
-| `counter` (counter, `total`/`total_increasing`) | 5 min | `tag.parquet` | week, month |
-| `standard` / `switch` (measurement/switch) | 1 min | `stunde.parquet` | week, month |
+| `counter` (counter, `total`/`total_increasing`) | 1 day | `tag.parquet` | week, month |
+| `standard` / `switch` (measurement/switch) | 1 hour | `stunde.parquet` | week, month |
 
-Additionally per entity `monat.parquet` (serves year, for counters also decade)
-and for standard/switch `jahr.parquet` (serves decade). Each row carries
+(The finer buckets of the hour and day views, 1 and 5 min for measurements
+and 5 min and 1 h for counters, are not persisted but computed live from the
+hot buffer or the archive.)
+
+Additionally per entity `monat.parquet` (serves year, for standard/switch also
+decade) and, for counters only, `jahr.parquet` (serves decade). Each row carries
 `bucket_start` (Unix timestamp UTC) plus, depending on type,
 `value`/`min_value`/`max_value` (counter: sum or bucket extremes; standard:
 mean or extremes) or `on_seconds` (switch: on-time in the bucket).
@@ -118,6 +122,18 @@ already archived months rebuilt retroactively: a queue (setting
 scheduler with one entity per 30-second tick
 (`energiedashboard_routes.process_pending_hourly_backfill()`, uses
 `rollup.rebuild_entity_rollups(..., hourly_rollup=True)`).
+
+**Daily series (`query.query_daily_series()`).** For analyses over many years
+(weather dashboard) this function condenses the fine rollup level into daily
+values per local calendar day: mean, min and max for measurements, the daily sum
+for counters, the on-time for switches. A measurement day only counts as covered
+(`covered`) with at least 18 hours that have values. Complete, finished calendar
+years are held in a memory cache; on every call it checks name, modification time
+and size of the twelve monthly segments and recomputes as soon as one of them was
+rewritten (deleting marked values, recomputation, import, type change). A year
+whose December has not been rotated yet is never cached. Ten years of hourly data
+(about 87,600 rows) cost roughly 0.4 s cold and about 0.06 s from the cache
+(measured on a development machine).
 
 ## Soft delete and purge
 
@@ -203,7 +219,7 @@ column gets a default and an explicit existence check in `Index.__init__()`.
 | `settings` | Generic key-value store: global resolution/retention defaults, log level, color scheme, API token, as well as **cached expensive previews** and **HA integration status** (see below) |
 | `stats_snapshots`, `memory_snapshots` | Hourly snapshots for statistics history graphs |
 | `backup_jobs`, `retention_jobs` | Persistent job history (status, errors, metrics) — survives restarts, unlike a mere "last run" timestamp. `backup_jobs` is also the basis for `Index.get_last_successful_backup_job()` — the `latest_backup` field in `/api/notices` (see [api-reference.md](api-reference.md)) |
-| `saved_charts` | Saved chart **queries** (entities + period settings, display options such as `area_fill`, `show_points`), no data snapshot — values are reloaded live on every call. `period_anchor` (YYYY-MM-DD, optional) pins a fixed period, empty = always the current period. `compare_settings` (JSON) is the saved comparison |
+| `saved_charts` | Saved chart **queries** (entities + period settings, display options such as `area_fill`, `show_points`), no data snapshot — values are reloaded live on every call. `period_anchor` (YYYY-MM-DD, optional) pins a fixed period, empty = always the current period. `compare_settings` (JSON) is the saved comparison. `series_colors` (JSON `{entity_id: "palette:N" \| "#rrggbb"}`) holds custom series colors, missing entry = palette color by position |
 | `saved_tables`, `table_columns`, `table_rows` | Comparison tables: structure (rows = quantities, columns = periods) separate from `style_json` (purely visual presentation, see [frontend.md](frontend.md)) |
 | `dashboards`, `dashboard_pins` | Several named dashboards (favorite, default, Precise mode, Fill gaps, Period navigation); one shared pin table for charts, tables, directly pinned entities ("value tiles") AND section dividers (`item_type`/`item_id`/`item_entity_id`; `item_type='section'` carries the section name in `title`, without its own `item_entity_id`), since all of them must be sorted together |
 

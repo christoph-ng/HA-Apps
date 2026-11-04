@@ -27,17 +27,65 @@
       if (!anyChecked) document.querySelector('input[name=type][value=all]').checked = true;
     }
 
+    // Kategorie-Filter (ROADMAP 1.42): wie der Typ-Filter eine Mehrfachauswahl mit „Alle“,
+    // dazu „Ohne Kategorie“ (Wert none) für alles, was noch einzuordnen ist.
+    function onCategoryAllChange(checkbox) {
+      if (checkbox.checked) {
+        document.querySelectorAll('input[name=category]:not([value=all])').forEach(cb => cb.checked = false);
+      } else {
+        checkbox.checked = true;
+      }
+    }
+    function onCategorySpecificChange() {
+      document.querySelector('input[name=category][value=all]').checked = false;
+      const anyChecked = Array.from(document.querySelectorAll('input[name=category]:not([value=all])')).some(cb => cb.checked);
+      if (!anyChecked) document.querySelector('input[name=category][value=all]').checked = true;
+    }
+    function updateCategoryFilterLabel() {
+      const checked = Array.from(document.querySelectorAll('input[name=category]:checked'));
+      const btn = document.getElementById('category-filter-btn');
+      if (!checked.length || checked.some(cb => cb.value === 'all')) {
+        btn.textContent = t('Kategorie: Alle ▾');
+        return;
+      }
+      btn.textContent = t('Kategorie: ') + checked.map(cb => cb.parentElement.textContent.trim()).join(', ') + ' ▾';
+    }
+
     // page-field ist die einzige Quelle der Wahrheit für die Seiten-Navigation —
     // jeder Control, der die zugrunde liegende Trefferliste ändert (Suche, Typ-
     // Filter, Zeilen/Seite), setzt page zurück auf 1.
+    //
+    // Die Seite wird zusätzlich in sessionStorage gemerkt: Wer auf Seite 2 eine
+    // Entität öffnet und zur Liste zurückkehrt, landete sonst wieder auf Seite 1,
+    // weil die Liste jedes Mal frisch geladen wird. Nur Komfort — ohne Speicher
+    // (privates Fenster, gesperrt) startet die Liste wie bisher auf Seite 1.
+    const PAGE_KEY = 'zeitarchiv.entities.page';
+    function rememberEntitiesPage(v) {
+      try { sessionStorage.setItem(PAGE_KEY, String(v)); } catch (_) { /* nur Komfort */ }
+    }
     function resetEntitiesPage() {
       document.getElementById('page-field').value = '1';
+      rememberEntitiesPage(1);
     }
     function setEntitiesPage(v) {
       const field = document.getElementById('page-field');
       field.value = Math.max(1, v);
+      rememberEntitiesPage(field.value);
       field.dispatchEvent(new Event('change', {bubbles: true}));
     }
+    // Läuft vor dem ersten Laden der Tabelle (htmx startet erst nach DOMContentLoaded).
+    try {
+      const storedPage = parseInt(sessionStorage.getItem(PAGE_KEY) || '1', 10);
+      if (Number.isFinite(storedPage) && storedPage > 1) document.getElementById('page-field').value = String(storedPage);
+    } catch (_) { /* Seite 1 */ }
+    // Der Server begrenzt die Seite auf den gültigen Bereich (z. B. nach gelöschten
+    // Entitäten) — den tatsächlich gezeigten Wert übernehmen, damit nichts Ungültiges hängen bleibt.
+    document.getElementById('entities-table').addEventListener('htmx:afterSwap', () => {
+      const shown = document.querySelector('#entities-table .pager-page-input');
+      if (!shown) return;
+      document.getElementById('page-field').value = shown.value;
+      rememberEntitiesPage(shown.value);
+    });
     function stepEntitiesPage(delta) {
       const current = parseInt(document.getElementById('page-field').value || '1', 10);
       setEntitiesPage(current + delta);
@@ -83,6 +131,14 @@
         if (!visible) {
           document.querySelectorAll('input[name=type]').forEach(cb => cb.checked = cb.value === 'all');
           updateTypeFilterLabel();
+        }
+      }
+      if (key === 'category') {
+        const wrap = document.getElementById('category-filter-wrap');
+        if (wrap) wrap.style.display = visible ? 'inline-block' : 'none';
+        if (!visible && wrap) {
+          document.querySelectorAll('input[name=category]').forEach(cb => cb.checked = cb.value === 'all');
+          updateCategoryFilterLabel();
         }
       }
       if (key === 'unit') {
@@ -394,4 +450,35 @@
       }
     }
     document.getElementById('sel-delete').addEventListener('click', deleteSelection);
+
+    // ---- Kategorie setzen (ROADMAP 1.42) ------------------------------------------------------
+    // Ordnet alle Gewählten einer Kategorie zu (auch die, die gerade nicht in der Suche stehen);
+    // die Auswahl bleibt bestehen, damit sich weiter sortieren lässt. Leere Kategorie = lösen.
+    async function setSelectionCategory(categoryId) {
+      const ids = Array.from(selection.keys());
+      document.getElementById('sel-category-popover').classList.remove('open');
+      if (!ids.length) return;
+      const form = new FormData();
+      ids.forEach(id => form.append('entity_id', id));
+      form.append('category_id', categoryId);
+      const status = document.getElementById('sel-status');
+      try {
+        const response = await fetch('entities/set-category', {method: 'POST', body: form});
+        if (!response.ok) throw new Error('set-category failed');
+        const result = await response.json();
+        status.textContent = result.changed === 1 ? t('1 Entität geändert') : t('{n} Entitäten geändert', {n: result.changed});
+        setTimeout(() => { status.textContent = ''; }, 4000);
+        htmx.trigger('#controls', 'change');
+      } catch (error) {
+        appAlert(t('Die Kategorie konnte nicht gesetzt werden.'), {danger: true});
+      }
+    }
+    document.getElementById('sel-category-popover').addEventListener('click', (event) => {
+      const row = event.target.closest('[data-category]');
+      if (row) setSelectionCategory(row.dataset.category);
+    });
+    document.getElementById('sel-category-popover').addEventListener('keydown', (event) => {
+      const row = event.target.closest('[data-category]');
+      if (row && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setSelectionCategory(row.dataset.category); }
+    });
     syncSelectionUI();

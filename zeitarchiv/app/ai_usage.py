@@ -16,6 +16,7 @@ Inhalte der Fragen werden nie gespeichert.
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -29,7 +30,7 @@ SETTING_DAILY = "ai_usage_daily"
 #: Wie oft die Zähler höchstens in die Datenbank geschrieben werden.
 PERSIST_INTERVAL_SECONDS = 60.0
 CLIENT_KINDS = ("admin", "user")
-REJECT_REASONS = ("ai_disabled", "tool_disabled")
+REJECT_REASONS = ("ai_disabled", "tool_disabled", "admin_only")
 RETENTION_DAYS = 90
 WINDOW_DAYS = 7
 
@@ -142,7 +143,7 @@ class AiUsage:
         window_start = (today - timedelta(days=WINDOW_DAYS - 1)).isoformat()
         with self.lock:
             self._attach(index)
-            days, last = {k: v for k, v in self._days.items()}, self.last_used
+            days, last = copy.deepcopy(self._days), self.last_used  # tief: record() ändert die inneren Zähler
         calls: dict[str, int] = {}
         by_account = {"admin": 0, "user": 0, "unknown": 0}
         rejected: dict[str, int] = {}

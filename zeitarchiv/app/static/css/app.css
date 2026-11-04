@@ -1216,6 +1216,7 @@ table.dt th a:hover,table.dt th a.active{color:var(--accent-line);}
    (Gegenstück zu den serverseitig sortierten Tabellen mit <th><a sort=…>). */
 table.dt th.dt-sortable-col{cursor:pointer;user-select:none;}
 table.dt th.dt-sortable-col:hover{color:var(--accent-line);}
+table.dt th.dt-sortable-col:focus-visible{outline:2px solid var(--accent-line);outline-offset:-2px;}
 table.dt th.dt-sort-asc,table.dt th.dt-sort-desc{color:var(--accent-line);}
 /* Dieselbe schlanke Richtungsanzeige wie in der serverseitig sortierten
    Entitätenliste: kein geometrisches Dreieck, sondern ein normaler Pfeil in
@@ -1528,6 +1529,15 @@ tr.tbl-bold.tbl-separator-row .tbl-separator-label{font-weight:700;color:var(--i
    vorher die Schriftart übernommen hatte; kleinerer Grad und etwas mehr
    Innenabstand halten die Pille dabei auf ihrer bisherigen Höhe. */
 .badge{font-family:var(--font-display);font-weight:600;text-transform:uppercase;letter-spacing:.06em;font-size:calc(9.5px * var(--font-scale, 1));padding:3px 9px;border-radius:999px;border:1px solid var(--border);}
+/* Kategorie einer Entität (ROADMAP 1.42): Farbpunkt + Name als Pille. Die Farbe
+   kommt über --c aus der Diagrammpalette (var(--chart-N)), nie als eigener Wert;
+   Hintergrund und Rand sind Mischungen daraus und passen sich dem Farbschema an. */
+.cat-pill{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:2px 10px 2px 8px;border-radius:999px;
+  border:1px solid color-mix(in srgb,var(--c) 55%,transparent);background:color-mix(in srgb,var(--c) 14%,transparent);
+  color:var(--ink);font-size:calc(12px * var(--font-scale, 1));line-height:1.4;white-space:nowrap;vertical-align:middle;}
+.cat-pill i{flex:none;width:8px;height:8px;border-radius:50%;background:var(--c);}
+.cat-pill span{overflow:hidden;text-overflow:ellipsis;}
+.cat-none{color:var(--ink-muted);}
 .badge.counter{color:var(--accent-bar);border-color:var(--accent-bar);}
 .badge.standard{color:var(--accent-line);border-color:var(--accent-line);}
 .badge.switch{color:var(--ink-muted);}
@@ -1909,6 +1919,37 @@ button[data-tooltip]{cursor:pointer;}
 .entity-tab.is-active::after{
   content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;
   background:var(--accent-line);border-radius:2px 2px 0 0;
+}
+
+/* Kennzahlen-Leiste über den Reitern der drei Entitätsseiten
+   (_entity_facts.html). Eine Fläche mit Trennlinien statt einzelner Kacheln:
+   vier Werte in einer Zeile sollen den Verlauf darunter nicht nach unten
+   drücken. Auf schmalen Schirmen brechen die Felder um, statt zu scrollen. */
+.entity-facts{
+  display:flex;flex-wrap:wrap;margin:14px 0 0;padding:0;
+  background:var(--surface);border:1px solid var(--border);border-radius:10px;
+}
+.entity-fact{
+  flex:1 1 150px;min-width:0;padding:9px 16px;
+  border-right:1px solid var(--border);
+}
+.entity-fact:last-child{border-right:0;}
+.entity-fact dt{
+  font-size:calc(11px * var(--font-scale, 1));font-weight:600;letter-spacing:.07em;
+  text-transform:uppercase;color:var(--ink-faint);
+}
+.entity-fact dd{
+  margin:1px 0 0;font-family:var(--font-mono);font-size:calc(13.5px * var(--font-scale, 1));
+  font-weight:500;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;
+}
+.entity-fact-cat{display:block;margin-top:4px;}
+.entity-fact dd small{
+  display:block;font-size:calc(11.5px * var(--font-scale, 1));font-weight:400;color:var(--ink-faint);
+}
+@media (max-width:480px){
+  .entity-fact{flex-basis:45%;border-bottom:1px solid var(--border);}
+  .entity-fact:nth-child(2n){border-right:0;}
+  .entity-fact:nth-last-child(-n+2){border-bottom:0;}
 }
 
 /* Zur Löschung markierte, noch nicht endgültig entfernte Werte: Banner auf der
@@ -2332,7 +2373,7 @@ footer{margin-top:20px;font-family:var(--font-mono);font-size:calc(11px * var(--
 .dtile-state-strip i{position:absolute;top:0;bottom:0;}
 .dtile-state-axis{display:flex;justify-content:space-between;font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);margin-top:2px;}
 .dtile-state-days{display:flex;flex-direction:column;gap:3px;}
-.dtile-state-day{display:grid;grid-template-columns:2.4em minmax(0,1fr);align-items:center;gap:6px;font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);}
+.dtile-state-day{display:grid;grid-template-columns:2.4em minmax(0,1fr);align-items:center;gap:6px;font-size:calc(11px * var(--font-scale, 1));line-height:12px;color:var(--ink-faint);}
 .dtile-state-bar{display:flex;height:9px;border-radius:3px;overflow:hidden;background:var(--surface-alt);}
 .dtile-state-bar i{display:block;height:100%;}
 .dtile-state-donut{position:relative;height:110px;}
@@ -2342,3 +2383,177 @@ footer{margin-top:20px;font-family:var(--font-mono);font-size:calc(11px * var(--
 .dtile-state-donut-center span{font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);}
 .dtile-state-legend{display:flex;flex-wrap:wrap;gap:2px 10px;font-size:calc(11px * var(--font-scale, 1));color:var(--ink-muted);margin-top:4px;}
 .dtile-state-legend > span{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;}
+
+/* Vergleichstabelle mit Vorjahr, Karten und Reiter des Wetter- und des Energiedashboards (Reiter „Langzeit“).
+   Aus pages/wetterdashboard.css hierher gehoben, weil beide Seiten dieselben Regeln brauchen (siehe
+   test_page_css.py: geteilte Regeln gehören nach app.css). */
+/* Reiter */
+/* Die Reiterzeile selbst kommt aus app.css (.entity-tabs); hier nur, was eine Schaltfläche statt eines Links braucht. */
+button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
+/* Karten wie im Energiedashboard (.edash-card): 12 px Rundung, 16×18 Innenabstand, leichter Schatten, Titel 14 px. */
+.wt-card{padding:16px 18px;border-radius:12px;box-shadow:var(--shadow);}
+.wt-card ~ .wt-card{margin-top:16px;}
+.wt-h2{font-size:calc(14px * var(--font-scale, 1));font-weight:600;margin:0;flex:1 1 220px;}
+.wt-card-head{justify-content:space-between;}
+.wt-card-head .wt-h2{margin:0;}
+.wt-h2-jump{cursor:pointer;}
+.wt-h2-jump:hover{text-decoration:underline;}
+.wt-card-sep{border-top:1px solid var(--border);margin:18px 0 12px;}
+.wt-h3{margin:0;font-size:calc(14px * var(--font-scale, 1));font-weight:600;}
+.wt-controls-end{margin-left:auto;}
+.wt-stand{margin:0 0 10px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);}
+.wt-table td.wt-loading{text-align:left;color:var(--ink-faint);padding:18px 12px;}
+/* Steuerung über der Tabelle */
+.dd-picker-wrap > .btn.wt-btn-on{border-color:var(--accent-line);color:var(--accent-line);font-weight:600;}
+.wt-controls{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:6px;}
+/* Hinweise (.hint) stehen direkt hinter der Überschrift, damit der Info-Knopf sie findet (hint-toggle.js);
+   in der umbrechenden Kopfzeile rutschen sie per order unter die Bedienelemente. */
+.wt-controls > .hint{order:10;flex:1 1 100%;margin:2px 0 0;}
+/* Vergleichstabelle: Rahmen und Scroll-Hinweis aus .tbl-wrap (app.css), Kopf wie table.dt. */
+.wt-table-wrap{margin-top:10px;}
+.wt-table.wt-table-full{width:100%;}
+/* Damit die Tabelle auch in einem schmalen Fenster ohne Scrollen in die Karte passt: lange Zeilennamen (Ertrag je Einstrahlung) dürfen umbrechen, die Zellen sind etwas enger. */
+.wt-table-full tbody th:first-child,.wt-table-full tbody td:first-child{white-space:normal;}
+.wt-table.wt-table-full th,.wt-table.wt-table-full td{padding-left:6px;padding-right:6px;}
+.wt-table.wt-table-full td.wt-sep,.wt-table.wt-table-full thead th.wt-cur{padding-left:10px;}
+.wt-table{border-collapse:separate;border-spacing:0;width:auto;font-variant-numeric:tabular-nums;font-size:calc(13.5px * var(--font-scale, 1));}
+.wt-table th,.wt-table td{padding:5px 10px;text-align:right;border-bottom:1px solid var(--border);vertical-align:middle;white-space:nowrap;}
+.wt-table thead th{font-weight:600;font-size:calc(12.5px * var(--font-scale, 1));color:var(--ink);border-bottom:1.5px solid var(--border-strong);}
+.wt-table thead th.wt-cur{padding-left:18px;cursor:help;}
+.wt-table thead th.wt-vj{font-weight:400;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);cursor:help;}
+.wt-table thead .wt-info{margin-left:4px;font-size:calc(10px * var(--font-scale, 1));font-weight:400;color:var(--ink-faint);vertical-align:1px;}
+.wt-table thead tr.wt-subhead th{font-weight:400;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);padding-top:0;border-bottom:1.5px solid var(--border-strong);}
+.wt-table thead tr.wt-subhead th.wt-vj{color:var(--ink-faint);}
+.wt-table thead tr:first-child th{border-bottom:0;padding-bottom:1px;}
+.wt-table td.wt-sep{padding-left:18px;}
+.wt-table th:first-child,.wt-table td:first-child{min-width:96px;text-align:left;position:sticky;left:0;background:var(--surface);z-index:1;}
+.wt-table tbody tr:last-child th,.wt-table tbody tr:last-child td{border-bottom:0;}
+.wt-table tbody th{font-weight:400;color:var(--ink-muted);}
+.wt-table tbody th .wt-qual{font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);}
+.wt-table .wt-sep{border-left:1px solid var(--border);}
+.wt-table tr.wt-grp th{font-size:calc(11.5px * var(--font-scale, 1));font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--accent-line);text-align:left;padding-top:12px;border-bottom:1px solid var(--border-strong);white-space:nowrap;}
+.wt-table td .wt-v{font-weight:600;color:var(--ink);}
+.wt-table td.wt-vj .wt-v{font-weight:400;color:var(--ink-muted);}
+.wt-table td[data-tooltip-fixed]{cursor:help;}
+.wt-table tbody td,.wt-table tbody th{vertical-align:top;}
+.wt-yoy-popover .wt-yoy-toggle{margin-top:4px;border-top:1px solid var(--border);border-radius:0 0 6px 6px;}
+.wt-table td .wt-when{display:block;line-height:1.25;font-size:calc(11px * var(--font-scale, 1));font-weight:400;color:var(--ink-faint);}
+.wt-table td .wt-dl{display:block;line-height:1.25;font-family:var(--font-mono);font-size:calc(11px * var(--font-scale, 1));font-weight:400;color:var(--chart-1);}
+.wt-foot{margin:6px 0 0;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);}
+.wt-table td.wt-empty{text-align:left;color:var(--ink-muted);white-space:normal;}
+.wt-table td.wt-na .wt-v{color:var(--ink-faint);font-weight:400;}
+.wt-table td .wt-dl.wt-dl-good{color:var(--positive);}
+.wt-table td .wt-dl.wt-dl-bad{color:var(--danger);}
+
+.wt-chart{width:100%;height:300px;}
+.wt-seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+.wt-seg button{background:var(--surface);border:0;padding:5px 12px;font:inherit;font-size:calc(13px * var(--font-scale, 1));color:var(--ink-muted);cursor:pointer;}
+.wt-seg button + button{border-left:1px solid var(--border);}
+.wt-seg button[aria-pressed="true"]{background:var(--accent-line);color:var(--accent-contrast);font-weight:600;}
+/* Mitteltemperatur je Monat und Jahr: eingefärbte Zellen (Farbe per color-mix im Inline-Stil), Jahres-Ø rechts abgesetzt */
+.wt-tm{border-collapse:separate;border-spacing:2px;width:100%;min-width:600px;font-size:calc(12px * var(--font-scale, 1));font-variant-numeric:tabular-nums;table-layout:fixed;}
+.wt-tm th{font-weight:400;color:var(--ink-muted);text-align:center;padding:2px 0;}
+.wt-tm tbody th{text-align:left;font-weight:600;color:var(--ink);padding:0 4px;width:52px;}
+.wt-tm td{height:42px;text-align:center;border-radius:4px;color:var(--ink);line-height:1.25;}
+.wt-tm td .wt-tm-v{display:block;font-size:calc(13px * var(--font-scale, 1));}
+.wt-tm td .wt-tm-d{display:block;font-size:calc(11px * var(--font-scale, 1));color:var(--ink-muted);}
+.wt-tm td.wt-tm-year .wt-tm-v{font-weight:600;}
+.wt-tm td[data-tooltip-fixed]{cursor:help;}
+.wt-tm td.wt-tm-na{color:var(--ink-faint);}
+.wt-tm td.wt-tm-plain{color:var(--ink-muted);}
+.wt-tm .wt-tm-year{width:66px;font-weight:600;}
+.wt-tm th.wt-tm-year{color:var(--ink);}
+.wt-tm tr.wt-tm-avg th,.wt-tm tr.wt-tm-avg td{color:var(--ink-muted);height:auto;padding-top:6px;border-radius:0;border-top:1px solid var(--border-strong);}
+.wt-tm-legend{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);}
+.wt-tm-scale{display:inline-block;width:160px;height:10px;border-radius:2px;}
+@media (max-width:640px){
+  .wt-chart{height:260px;}
+  /* Vier Kennzahl-Knöpfe passen nicht nebeneinander: die Gruppe scrollt waagerecht, statt einen Knopf abzuschneiden. */
+  .wt-seg{max-width:100%;overflow-x:auto;}
+  .wt-seg button{white-space:nowrap;}
+}
+/* Matrix „Jahre × Monate“ im Energiedashboard: Feld als Link auf den Monat, Dreieck bei Messlücken oder Zählersprüngen. */
+.wt-tm td.wt-tm-flag{position:relative;}
+.wt-tm td.wt-tm-flag::after{content:"";position:absolute;top:0;right:0;border-style:solid;border-width:0 10px 10px 0;border-color:transparent var(--chart-7) transparent transparent;}
+.wt-tm a.wt-tm-link{display:block;color:inherit;text-decoration:none;border-radius:4px;}
+.wt-tm a.wt-tm-link:hover,.wt-tm a.wt-tm-link:focus-visible{outline:2px solid var(--accent-line);outline-offset:-2px;}
+/* „Was hat sich verändert?“ im Energiedashboard: Balken nach links (weniger) und rechts (mehr) von der Mitte. */
+.wt-chg{display:flex;flex-direction:column;gap:7px;margin-top:10px;}
+.wt-chg-row{display:grid;grid-template-columns:minmax(110px,190px) minmax(0,1fr) minmax(130px,190px);gap:10px;align-items:center;font-size:calc(13.5px * var(--font-scale, 1));}
+.wt-chg-name{min-width:0;overflow-wrap:anywhere;}
+.wt-chg-name a{color:inherit;text-decoration:none;}
+.wt-chg-name a:hover,.wt-chg-name a:focus-visible{color:var(--accent-line);text-decoration:underline;}
+.wt-chg-bar{position:relative;height:12px;background:var(--surface-alt);border-radius:3px;}
+.wt-chg-bar::before{content:"";position:absolute;left:50%;top:-2px;bottom:-2px;border-left:1px solid var(--border-strong);}
+.wt-chg-bar i{position:absolute;top:0;bottom:0;border-radius:3px;}
+.wt-chg-val{font-family:var(--font-mono);font-size:calc(12px * var(--font-scale, 1));text-align:right;white-space:nowrap;}
+@media (max-width:640px){
+  .wt-chg-row{grid-template-columns:minmax(0,1fr);gap:3px;}
+  .wt-chg-val{text-align:left;}
+}
+
+/* Kenntage je Jahr (Energiedashboard, Reiter Langzeit): Paare von Feldern, darin ein Balken je Jahr; Jahreskalender im Dialog. */
+.wt-kt{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:10px;}
+.wt-kt-group{grid-column:1/-1;margin:6px 0 -4px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);letter-spacing:.02em;}
+.wt-kt-group:first-child{margin-top:0;}
+.wt-kt-col{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px 10px;align-content:start;min-width:0;padding:12px 14px;background:var(--surface-alt);border:1px solid var(--border);border-radius:10px;}
+.wt-kt-title{grid-column:1/-1;margin:0 0 2px;font-size:calc(11.5px * var(--font-scale, 1));font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--accent-line);}
+.wt-kt-rule{grid-column:1/-1;margin:-4px 0 2px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);}
+.wt-kt-row{display:grid;grid-column:1/-1;grid-template-columns:subgrid;gap:10px;align-items:center;margin:0 -6px;padding:1px 6px;border:0;border-radius:6px;background:none;color:inherit;font:inherit;font-size:calc(13.5px * var(--font-scale, 1));font-variant-numeric:tabular-nums;text-align:left;cursor:pointer;}
+.wt-kt-row:hover,.wt-kt-row:focus-visible{background:var(--surface);}
+.wt-kt-year{color:var(--ink-muted);min-width:3.2em;}
+.wt-kt-bar{height:10px;background:var(--surface);border-radius:3px;overflow:hidden;}
+.wt-kt-bar i{display:block;height:100%;background:var(--chart-1);border-radius:3px;}
+.wt-kt-val{text-align:right;white-space:nowrap;color:var(--ink-muted);}
+.wt-kt-val b{color:var(--ink);font-weight:600;}
+@media (max-width:760px){.wt-kt{grid-template-columns:minmax(0,1fr);}}
+.wt-yearbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:16px 0;}
+.wt-yearbar-label{font-size:calc(13px * var(--font-scale, 1));font-weight:600;color:var(--ink);}
+.wt-yearbar-note{flex:1 1 220px;min-width:0;font-size:calc(12.5px * var(--font-scale, 1));color:var(--ink-muted);}
+.wt-yearbar .wt-seg{margin-left:auto;}
+.wt-ktcal-dialog{max-width:880px;}
+.wt-ktcal{border-collapse:separate;border-spacing:3px;font-size:calc(11.5px * var(--font-scale, 1));color:var(--ink-muted);}
+.wt-ktcal th{font-weight:400;text-align:right;padding-right:6px;white-space:nowrap;}
+.wt-ktcal thead th{text-align:center;padding:0;color:var(--ink-faint);font-size:calc(10.5px * var(--font-scale, 1));}
+.wt-ktcal td{width:18px;height:18px;padding:0;border-radius:4px;background:var(--surface-alt);}
+.wt-ktcal td.hit{background:var(--chart-1);}
+.wt-ktcal td.hit:hover,.wt-ktcal td.hit:focus-within{outline:2px solid var(--ink);}
+.wt-ktcal td.hit a{display:block;width:100%;height:100%;}
+.wt-ktcal td.off{background:none;border:1px dashed var(--border);}
+.wt-ktcal td.none{background:none;}
+.wt-ktcal td.gap{background:repeating-linear-gradient(45deg,var(--surface-alt),var(--surface-alt) 3px,var(--surface) 3px,var(--surface) 6px);}
+.wt-ktcal-legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);}
+.wt-ktcal-legend i{display:inline-block;width:12px;height:12px;margin-right:5px;border-radius:3px;vertical-align:-2px;}
+.wt-ktcal-hit{background:var(--chart-1);}
+.wt-ktcal-none{background:var(--surface-alt);}
+.wt-ktcal-gap{background:repeating-linear-gradient(45deg,var(--surface-alt),var(--surface-alt) 3px,var(--surface) 3px,var(--surface) 6px);}
+.wt-ktcal-off{border:1px dashed var(--border-strong);}
+
+/* Kacheln (Wetterdashboard, Rekorde im Energiedashboard): Kopfbalken in der Rollenfarbe, Beschriftung in Großbuchstaben, Wert in Monospace. */
+.wt-kpis{display:grid;grid-template-columns:repeat(var(--wt-cols, 3),minmax(0,1fr));gap:10px;margin:8px 0 14px;}
+.wt-record-link{font-size:calc(12px * var(--font-scale, 1));color:var(--accent-line);margin-top:2px;}
+/* Kacheln: Aufbau wie die Kennzahl-Kacheln des Energiedashboards (Kopfbalken in der Rollenfarbe,
+   Beschriftung in Großbuchstaben, Wert in Monospace); ganze Kachel verlinkt auf die Entität. */
+.wt-tiles{display:grid;grid-template-columns:repeat(var(--wt-cols, 4),minmax(0,1fr));gap:10px;}
+.wt-tile{--wt-accent:var(--chart-8);display:flex;flex-direction:column;gap:2px;min-width:0;padding:10px 12px;
+  text-decoration:none;color:inherit;border:1px solid var(--border);border-top:3px solid var(--wt-accent);
+  border-radius:8px;background:var(--surface-alt);}
+.wt-tile:hover{border-color:var(--wt-accent);}
+.wt-tile[data-role="temperature"]{--wt-accent:var(--chart-2);}
+.wt-tile[data-role="precip_mm"],.wt-tile[data-role="precip_dur"]{--wt-accent:var(--chart-3);}
+.wt-tile[data-role="humidity"]{--wt-accent:var(--chart-6);}
+.wt-tile[data-role="pressure"]{--wt-accent:var(--chart-4);}
+.wt-tile[data-role="wind"],.wt-tile[data-role="gust"]{--wt-accent:var(--chart-8);}
+.wt-tile[data-role="radiation"]{--wt-accent:var(--chart-7);}
+.wt-tiles[style*="--wt-cols:1"] .wt-tile{max-width:280px;}
+.wt-tile.wt-tile-wide{grid-column:1 / -1;}
+.wt-tile.is-loading{border-top-color:var(--border-strong);color:var(--ink-faint);animation:wt-pulse 1.2s ease-in-out infinite alternate;}
+@keyframes wt-pulse{from{opacity:.55;}to{opacity:1;}}
+@media (prefers-reduced-motion:reduce){.wt-tile.is-loading{animation:none;}}
+.wt-tile-label{font-size:calc(11px * var(--font-scale, 1));color:var(--ink-muted);text-transform:uppercase;letter-spacing:.07em;font-weight:600;font-family:var(--font-mono);}
+.wt-tile-value{font-family:var(--font-mono);font-size:calc(22px * var(--font-scale, 1));font-weight:600;font-variant-numeric:tabular-nums;line-height:1.25;}
+.wt-tile-value small{font-size:calc(13px * var(--font-scale, 1));font-weight:500;color:var(--ink-muted);margin-left:3px;}
+.wt-tile-sub{font-family:var(--font-mono);font-size:calc(11.5px * var(--font-scale, 1));color:var(--ink-faint);font-variant-numeric:tabular-nums;}
+@media (max-width:640px){
+  .wt-kpis{--wt-cols:2 !important;}
+}

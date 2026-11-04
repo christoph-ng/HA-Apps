@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from . import ai_settings, ai_tools, ai_usage
 from .i18n import active_language
 from .logging_setup import log_rate_limited
-from .route_support import storage_locked
+from .route_support import STORAGE_LOCKED_TIMEOUT_SECONDS
 from .storage.coordinator import StorageCoordinator
 from .storage.index import Index
 
@@ -164,7 +164,10 @@ def create_ai_router(deps: AiDependencies) -> APIRouter:
     def run(
         request: Request, authorization: str | None, integration_version: str | None,
         tool: str, entity_count: int, call: Callable[[ai_tools.AiToolContext], dict],
+        entity_ids: Sequence[str] = (),
     ) -> JSONResponse:
+        # Erst Token, Schalter und Limiter, dann die Speichersperre: Wer sich nicht ausweist oder abgewiesen wird,
+        # darf weder einen Worker-Thread bis zu 30 s an eine Sperre binden noch eine Wartung ausbremsen.
         authenticate(request, authorization, integration_version)
         access = ai_settings.load(deps.index)
         if not access.enabled:
@@ -173,6 +176,14 @@ def create_ai_router(deps: AiDependencies) -> APIRouter:
         if tool in access.tools_disabled:
             reject(tool, "tool_disabled")
             return error(403, "tool_disabled", "The owner switched this tool off; use another tool or tell the user.")
+        if request.headers.get("x-zeitarchiv-ai-user") == "user" and tool in ai_tools.ENTITY_TOOLS:
+            # Konten ohne Administratorrechte: wie bei der Karte nichts für einzelne Entitäten. Die Integration
+            # bietet diese Werkzeuge ihnen gar nicht erst an; das hier fängt ältere Integrationen ab.
+            reject(tool, "admin_only")
+            return error(
+                403, "admin_only",
+                "This tool reads individual entities and is limited to Home Assistant administrators.",
+            )
         if (reason := limiter.acquire()) is not None:
             return error(
                 429, reason,
@@ -181,7 +192,11 @@ def create_ai_router(deps: AiDependencies) -> APIRouter:
             )
         started = time.monotonic()
         try:
-            status, body = 200, call(context(access))
+            if entity_ids:
+                with deps.coordinator.entities(list(entity_ids), timeout=STORAGE_LOCKED_TIMEOUT_SECONDS):
+                    status, body = 200, call(context(access))
+            else:
+                status, body = 200, call(context(access))
         except ai_tools.AiToolError as exc:
             status, body = exc.status, {"error": exc.code, "message": exc.message}
         finally:
@@ -226,17 +241,16 @@ def create_ai_router(deps: AiDependencies) -> APIRouter:
                    lambda ctx: ai_tools.search_entities(ctx, body.query, body.type, body.unit, body.limit))
 
     @router.post("/api/ai/get_summary")
-    @storage_locked(deps.coordinator, lambda args: args["body"].entity_ids)
     def get_summary(
         body: SummaryRequest, request: Request,
         authorization: str | None = Header(default=None),
         x_zeitarchiv_integration_version: str | None = Header(default=None),
     ):
         return run(request, authorization, x_zeitarchiv_integration_version, "get_summary", len(body.entity_ids),
-                   lambda ctx: ai_tools.get_summary(ctx, body.entity_ids, body.period, body.date, body.rolling))
+                   lambda ctx: ai_tools.get_summary(ctx, body.entity_ids, body.period, body.date, body.rolling),
+                   entity_ids=body.entity_ids)
 
     @router.post("/api/ai/get_series")
-    @storage_locked(deps.coordinator, lambda args: args["body"].entity_ids)
     def get_series(
         body: SeriesRequest, request: Request,
         authorization: str | None = Header(default=None),
@@ -244,10 +258,10 @@ def create_ai_router(deps: AiDependencies) -> APIRouter:
     ):
         return run(request, authorization, x_zeitarchiv_integration_version, "get_series", len(body.entity_ids),
                    lambda ctx: ai_tools.get_series(
-                       ctx, body.entity_ids, body.period, body.date, body.rolling, body.metric))
+                       ctx, body.entity_ids, body.period, body.date, body.rolling, body.metric),
+                   entity_ids=body.entity_ids)
 
     @router.post("/api/ai/compare_periods")
-    @storage_locked(deps.coordinator, lambda args: args["body"].entity_ids)
     def compare_periods(
         body: CompareRequest, request: Request,
         authorization: str | None = Header(default=None),
@@ -255,7 +269,8 @@ def create_ai_router(deps: AiDependencies) -> APIRouter:
     ):
         return run(request, authorization, x_zeitarchiv_integration_version, "compare_periods", len(body.entity_ids),
                    lambda ctx: ai_tools.compare_periods(
-                       ctx, body.entity_ids, body.period, body.date, body.compare_to, body.same_elapsed))
+                       ctx, body.entity_ids, body.period, body.date, body.compare_to, body.same_elapsed),
+                   entity_ids=body.entity_ids)
 
     @router.post("/api/ai/get_energy_overview")
     def get_energy_overview(

@@ -1,5 +1,761 @@
 # Changelog
 
+## 1.20.0 - 2026-11-03
+
+### Neu
+
+- **Wetterdashboard**: Eine neue Seite für Wetterwerte, aufgebaut wie das
+  Energiedashboard.
+  - Außentemperatur, Niederschlag, Luftfeuchte, Luftdruck, Wind, Böe und
+    Strahlung werden je einer Entität zugeordnet
+  - Kacheln mit dem aktuellen Wert; Tabelle mit Heute, Gestern, Monat und Jahr
+    gegen den Vorjahreszeitraum (Stichtag über die Leiste der Dashboards wählbar)
+  - Niederschlag mit Zähler oder mit einem Regensensor ein/aus
+  - Monatsvergleich der Jahre als Linien
+  - Reiter Niederschlag (Laufsumme, Regentage, Trockenphasen) und Langzeit
+    (Kenntage, Rekorde, Jahresmatrix)
+  - Mit zugeordneten Heizzählern: Reiter Heizen mit Gradtagzahl und kWh je Gradtag
+  - Einschalten über die Dashboard-Übersicht; in Backups und selektivem Restore
+    enthalten, als Startseite wählbar, Demo-Daten inklusive
+
+- **Energiedashboard**
+  - **Reiter Langzeit**: Ein neuer Reiter vergleicht Zeiträume
+    über die Jahre, aufgebaut wie der Langzeit-Teil des Wetterdashboards.
+    - Vergleichstabelle für Dieser Monat, Letzter Monat und Dieses Jahr gegen den
+      Vorjahreszeitraum, mit Stichtag; dazu Eigenverbrauch, Autarkie, Speicher und
+      mit eingetragener Anlagenleistung (kWp je Erzeuger) der Ertrag je kWp und je
+      Einstrahlung
+    - Monatsvergleich der Jahre als Linien mit Mittel und Spanne, Matrix
+      **Jahre × Monate** mit Abweichung vom Mittel
+    - „Was hat sich verändert?“ zeigt die Verbraucher mit der größten Änderung
+    - Rekorde seit Archivbeginn
+    - **Kenntage je Jahr** in drei Paaren (fast autark und Überschusstage, Sonnentage
+      und trübe Tage, Speicher stark und kaum genutzt), wahlweise für ganze Jahre
+      oder nur bis heute; ein Klick zeigt die Tage im Jahreskalender
+    - Die Schwellen der Kenntage stehen im Setup unter „Kenntage“
+    - „Letzte 5“, „Letzte 10“ oder „Alle“ begrenzt die Jahre für Monatsvergleich,
+      Matrix und Kenntage
+    - Im Setup unter „Langzeit“ lassen sich die Blöcke der Tabelle und jede Karte
+      ein- und ausschalten
+  - **Datumsauswahl**: Ein Klick auf das Datum im Energiefluss öffnet den
+    Kalender. Je nach Zeitraum springt er zu einem Tag, Monat oder Jahr.
+
+- **Entitäten**
+  - **Kategorien**: Entitäten lassen sich zusätzlich zu den Sternen
+    nach Thema ordnen, zum Beispiel Wärmepumpe oder Solar.
+    - Neuer Reiter **Kategorien**: anlegen, umbenennen, einfärben, per Ziehen
+      sortieren (mit Vorschlägen beim ersten Öffnen)
+    - Entitätenliste: Spalte **Kategorie**, Sortierung und Filter; zugeordnet
+      wird im Auswahlmodus oder in der Konfiguration einer Entität
+    - Der Auswahl-Assistent schlägt eine passende Kategorie vor
+    - Filter auch in „Auswahl & Verlauf“ und im Export
+    - Der selektive Restore stellt Kategorien wieder her
+  - **Kennzahlen im Kopf**: Über den Reitern jeder Entität stehen jetzt
+    die Kennzahlen aus der Entitätenliste (Typ, Einheit, erster und letzter Wert,
+    Datensätze, Größe, je nach Typ Wertebereich oder Zählerstand). Die Kacheln auf
+    dem Reiter Konfiguration entfallen.
+
+- **CSV-Export, Form der Datei**: Der Assistent hat einen letzten Schritt
+  „Form und Download“ mit Vorschau der ersten Zeilen. Dort lässt sich bei
+  mehreren Entitäten eine **gemeinsame Datei** wählen, **nebeneinander**
+  (eine Spalte je Entität, eine Zeile je Zeitpunkt, ab der Auflösung Minute,
+  für höchstens 50 Entitäten) oder **untereinander** (eine Zeile je Wert mit
+  Entität und Einheit). Datum und Uhrzeit lassen sich in getrennte Spalten
+  schreiben, die Unix-Zeit abwählen. Das Zahlen- und Dateiformat gibt es als
+  „Standard“ (Komma, Punkt), „Deutsch / Excel“ (Semikolon, Dezimalkomma,
+  UTF-8-Kennung für Umlaute in Excel) oder frei mit Trennzeichen und
+  Dezimalzeichen. Ohne Änderung kommt dieselbe Datei wie bisher.
+
+- **Tipps**: Sieben neue Tipps im Meldungs-Center, unter anderem zu Wetterdashboard,
+  Kategorien, Langzeit-Reiter, Datenqualität und KI-Zugriff. Die Tipps zu Backup und
+  CSV-Export nennen das externe Backup-Ziel und die gemeinsame Datei.
+
+### Geändert
+
+- **CSV**
+  - **Import, Vorschau**: Hat die Datei keine Uhrzeit, steht unter „Zeitstempel gelesen als“
+    ein Hinweis, dass 00:00 Uhr gilt.
+  - **Export, Assistent**: Der Assistent ist übersichtlicher.
+    - Die Schrittleiste sitzt als Kopf einer Karte und zeigt die bisherige Wahl
+    - Die Leiste mit „Weiter“ bleibt am unteren Rand sichtbar
+    - Gewählte Zeilen sind eingefärbt, der Download je Zeile heißt „↓ CSV“
+    - Zeitraum mit Hinweis auf die vorhandenen Daten; mit zwei Klicks lässt sich
+      ein Bereich aus mehreren Monaten oder Jahren wählen
+    - Die Auflösungen stehen nebeneinander mit einem Balken für die Dateigröße
+
+- **Energiedashboard**
+  - **Auffälligkeiten**: Die Prüfung lässt sich besser anpassen.
+    - Neue Schwellen 200 % und 300 %, ein Hinweis in den Einstellungen nennt, wann „Aus“ sinnvoll ist
+    - Bei „Aus“ entfallen Zeile, Liste und Vergleichshinweis im Status-Dialog
+  - **Vergleich mit der Vorperiode**: Beim Zurückblättern wird
+    die Vorperiode nur noch mit den Energiemengen gerechnet, die der Vergleich
+    braucht. Die Seite lädt dadurch schneller; die Zahlen bleiben gleich.
+
+- **Entität konfigurieren, neu gegliedert**: Die Konfigurationsseite ist
+  übersichtlicher.
+  - Abschnitte Allgemein, Erfassung, Aufbewahrung, Darstellung und Prüfung mit
+    Sprungzeile
+  - Jedes Feld mit Kurzzeile, der ausführliche Text steht hinter dem Info-Knopf
+  - Das Abzeichen „angepasst“ zeigt Abweichungen vom Standard und setzt nach
+    einer Rückfrage zurück
+  - Gesperrte Felder zeigen ihren festen Wert
+
+### Behoben
+
+- **Indexprüfung meldete Fehlalarme**: Bei Entitäten mit eingestellter Auflösung
+  (z. B. 15 Min.) zeigte die Prüfung immer wieder „Abweichungen“, obwohl Index
+  und Daten dieselbe Zeilenzahl hatten, und die Meldung „Index-Abweichungen
+  automatisch behoben“ kam erneut. Das Ende des Zeitfensters zählt jetzt als
+  übereinstimmend.
+
+- **Oberfläche**
+  - **Entitätenliste merkt sich die Seite**: Wer auf Seite 2 eine Entität
+    öffnete und zur Liste zurückkehrte, landete wieder auf Seite 1. Die Liste
+    öffnet jetzt auf der zuletzt gezeigten Seite.
+  - **Fehler und Wartezeiten**: Schlägt eine Anfrage fehl, zeigen
+    Restore-Assistent, Entitäts- und Chart-Seiten, Export, Statistik und
+    Entitäten-Migration jetzt eine Meldung (Chart-Seiten mit „Erneut versuchen“)
+    statt leerer Flächen oder eines falschen „Fertig“. Speichern in den Editoren
+    und Verdichten lassen sich nicht mehr doppelt auslösen; das Verdichten zeigt
+    „Wird verdichtet …“. Langsame Antworten überschreiben keine neueren Anzeigen
+    mehr, das gilt für Energiedashboard und Kacheln. Fortschrittsabfragen beim
+    ZIP-Import überstehen kurze Aussetzer.
+  - **Bedienung per Tastatur**: Dropzones im Import öffnen mit Enter oder
+    Leertaste, Spaltenköpfe sortierbarer Tabellen sind fokussierbar und melden
+    ihre Sortierung, Dashboard-Abschnitte melden ihren Zustand, und Hinweise
+    erscheinen auch beim Fokussieren.
+  - **Texte**: Fehlende Übersetzungen im Report, im Home-Assistant-Import, in den
+    Dashboard-Kacheln und in den Einstellungen ergänzt; die Warnfarbe im
+    Energiedashboard folgt dem Theme.
+
+- **Aufnahme und Archiv**
+  - **Monatsdateien absturzsicher**: Ein Stromausfall oder Absturz mitten im
+    Schreiben konnte die Datei des laufenden Monats oder einen archivierten Monat
+    beschädigen; ein beschädigtes Archiv stoppte danach die Aufnahme aller
+    Entitäten. Die Dateien werden jetzt atomar ersetzt, und ein nicht
+    archivierbarer Vormonat hält die Aufnahme nicht mehr auf.
+  - **Export, Importliste und Statistik hielten die Aufnahme an**: Nach einem
+    CSV-Export blieben spätere Backups und Wartungen hängen, und die
+    Importseite oder die Statistik stoppten während eines langen Imports die
+    Aufnahme aus Home Assistant. Das Löschen von Reports und Backups antwortet
+    bei laufendem Import nach wenigen Sekunden mit „ausgelastet“ statt zu warten.
+  - **Eingestellte Auflösung, lange Monate**: Bei Messwerten mit Auflösung (z. B.
+    30 s) las die Aufnahme bei jedem Wert die ganze Monatsdatei; am Monatsende
+    dauerte das gut 50 ms je Wert und bremste die Aufnahme. Jetzt wird nur das
+    Dateiende gelesen (unter 1 ms). Ein nachträglich eingefügter oder verspäteter
+    Wert verschiebt dabei nicht mehr das Mittel des laufenden Zeitfensters,
+    sondern bekommt sein eigenes Fenster.
+  - **Typwechsel einer Entität**: Ändert Home Assistant die Art einer Entität
+    (zum Beispiel Messwert zu Zähler), hielt der Neuaufbau der Auswertungen die
+    Aufnahme aller anderen Entitäten an. Er sperrt jetzt nur noch diese Entität.
+  - **Seiten bleiben bedienbar**: Einstellungen speichern, Meldungen stumm
+    schalten, Kacheln tauschen, Backup-Zeitplan und Backup-Import rechnen nicht
+    mehr im Event-Loop. Bei vielen Archivdateien stand dort sonst der ganze Server
+    still.
+
+- **Sicherheit und Zugriff**
+  - **Diagramm-Tooltips**: Namen und Einheiten von Entitäten werden
+    in den Tooltips des Energiedashboards, des Chart-Editors und der
+    Entitätsseite als Text angezeigt, nie als Markup.
+  - **Ungültiger API-Token**: Ein Token mit Sonderzeichen führte zu Fehler 500
+    statt 401. Der Token wird beim Schreiben jetzt vor dem Inhalt geprüft.
+  - **Uploads und Zugangsdaten**: Zu große Dateien werden sofort abgelehnt, statt
+    erst den Speicherplatz zu füllen. Der VictoriaMetrics-Import folgt keiner
+    Weiterleitung mehr und sendet die Zugangsdaten nur an die eingegebene Adresse.
+    „Alle Backups löschen“ lässt Backups stehen, die noch nicht auf das externe
+    Ziel übertragen sind.
+  - **KI-Zugriff, Freigabe und Konten**: Die Freigabe der Entitäten gilt jetzt in
+    jedem Werkzeug. Die Energieübersicht zeigt nicht freigegebene Verbraucher und
+    Erzeuger nur noch als „Other (not shared)“ (die Summen bleiben vollständig),
+    und bei eingeschränkter Auswahl werden Meldungen weggelassen, die Entitäten
+    nennen. Benutzerkonten ohne Administratorrechte dürfen über die KI keine
+    einzelnen Entitäten mehr abfragen, wie bei der Karte; Energieübersicht und
+    Meldungen bleiben für sie erreichbar. Abgelehnte Aufrufe zählt Einstellungen →
+    KI-Zugriff.
+
+- **Energiedashboard**
+  - **Kosten bei Preisänderung im Zeitraum**: Änderte sich ein
+    Preis (zum Beispiel ein Tarif-Helfer) mitten im Monat oder Jahr, galten alle
+    Stunden vor der ersten Änderung als „ohne Preis“. Kosten, Ø-Preis, vermiedene
+    Kosten und die Kosten je Verbraucher fielen zu niedrig aus. Es gilt jetzt der
+    Preis, der am Anfang des Zeitraums schon galt. Zurückliegende Zeiträume
+    werden dadurch anders angezeigt als bisher.
+  - **Langzeit**: Verbraucher erscheinen mit dem Namen aus Home
+    Assistant statt mit der Entitäts-ID.
+
+- **Wetterdashboard, Kenntage und Regentage in anderen Einheiten**: Frost-,
+  Eis-, Sommer- und heiße Tage werden auch bei einem Sensor in °F oder K
+  richtig gezählt (vorher fast jeder Tag ein Sommertag), Regentage auch bei
+  einem Niederschlagszähler in Zoll.
+
+- **Auswertungen**
+  - **Tiefst- und Höchstwerte in den Auswertungen**: Bei Messwerten mit
+    eingestellter Auflösung ging der echte Tiefst- und Höchstwert verloren, weil
+    der Monatsabschluss nur aus den Mittelwerten der Zeitfenster rechnete (ein
+    kurzer Frost war im Stundenmittel nicht mehr zu sehen). Monate, die ab jetzt
+    abgeschlossen oder neu berechnet werden, behalten die echten Extremwerte;
+    bestehende Auswertungen bleiben unverändert.
+  - **Vormonat selten sendender Entitäten**: Entitäten, die seit dem
+    Monatswechsel nichts mehr gesendet haben, fehlten in allen Auswertungen für
+    den Vormonat. Der Vormonat wird jetzt stündlich archiviert.
+  - **Zeitzone und Zahlenformat**: Jahres-, Monats- und Tagesgrenzen in Zustands-
+    Charts, Wetter- und Langzeit-Seiten, Chart-Editor und Kacheln folgen der
+    Zeitzone des Servers statt der des Browsers (bei abweichender Zone begann ein
+    Jahr eine Stunde zu früh). Tabellen sortieren Zahlen im eingestellten
+    Zahlenformat, auch auf Englisch.
+  - **Zahlen an Zeitgrenzen**: Ein Messwert genau auf der Grenze zweier Zeiträume
+    zählt nur noch zum späteren. Tageswerte der Home-Assistant-Statistik landen
+    an Tagen der Zeitumstellung am richtigen Tag.
+  - **Min/Max im laufenden Monat**: Tiefst- und Höchstwerte des laufenden Monats
+    (zum Beispiel für Frosttage) stammen jetzt aus den echten Extremwerten statt
+    aus den Mittelwerten der Fenster, wie es bei abgeschlossenen Monaten schon
+    gilt.
+    - Gilt für neue Daten; bestehende Rollups werden nicht neu aufgebaut
+
+- **CSV**
+  - **Import, Dateien aus Excel**: Eine CSV im „ANSI“-Format (Windows-1252,
+    ä/ö/ü als Einzelzeichen) oder als „Unicode-Text“ (UTF-16) ließ den Upload mit
+    Fehler 500 scheitern, und danach war die ganze Importseite nicht mehr
+    erreichbar. Solche Dateien werden jetzt beim Hochladen umgewandelt; eine
+    Datei, die sich gar nicht lesen lässt, wird mit einem Hinweis entfernt.
+  - **Import, Umstellung und Duplikate**: Die doppelte Stunde beim Wechsel auf
+    Winterzeit bekommt jetzt eigene Zeitstempel (vorher fiel sie auf dieselbe
+    Zeit), und überlappende Dateien schreiben dieselben Punkte nicht mehr doppelt
+    ins Archiv (sie zählen als Duplikate). Upload und Löschen der Datei werden
+    abgelehnt, solange ein Import oder eine Vorschau läuft.
+  - **Export, Formeln**: Texte aus Home Assistant, die mit =, +, - oder @
+    beginnen, bekommen ein Hochkomma davor, damit Excel sie nicht als Formel
+    ausführt.
+
+- **Selektiver Restore, Abbruch**: Scheitert ein Wiederherstellen von Entitäten
+  nach dem Schreiben der Datenbank, bleiben Dateien und Datenbank auf dem alten
+  Stand. Die Symcon-Namen werden erst als letzter Schritt ersetzt.
+
+- **Importberichte der VictoriaMetrics-Importe** erscheinen in der Liste und
+  lassen sich öffnen und löschen (vorher unsichtbar).
+
+- **Vergleichstabellen**: Beim Speichern gelten dieselben Grenzen wie bei der
+  Abfrage (höchstens 25 verschiedene Entitäten, 100 Spalten); vorher ließ sich
+  eine Tabelle speichern, die danach nicht mehr geladen werden konnte. Die
+  Karte antwortet bei zu großen Tabellen mit einer Begründung statt mit
+  Fehler 500.
+
+- **Robustere Eingaben und Beenden**: Eine ungültige Entitäts-ID oder ein
+  kaputter Zahlenwert in der Tabellenansicht ergibt jetzt eine Fehlermeldung
+  statt eines Serverfehlers. Beim Beenden gilt der Speicher nur dann als sauber
+  beendet, wenn alle Hintergrundaufgaben wirklich gestoppt sind; sonst wird beim
+  nächsten Start geprüft.
+
+- **Container**: Das Basis-Image ist auf einen festen Stand gepinnt.
+
+---
+
+### English
+
+#### New
+
+- **Weather dashboard**: A new page for weather values, built like the energy
+  dashboard.
+  - Outdoor temperature, precipitation, humidity, pressure, wind, gust and
+    radiation are each assigned to an entity
+  - Tiles with the current value; table with Today, Yesterday, month and year
+    against the previous year (reference date selectable via the dashboards bar)
+  - Precipitation with a counter or with an on/off rain sensor
+  - Monthly comparison of the years as lines
+  - Precipitation tab (running total, rain days, dry spells) and Long-term tab
+    (characteristic days, records, year matrix)
+  - With assigned heating counters: Heating tab with degree days and kWh per
+    degree day
+  - Switch on via the dashboards overview; included in backups and the
+    selective restore, selectable as start page, demo data included
+
+- **Energy dashboard**
+  - **Long-term tab**: A new tab compares periods across the
+    years, built like the long-term part of the weather dashboard.
+    - Comparison table for This month, Last month and This year against the
+      previous year, with a reference date; plus self-consumption,
+      self-sufficiency, battery and, with the system size (kWp per generator)
+      entered, the yield per kWp and per irradiation
+    - Monthly comparison of the years as lines with average and range, matrix
+      **Years × months** with the deviation from the average
+    - "What has changed?" shows the consumers with the biggest change
+    - Records since the archive began
+    - **Key days per year** in three pairs (almost self-sufficient and surplus
+      days, sunny and dull days, battery heavily and barely used), for full years
+      or only up to today; a click shows the days in the year calendar
+    - The key day thresholds are in the setup under "Key days"
+    - "Last 5", "Last 10" or "All" limits the years for the monthly comparison,
+      matrix and key days
+    - In the setup under "Long term" the table blocks and every card can be
+      switched on and off
+  - **Date picker**: Clicking the date in the energy flow opens the
+    calendar. Depending on the period it jumps to a day, month or year.
+
+- **Entities**
+  - **Categories**: In addition to the stars, entities can be grouped
+    by topic, for example heat pump or solar.
+    - New **Categories** tab: create, rename, color, reorder by dragging (with
+      suggestions on first open)
+    - Entity list: **Category** column, sorting and filter; assign in selection
+      mode or in an entity's configuration
+    - The selection assistant suggests a fitting category
+    - Filter also in "Selection & history" and in the export
+    - The selective restore brings categories back
+  - **Key facts in the header**: Above the tabs of every entity you now
+    see the key facts from the entity list (type, unit, first and last value,
+    records, size, depending on the type value range or counter reading). The
+    tiles on the Configuration tab are gone.
+
+- **CSV export, file format**: The wizard has a final step "Format and
+  download" with a preview of the first rows. With several entities you can
+  choose a **combined file**, **side by side** (one column per entity, one row
+  per point in time, from the minute resolution, for at most 50 entities) or
+  **one below the other** (one row per value with entity and unit). Date and
+  time can be written in separate columns, and the Unix time can be left out.
+  The number and file format comes as "Standard" (comma, point), "German /
+  Excel" (semicolon, decimal comma, UTF-8 byte order mark for umlauts in
+  Excel) or custom with separator and decimal separator. Without changes you
+  get the same file as before.
+
+- **Tips**: Seven new tips in the message center, including the weather dashboard,
+  categories, the long-term tab, data quality and AI access. The backup and CSV export
+  tips now mention the external backup target and the shared file.
+
+#### Changed
+
+- **CSV**
+  - **Import, preview**: If the file has no time of day, a note under "Timestamp read as"
+    says that 00:00 is used.
+  - **Export, wizard**: The wizard is clearer.
+    - The step bar is the header of a card and shows the choices made so far
+    - The bar with "Next" stays visible at the bottom
+    - Selected rows are highlighted, the per-row download is now "↓ CSV"
+    - The period shows a note on the available data; two clicks select a range
+      of several months or years
+    - The resolutions sit side by side with a bar for the file size
+
+- **Energy dashboard**
+  - **Anomalies**: The check can be adjusted more easily.
+    - New thresholds 200 % and 300 %, a note in the settings says when "Off" makes sense
+    - With "Off", the row, list and comparison note disappear from the status dialog
+  - **Comparison with the previous period**: When paging back,
+    the previous period is calculated with only the energy amounts the comparison
+    needs. The page loads faster; the numbers stay the same.
+
+- **Configure an entity, restructured**: The configuration page is clearer.
+  - Sections General, Recording, Retention, Display and Checks with a jump line
+  - Each field has a short line; the detailed text is behind the info button
+  - The "customised" badge shows deviations from the default and resets after a
+    confirmation
+  - Locked fields show their fixed value
+
+#### Fixed
+
+- **Index check reported false alarms**: For entities with a resolution set
+  (e.g. 15 min), the check kept showing "deviations" although index and data
+  had the same row count, and the "Index deviations fixed automatically"
+  notice came back. The end of the time window now counts as matching.
+
+- **Interface**
+  - **Entity list remembers the page**: Opening an entity from page 2 and going
+    back used to land on page 1 again. The list now opens on the page last shown.
+  - **Errors and waiting**: When a request fails, the restore wizard,
+    entity and chart pages, export, statistics and entity migration now show a
+    message (chart pages with "Try again") instead of blank areas or a false
+    "Done". Saving in the editors and compacting can no longer be triggered
+    twice; compacting shows "Wird verdichtet …". Slow answers no longer overwrite
+    newer displays, which applies to the energy dashboard and tiles. Progress
+    polling during ZIP import survives short hiccups.
+  - **Keyboard use**: Dropzones in the import open with Enter or Space, headers
+    of sortable tables are focusable and announce their sort order, dashboard
+    sections announce their state, and hints also appear on focus.
+  - **Texts**: Missing translations in the report, the Home Assistant import, the
+    dashboard tiles and the settings were added; the warning colour in the energy
+    dashboard follows the theme.
+
+- **Ingestion and archive**
+  - **Monthly files crash-safe**: A power failure or crash in the middle of a
+    write could damage the current month's file or an archived month, and a
+    damaged archive then stopped ingestion for all entities. Files are now
+    replaced atomically, and a previous month that cannot be archived no longer
+    holds ingestion up.
+  - **Export, import list and statistics held up ingestion**: After a CSV
+    export, later backups and maintenance runs could hang, and the import page or
+    the statistics page stopped ingestion from Home Assistant during a long
+    import. Deleting reports and backups answers "busy" after a few seconds while
+    an import runs instead of waiting.
+  - **Set resolution, long months**: For measurements with a set resolution
+    (e.g. 30 s), ingestion read the whole month file for every value; at the end
+    of the month that took a good 50 ms per value and slowed ingestion down. Now
+    only the end of the file is read (under 1 ms). A value inserted afterwards or
+    arriving late no longer shifts the mean of the running time window but gets
+    its own window.
+  - **Type change of an entity**: When Home Assistant changes the kind of an
+    entity (for example measurement to counter), rebuilding the analyses held up
+    ingestion of all other entities. It now locks only this entity.
+  - **Pages stay usable**: Saving settings, muting notices, swapping tiles, the
+    backup schedule and the backup import no longer compute in the event loop.
+    With many archive files the whole server stood still there.
+
+- **Security and access**
+  - **Chart tooltips**: Entity names and units are shown as text in the
+    tooltips of the energy dashboard, the chart editor and the entity page,
+    never as markup.
+  - **Invalid API token**: A token with special characters caused error 500
+    instead of 401. When writing, the token is now checked before the content.
+  - **Uploads and credentials**: Files that are too large are refused right away
+    instead of filling the disk first. The VictoriaMetrics import no longer
+    follows redirects and sends the credentials only to the address entered.
+    "Delete all backups" leaves backups that have not yet been transferred to the
+    external target.
+  - **AI access, sharing and accounts**: The sharing of entities now applies in
+    every tool. The energy overview shows consumers and generators that are not
+    shared only as "Other (not shared)" (the totals stay complete), and with a
+    restricted selection, notices that name entities are left out. User accounts
+    without administrator rights can no longer query individual entities through
+    the AI, as with the card; the energy overview and the notices stay available
+    to them. Settings → AI access counts rejected calls.
+
+- **Energy dashboard**
+  - **Costs when a price changes within the period**: If a
+    price (for example a tariff helper) changed in the middle of a month or year,
+    all hours before the first change counted as "no price". Costs, average
+    price, avoided costs and the costs per consumer came out too low. The price
+    that already applied at the start of the period is now used. Past periods are
+    therefore shown differently than before.
+  - **Long-term**: Consumers appear with their Home Assistant
+    name instead of the entity ID.
+
+- **Weather dashboard, key days and rain days in other units**: Frost, ice,
+  summer and hot days are now counted correctly for a sensor in °F or K
+  (before, almost every day was a summer day), and rain days for a rain counter
+  in inches.
+
+- **Analyses**
+  - **Minimum and maximum values in the analyses**: For measurements with a set
+    resolution, the true minimum and maximum were lost because the month closing
+    calculated only from the means of the time windows (a short frost was no
+    longer visible in the hourly mean). Months that are closed or recalculated
+    from now on keep the true extremes; existing analyses stay unchanged.
+  - **Previous month of rarely sending entities**: Entities that had sent nothing
+    since the month changed were missing from all analyses for the previous
+    month. The previous month is now archived hourly.
+  - **Time zone and number format**: Year, month and day boundaries in state
+    charts, weather and long-term pages, the chart editor and tiles follow the
+    server's time zone instead of the browser's (with a different zone a year
+    began an hour early). Tables sort numbers in the selected number format,
+    including English.
+  - **Numbers at time boundaries**: A value exactly on the boundary between two
+    periods now counts only for the later one. Daily values of the Home Assistant
+    statistics land on the right day on days with a clock change.
+  - **Min/max in the running month**: Lowest and highest values of the running
+    month (for example for frost days) now come from the real extremes instead of
+    the window means, as is already the case for completed months.
+    - Applies to new data; existing rollups are not rebuilt
+
+- **CSV**
+  - **Import, files from Excel**: A CSV in "ANSI" format (Windows-1252, ä/ö/ü
+    as single characters) or as "Unicode text" (UTF-16) made the upload fail with
+    error 500, and afterwards the whole import page was unreachable. Such files
+    are now converted on upload; a file that cannot be read at all is removed
+    with a notice.
+  - **Import, clock change and duplicates**: The repeated hour when the clock
+    goes back to standard time now gets its own timestamps (before, it fell on
+    the same time), and overlapping files no longer write the same points twice
+    into the archive (they count as duplicates). Uploading and deleting the file
+    are refused while an import or a preview is running.
+  - **Export, formulas**: Texts from Home Assistant that start with =, +, -
+    or @ get an apostrophe in front so that Excel does not execute them as a
+    formula.
+
+- **Selective restore, abort**: If restoring entities fails after the database
+  was written, files and database stay in the old state. The Symcon names are
+  replaced as the very last step.
+
+- **Import reports of VictoriaMetrics imports** show up in the list and can be
+  opened and deleted (before, they were invisible).
+
+- **Comparison tables**: When saving, the same limits apply as for the query
+  (at most 25 different entities, 100 columns); before, a table could be saved
+  that could no longer be loaded afterwards. The card answers with a reason
+  instead of error 500 for tables that are too large.
+
+- **More robust input and shutdown**: An invalid entity ID or a broken number in
+  the table view now gives an error message instead of a server error. On
+  shutdown the storage only counts as cleanly closed if all background tasks
+  have really stopped; otherwise it is checked on the next start.
+
+- **Container**: The base image is pinned to a fixed version.
+
+## 1.13.0 - 2026-11-01
+
+### Neu
+
+- **Energiedashboard, Diagramm-Popup**: Ein Klick auf eine der fünf Kacheln
+  öffnet jetzt ein Diagramm für den eingestellten Zeitraum statt einer
+  Auswahlliste oder dem direkten Sprung in die Entität. Erzeugung und Verbrauch
+  zeigen gestapelte Balken je Quelle (der Verbrauch samt Grundlast), umschaltbar
+  auf Linie und Anteile in Prozent; der Speicher zeigt Ladung und Entladung
+  nebeneinander, bei Stunde und Tag mit SOC-Sensor zusätzlich den Ladestand als
+  Linie; Netzbezug und Einspeisung zeigen Balken (oder Linie) mit dem
+  Vorzeitraum als gestrichelter Linie. Die Zeilen darunter und „Entität öffnen“
+  führen wie bisher zur jeweiligen Entität.
+
+### Behoben
+
+- **Verspätete Werte überschreiben kein Archiv mehr**: Trafen nach dem
+  Monatswechsel noch Werte für den Vormonat ein (zum Beispiel aus der
+  Warteschlange der Integration nach einem Ausfall), ersetzte die nächste
+  Rotation das bereits archivierte Monatsarchiv durch diese wenigen Werte, und
+  die übrigen gingen verloren. Das Archiv wird jetzt ergänzt, Doppelte werden
+  nur einmal gezählt, und die Tages- und Monatswerte des Monats werden neu
+  berechnet.
+- **Energiedashboard, Speicher-Prüfung im Monat**: Die Meldung „Entladung
+  übersteigt Ladung — Ladung/Entladung vertauscht?“ erschien im laufenden
+  Monat fälschlich, wenn der Speicher zu Monatsbeginn voll war und der Monat
+  wenig PV-Ertrag hatte. Ohne Ladestand-Sensor gilt jetzt die Kapazität des
+  Speichers als Spielraum; ist auch keine Kapazität hinterlegt, wird nur noch
+  über ein ganzes Jahr geprüft.
+- **Bereinigen, Löschen vieler Zeilen**: Bei einer Seitengröße von 1000 tat
+  „Löschen“ nichts, wenn alle Zeilen markiert waren. Dieselbe Grenze traf
+  Sammelaktionen mit sehr vielen Entitäten (Entitäten löschen, Nutzungsprüfung
+  und die Sammelaktionen der Datenqualität). Beides funktioniert wieder.
+- **Bereinigen, Seitengröße**: „Löschen“, „Duplikate automatisch entfernen“,
+  „Wiederholungen verdichten“, „Fehlwert-Rückgänge markieren“ und „Letzte
+  Löschung rückgängig“ setzten die gewählte Seitengröße auf 20 zurück. Sie
+  bleibt jetzt erhalten.
+- **Charts, Wh und kWh**: Serien in Wh und kWh im selben Chart landeten auf zwei
+  getrennten Achsen mit eigener Skala und waren nicht vergleichbar. Sie teilen
+  sich jetzt eine Achse in der größten vorkommenden Einheit; reine Wh-Charts
+  bleiben in Wh.
+
+---
+
+### English
+
+#### New
+
+- **Energy dashboard, chart popup**: Clicking any of the five tiles now opens a
+  chart for the selected period instead of a selection list or a direct jump to
+  the entity. Generation and consumption show stacked bars per source
+  (consumption including the base load), switchable to lines and percentage
+  shares; storage shows charge and discharge side by side, plus the state of
+  charge as a line for hour and day if a state-of-charge sensor is set; grid
+  import and feed-in show bars (or a line) with the previous period as a dashed
+  line. The rows below and "Open entity" lead to the respective entity as
+  before.
+
+#### Fixed
+
+- **Late values no longer overwrite an archive**: If values for the previous
+  month arrived after the month change (for example from the integration's queue
+  after an outage), the next rotation replaced the already archived month with
+  those few values and the rest was lost. The archive is now extended,
+  duplicates are counted once, and the month's daily and monthly figures are
+  recomputed.
+- **Energy dashboard, storage check for the month**: The message "Discharge
+  exceeds charge — charge/discharge swapped?" wrongly appeared for the current
+  month when the storage was full at the start of the month and the month had
+  little PV yield. Without a state-of-charge sensor the storage capacity is
+  now the allowance; if no capacity is set either, only a full year is
+  checked.
+- **Cleanup, deleting many rows**: With a page size of 1000, "Delete" did
+  nothing when all rows were selected. The same limit affected bulk actions with
+  very many entities (deleting entities, the usage check and the data-quality
+  bulk actions). Both work again.
+- **Cleanup, page size**: "Delete", "Remove duplicates automatically",
+  "Condense repetitions", "Mark missing-value drops" and "Undo last deletion"
+  reset the chosen page size to 20. It is now kept.
+- **Charts, Wh and kWh**: Series in Wh and kWh in the same chart ended up on two
+  separate axes with their own scale and could not be compared. They now share
+  one axis in the largest unit present; pure Wh charts stay in Wh.
+
+## 1.12.0 - 2026-10-31
+
+### Neu
+
+- **Lovelace-Karte (App-Seite)**: Die App liefert jetzt die Daten für die neue
+  Zeitarchiv-Karte der Integration: gespeicherte Charts und Tabellen,
+  Entitäten direkt und Sparklines. Die Karte braucht die passende Version
+  der Integration; mit einer älteren App meldet sie „App zu alt“.
+
+- **Chart-Editor, Serienfarben**: Unter **Ausgewählt** öffnet ein Klick auf den
+  Farbpunkt einer Serie die Farbwahl: „Auto“ wie bisher, eine der acht
+  Palettenfarben oder eine eigene Farbe. Die Wahl gilt im Chart und in allen
+  Dashboard-Kacheln dieses Charts. Palettenfarben passen sich dem Theme an,
+  eigene Farben bleiben überall gleich.
+
+- **Tabellen, Summenspalte**: Eine zusätzliche Spalte zeigt je Zeile die Summe
+  über die Zeiträume, links oder rechts, mit frei wählbarer Beschriftung. In
+  jeder Spalte lässt sich einstellen, ob sie mitzählt, zum Beispiel 7 von 8
+  Tagen für eine Wochensumme. Summiert werden Zähler und Schalter; bei
+  Durchschnitt, Minimum, Maximum und Zuständen steht „–“. Formelzeilen
+  rechnen auf den Summen weiter, die Summenzeile addiert die Summen ihrer
+  Zeilen. Die Spalte gibt es auch in Dashboard-Kacheln und im CSV-Export.
+
+- **Entitätenliste, Spalte „Zählerrückgänge“**: Eine optionale Spalte zeigt je
+  Zähler, ob Rückgänge gemeldet („Melden“) oder erlaubt („Erlaubt“) sind. Sie
+  ist standardmäßig ausgeblendet und lässt sich über „Spalten“ einschalten.
+
+- **Vierte Nachkommastelle**: Bei den Nachkommastellen lässt sich jetzt auch
+  „4“ wählen, in der Entitäts-Konfiguration, im Optionen-Menü, im Chart-Editor,
+  in Dashboard-Kacheln und im Tabellen-Editor. So bleibt ein Preis wie
+  0,0796 €/kWh sichtbar statt als 0,08 zu erscheinen.
+
+### Geändert
+
+- **Chart-Tooltip**: Beim Überfahren eines Diagramms mit mehreren Linien oder
+  Balken zeigt der Tooltip jetzt immer alle sichtbaren Entitäten, jeweils mit
+  ihrem letzten bekannten Wert zu diesem Zeitpunkt. Bisher fehlten Entitäten,
+  die dort keinen eigenen Messwert hatten, zum Beispiel Stundenbalken neben
+  einer feineren Linie. Ist der Wert einer Linie merklich älter als die
+  übrigen, steht darunter sein Zeitpunkt und das Alter, zum Beispiel
+  „10:30 · vor 5m“. Gilt im Chart-Editor und in Dashboard-Kacheln.
+
+- **Energie-Dashboard, Auffälligkeiten im Monat**: Der Monat wird jetzt mit
+  demselben Monat der Vorjahre verglichen statt mit den Vormonaten. Ein
+  Verbraucher mit Jahreszeiten, etwa eine Wärmepumpe, fällt so im Winter nicht
+  mehr als „+1000 %“ auf. Gibt es noch kein Vorjahr, gilt wie bisher der
+  Schnitt der letzten drei Monate; der Hinweis im Dialog nennt den Vergleich.
+
+- **Nachkommastellen „Auto“**: Werte unter 0,1 erscheinen jetzt mit vier
+  signifikanten Stellen, zum Beispiel 0,0796 statt 0,08.
+
+### Behoben
+
+- **Diagramm-Tooltips**: Namen und Einheiten von Entitäten werden im Tooltip
+  jetzt maskiert. Bisher hätte ein Anzeigename mit HTML-Code beim Überfahren
+  ausgeführt werden können.
+
+- **Bereinigung, Reiter „Korrigieren“**: Das Speichern einer Zeile verwarf alle
+  anderen noch nicht gespeicherten Eingaben. Jetzt wird nur die betroffene Zelle
+  aktualisiert. Eine neue Leiste „Alle speichern (n)“ und „Alle verwerfen“
+  erledigt mehrere offene Zeilen auf einmal; beim Öffnen einer Zeile ist der
+  bisherige Wert markiert und lässt sich direkt überschreiben.
+
+- **Symcon-Import, ZIP-Upload**: Schlägt der Upload ohne Meldung der App fehl,
+  zum Beispiel mit 413 oder 502 von einem Proxy, hängt die Fehlermeldung jetzt den
+  HTTP-Status an. Bisher stand dort nur „ZIP konnte nicht verarbeitet werden.“
+
+- **Entitätsansicht und Chart-Editor**: Im Diagramm fehlte bei langen
+  Beschriftungen der y-Achse links eine Ziffer („4,782 ct/kWh“ statt „24,782
+  ct/kWh“). Der Rand richtet sich jetzt nach der tatsächlichen Breite der
+  Beschriftung und wächst mit ihr.
+- **Energie-Dashboard, Zählerrücksetzung**: Zähler, bei denen Rückgänge erlaubt
+  sind, werden nicht mehr als „Zählerrücksetzung erkannt“ gemeldet.
+- **Energie-Dashboard, Speicher-Hinweis**: „Entladung übersteigt Ladung“
+  erscheint in Monat und Jahr nur noch, wenn der Zeitraum zu mindestens 90 %
+  archiviert ist, auch mit SOC-Sensor. Beginnt das Archiv mitten im Monat,
+  entfiel sonst der Ladestand zu Beginn und der Hinweis war ein Fehlalarm.
+- **Entitätenliste**: Beim Ein- und Ausblenden von Spalten springt die Liste
+  nicht mehr auf Seite 1 zurück.
+- **Energie-Dashboard**: In der englischen Oberfläche erschienen im Sankey-Diagramm
+  und in der Lastprofil-Heatmap noch deutsche Beschriftungen („Grundlast“,
+  „(Ladung)“, „(Entladung)“, Wochentage „Mo“/„Di“/…). Sie werden jetzt übersetzt.
+- **Rollierende Zeiträume**: Der erste, angeschnittene Tagesbalken ragte links
+  über die y-Achse und verdeckte deren Beschriftung. Die Achse beginnt jetzt
+  etwas früher, sodass der Balken ganz im Diagramm liegt (Chart-Editor und
+  Kacheln).
+- **Entität konfigurieren**: Die Auswahlmenüs (Auflösung, Verdichtungsziel,
+  Aufbewahrung) öffnen sich jetzt direkt unter ihrem Knopf statt links neben
+  der Karte.
+- **Live-Auflösung**: Bei Entitäten mit eingestellter Auflösung (z. B. 15 Min.)
+  erschien regelmäßig der Hinweis „Index-Abweichungen automatisch behoben“. Der
+  Index zählt die zusammengefassten Werte jetzt von vornherein richtig mit. Die
+  Messwerte waren nie betroffen.
+
+---
+
+### English
+
+#### New
+
+- **Lovelace card (app side)**: The app now provides the data for the new
+  Zeitarchiv card of the integration: saved charts and tables, entities
+  directly and sparklines. The card needs the matching version of the
+  integration; with an older app it reports “App too old”.
+
+- **Chart editor, series colors**: Under **Selected**, clicking a series' color
+  dot opens the color picker: “Auto” as before, one of the eight palette
+  colors, or a custom color. The choice applies in the chart and in all
+  dashboard tiles of that chart. Palette colors follow the theme, custom colors
+  stay the same everywhere.
+
+- **Tables, sum column**: An extra column shows the sum over the periods for
+  each row, on the left or right, with a label of your choice. Each column can
+  be set to count or not, for example 7 of 8 days for a weekly sum. Counters
+  and switches are summed; average, minimum, maximum and states show “–”.
+  Formula rows continue to calculate on the sums, and the sum row adds up the
+  sums of its rows. The column is also available in dashboard tiles and the
+  CSV export.
+
+- **Entity list, “Counter decreases” column**: An optional column shows for each
+  counter whether decreases are reported (“Report”) or allowed (“Allowed”). It
+  is hidden by default and can be switched on under “Columns”.
+
+- **Fourth decimal place**: “4” can now be chosen for decimal places, in the
+  entity configuration, the options menu, the chart editor, dashboard tiles and
+  the table editor. A price such as 0.0796 €/kWh stays visible instead of
+  appearing as 0.08.
+
+#### Changed
+
+- **Chart tooltip**: When you hover a chart with several lines or bars, the
+  tooltip now always shows all visible entities, each with its last known value
+  at that point in time. Before, entities without a reading of their own there
+  were missing, for example hourly bars next to a finer line. If a line's value
+  is noticeably older than the others, its time and age appear below it, for
+  example “10:30 · 5m ago”. Applies in the chart editor and in dashboard tiles.
+
+- **Energy dashboard, anomalies in the month view**: The month is now compared
+  with the same month in previous years instead of the previous months. A
+  consumer with seasons, such as a heat pump, no longer shows up as “+1000 %” in
+  winter. If there is no earlier year yet, the average of the last three months
+  applies as before; the note in the dialog names the comparison.
+
+- **Decimal places “Auto”**: Values below 0.1 now appear with four significant
+  digits, for example 0.0796 instead of 0.08.
+
+#### Fixed
+
+- **Chart tooltips**: Entity names and units are now escaped in the tooltip.
+  Before, a display name containing HTML code could have been executed when
+  hovering.
+
+- **Cleanup, “Correct” tab**: Saving one row discarded all other unsaved entries.
+  Now only the affected cell is updated. A new bar with “Save all (n)” and
+  “Discard all” handles several open rows at once; when a row is opened, its
+  current value is selected and can be overwritten directly.
+
+- **Symcon import, ZIP upload**: If the upload fails without a message from the
+  app, for example with 413 or 502 from a proxy, the error message now includes
+  the HTTP status. Before, it only said “The ZIP could not be processed.”
+
+- **Entity view and chart editor**: In the chart, long y-axis labels lost a digit
+  on the left (“4,782 ct/kWh” instead of “24,782 ct/kWh”). The margin now follows
+  the actual width of the labels and grows with them.
+- **Energy dashboard, counter reset**: Counters for which decreases are allowed
+  are no longer reported as “Counter reset detected”.
+- **Energy dashboard, storage notice**: “Discharge exceeds charge” now appears in
+  the month and year view only if at least 90 % of the period is archived, also
+  with an SOC sensor. If the archive starts mid-month, the charge level at the
+  start was missing and the notice was a false alarm.
+- **Entity list**: Showing or hiding columns no longer jumps the list back to
+  page 1.
+- **Energy dashboard**: In the English interface the Sankey chart and the load
+  profile heatmap still showed German labels (“Grundlast”, “(Ladung)”,
+  “(Entladung)”, weekdays “Mo”/“Di”/…). They are now translated.
+- **Rolling periods**: the first, partial daily bar stuck out to the left over
+  the y-axis and covered its labels. The axis now starts slightly earlier so the
+  bar sits fully inside the chart (chart editor and tiles).
+- **Entity configuration**: The dropdowns (Resolution, Compaction target,
+  Retention) now open directly below their button instead of beside the card.
+- **Live resolution**: Entities with a resolution set (e.g. 15 min) regularly
+  showed the notice “Index discrepancies fixed automatically”. The index now
+  counts the merged values correctly from the start. The measurements were
+  never affected.
+
+
 ## 1.11.2 - 2026-10-26
 
 ### Neu

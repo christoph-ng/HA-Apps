@@ -7,15 +7,15 @@
   
   <div class="page">
     <h1>{{ _("CSV-Export") }}</h1>
-    <p class="sub">{{ _("In vier Schritten zur Datei: Entitäten wählen, Zeitraum, Auflösung, prüfen und herunterladen. Eine Entität ergibt eine CSV, mehrere ergeben automatisch ein ZIP mit je einer CSV.") }}</p>
-
-    <ol class="export-steps" id="export-steps" aria-label="{{ _('Schritte') }}"></ol>
+    <p class="sub">{{ _("In vier Schritten zur Datei: Entitäten wählen, Zeitraum, Auflösung, Form und Download. Eine Entität ergibt eine CSV, mehrere ein ZIP mit je einer CSV oder eine gemeinsame Datei.") }}</p>
 
     <div class="settings-panel export-wizard" id="export-wizard" data-max-rows="{{ max_rows }}">
 
+      <ol class="export-steps" id="export-steps" aria-label="{{ _('Schritte') }}"></ol>
+
       <section class="export-step" id="export-step-1">
         <h2>{{ _("Welche Entitäten?") }}</h2>
-        <p class="export-lead">{{ _("Ankreuzen, was exportiert werden soll. „CSV herunterladen“ in einer Zeile lädt sofort die komplette Historie dieser Entität als Rohwerte.") }}</p>
+        <p class="export-lead">{{ _("Ankreuzen, was exportiert werden soll. „↓ CSV“ in einer Zeile lädt sofort die komplette Historie dieser Entität als Rohwerte.") }}</p>
 
         <div id="controls" class="export-controls" hx-trigger="load, change from:#controls, keyup delay:300ms from:[name=search]"
              hx-get="export-table" hx-include="#controls, [name=page_size]" hx-target="#export-table" hx-swap="innerHTML">
@@ -30,6 +30,18 @@
               <label class="dd-picker-row"><input type="checkbox" name="type" value="state" onchange="onExportTypeSpecificChange(this); resetExportPage(); updateExportTypeFilterLabel();"><span>{{ _("Zustand") }}</span></label>
             </div>
           </span>
+          {% if categories %}
+          <span class="dd-picker-wrap">
+            <button type="button" class="btn" id="export-category-filter-btn" onclick="toggleDDPicker('export-category-filter')">{{ _("Kategorie: Alle ▾") }}</button>
+            <div class="dd-picker-popover" id="export-category-filter-popover">
+              <label class="dd-picker-row"><input type="checkbox" name="category" value="all" checked onchange="onExportCategoryAllChange(this); resetExportPage(); updateExportCategoryFilterLabel();"><span>{{ _("Alle") }}</span></label>
+              {% for c in categories %}
+              <label class="dd-picker-row"><input type="checkbox" name="category" value="{{ c.id }}" onchange="onExportCategorySpecificChange(); resetExportPage(); updateExportCategoryFilterLabel();"><span class="cat-pill" style="--c:var(--chart-{{ c.color_slot }});"><i aria-hidden="true"></i><span>{{ c.name }}</span></span></label>
+              {% endfor %}
+              <label class="dd-picker-row"><input type="checkbox" name="category" value="none" onchange="onExportCategorySpecificChange(); resetExportPage(); updateExportCategoryFilterLabel();"><span class="cat-none">{{ _("Ohne Kategorie") }}</span></label>
+            </div>
+          </span>
+          {% endif %}
           <span class="dd-picker-wrap">
             <button type="button" class="btn" id="export-unit-filter-btn" onclick="toggleDDPicker('export-unit-filter')">{{ _("Einheit: Alle ▾") }}</button>
             <input type="hidden" name="unit" id="export-unit-filter-input" value="all">
@@ -56,7 +68,7 @@
 
       <section class="export-step" id="export-step-2" hidden>
         <h2>{{ _("Welcher Zeitraum?") }}</h2>
-        <p class="export-lead">{{ _("Für ein Jahres-Backup ein Jahr wählen, für eine Auswertung einen einzelnen Monat.") }}</p>
+        <p class="export-lead">{{ _("Für ein Jahres-Backup ein Jahr wählen, für eine Auswertung einen Monat. Mit einem zweiten Klick auf den letzten Monat oder das letzte Jahr wird daraus ein Zeitraum.") }}</p>
         <div class="export-seg" id="export-mode" role="group" aria-label="{{ _('Zeitraum') }}">
           <button type="button" data-mode="all">{{ _("Alles") }}</button>
           <button type="button" data-mode="year">{{ _("Jahr") }}</button>
@@ -70,11 +82,14 @@
             <button type="button" class="btn" id="export-year-next" aria-label="{{ _('Nächstes Jahr') }}">›</button>
           </div>
           <div class="export-months" id="export-months"></div>
+          <div class="export-months export-years" id="export-years"></div>
           <div class="export-free" id="export-free">
             <label>{{ _("Von") }}<input type="date" id="export-from"></label>
             <label>{{ _("Bis") }}<input type="date" id="export-to"></label>
           </div>
           <div class="export-period-text" id="export-period-text"></div>
+          <p class="export-hint" id="export-range-hint"></p>
+          <p class="export-hint" id="export-span-text"></p>
         </div>
       </section>
 
@@ -86,11 +101,81 @@
       </section>
 
       <section class="export-step" id="export-step-4" hidden>
-        <h2>{{ _("Prüfen und herunterladen") }}</h2>
+        <h2>{{ _("Form und Download") }}</h2>
         <p class="export-lead" id="export-review-lead"></p>
         <div class="export-error" id="export-error" role="alert" hidden></div>
+
+        <div class="export-opts" id="export-opts">
+          <div class="export-opt" id="export-opt-files" hidden>
+            <span class="export-opt-label">{{ _("Dateien") }}</span>
+            <div class="export-choice" role="group" aria-label="{{ _('Dateien') }}">
+              <button type="button" data-files="zip">{{ _("Je Entität (ZIP)") }}</button>
+              <button type="button" data-files="joint">{{ _("Gemeinsame Datei") }}</button>
+            </div>
+            <p class="export-hint" id="export-files-hint"></p>
+          </div>
+          <div class="export-opt" id="export-opt-layout" hidden>
+            <span class="export-opt-label">{{ _("Anordnung der gemeinsamen Datei") }}</span>
+            <div class="export-layouts" role="group" aria-label="{{ _('Anordnung der gemeinsamen Datei') }}">
+              <button type="button" data-layout="wide">
+                <b>{{ _("Nebeneinander") }}</b><span>{{ _("Eine Spalte je Entität, eine Zeile je Zeitpunkt") }}</span>
+                <pre>{{ _("Zeit   Außen  Dach") }}
+00:00  6.1    17.2
+01:00  5.8    17.1</pre>
+              </button>
+              <button type="button" data-layout="long">
+                <b>{{ _("Untereinander") }}</b><span>{{ _("Eine Liste: Entität, Zeit und Wert in jeder Zeile") }}</span>
+                <pre>{{ _("Entität  Zeit   Wert") }}
+Außen    00:00  6.1
+Außen    01:00  5.8
+Dach     00:00  17.2</pre>
+              </button>
+            </div>
+            <p class="export-hint" id="export-layout-hint"></p>
+          </div>
+          <div class="export-opt">
+            <span class="export-opt-label">{{ _("Zeit") }}</span>
+            <div class="export-choice" role="group" aria-label="{{ _('Zeit') }}">
+              <button type="button" data-time="stamp">{{ _("Ein Zeitstempel") }}</button>
+              <button type="button" data-time="split">{{ _("Datum + Uhrzeit getrennt") }}</button>
+            </div>
+            <label class="export-check"><input type="checkbox" id="export-unix"> {{ _("Zusätzlich Unix-Zeit (Sekunden seit 1970)") }}</label>
+          </div>
+          <div class="export-opt">
+            <span class="export-opt-label">{{ _("Zahlen- und Dateiformat") }}</span>
+            <div class="export-choice" role="group" aria-label="{{ _('Zahlen- und Dateiformat') }}">
+              <button type="button" data-preset="standard">{{ _("Standard") }}</button>
+              <button type="button" data-preset="german">{{ _("Deutsch / Excel") }}</button>
+              <button type="button" data-preset="custom">{{ _("Eigene Einstellung") }}</button>
+            </div>
+            <p class="export-hint" id="export-preset-hint"></p>
+            <div class="export-custom" id="export-custom" hidden>
+              <div>
+                <span class="export-opt-label">{{ _("Trennzeichen der Spalten") }}</span>
+                <div class="export-choice" role="group" aria-label="{{ _('Trennzeichen der Spalten') }}">
+                  <button type="button" data-sep="comma">{{ _("Komma") }}</button>
+                  <button type="button" data-sep="semicolon">{{ _("Semikolon") }}</button>
+                  <button type="button" data-sep="tab">{{ _("Tabulator") }}</button>
+                </div>
+              </div>
+              <div>
+                <span class="export-opt-label">{{ _("Dezimalzeichen") }}</span>
+                <div class="export-choice" role="group" aria-label="{{ _('Dezimalzeichen') }}">
+                  <button type="button" data-decimal="point">{{ _("Punkt") }}</button>
+                  <button type="button" data-decimal="comma">{{ _("Komma") }}</button>
+                </div>
+              </div>
+              <p class="export-hint">{{ _("Komma als Trennzeichen und Komma als Dezimalzeichen zugleich ist nicht möglich, der Assistent sperrt diese Kombination.") }}</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="export-preview" id="export-preview" hidden>
+          <div class="export-preview-cap" id="export-preview-cap"></div>
+          <pre id="export-preview-text"></pre>
+        </div>
+
         <dl class="export-summary" id="export-summary"></dl>
-        <p class="export-hint">{{ _("Spalten: timestamp (lokale Zeit), unix_ts, value. Bei gröberer Auflösung steht der Beginn des Intervalls im Zeitstempel.") }}</p>
       </section>
 
       <div class="export-foot">

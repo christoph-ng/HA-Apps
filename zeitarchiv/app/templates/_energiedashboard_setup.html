@@ -185,7 +185,8 @@
   // "Verschieben bewegt nur das Namensfeld". Mit row._key als Schlüssel
   // erkennt Alpine die Zeile als tatsächlich verschoben und baut den
   // kompletten DOM-Knoten (inkl. entityPicker) neu auf.
-  erzeuger: ({{ (config.erzeuger or []) | tojson }}).map((row, i) => ({...row, _key: "e" + i})),
+  // kwp lokalisiert vorformatiert (Komma statt Punkt), wie capacity_kwh unten.
+  erzeuger: ({{ (config.erzeuger or []) | tojson }}).map((row, i) => ({...row, kwp: row.kwp != null ? NumberFormat.fmt(row.kwp) : "", _key: "e" + i})),
   // capacity_kwh lokalisiert vorformatiert (Komma statt Punkt) fürs erste
   // Anzeigen — dieselbe Notwendigkeit wie beim bisherigen number_field()
   // (siehe dort), hier aber innerhalb einer dynamischen x-for-Liste, wo ein
@@ -275,7 +276,7 @@
   // reaktiven DOM-Update (neue x-for-Iteration) existiert.
   addErzeuger() {
     const key = "e" + Date.now() + Math.random();
-    const row = {entity_id: "", name: "", _key: key};
+    const row = {entity_id: "", name: "", kwp: "", _key: key};
     this.erzeuger.push(row);
     this.draftRow = {...row};
     this.activePopup = key;
@@ -394,7 +395,7 @@
               {% endfor %}
             </div>
           </span>
-          {% call hint_body() %}{{ _('Schwellenwert für die Auffälligkeiten-Markierung. „Aus" deaktiviert die Prüfung.') }}{% endcall %}
+          {% call hint_body() %}{{ _('Schwellenwert für die Auffälligkeiten-Markierung. „Aus" deaktiviert die Prüfung. Sie vergleicht einen Verbraucher mit dem Schnitt der letzten Perioden und passt am besten zu regelmäßigem Verbrauch. Bei wechselnden Gewohnheiten oder wetterabhängiger Heizung schlägt sie oft an; dann hilft eine höhere Schwelle oder „Aus".') }}{% endcall %}
         </div>
       </div>
       {# Chip-Mehrfachauswahl (.filter-chip, app-weiter Standard z. B. in
@@ -565,6 +566,14 @@
                       {{ entity_field('erzeuger_entity_id_draft', 'draftRow.entity_id', "(id) => { draftRow.entity_id = id; if (!draftRow.name) draftRow.name = nameFor(id); }", allow_units=['kWh'], require_counter=true) }}
                       {% call hint_body() %}{{ _('Zähler „von diesem Erzeuger produzierte Energie" (kWh, steigend).') }}{% endcall %}
                     </div>
+                    <div class="field">
+                      <label>{{ _("Anlagenleistung") }} {{ hint_button(_('Anlagenleistung')) }}</label>
+                      <span class="edash-unit-input">
+                        <input type="text" inputmode="decimal" x-model="draftRow.kwp" class="edash-fixed-price-input">
+                        <span class="edash-unit-suffix">{{ _("kWp") }}</span>
+                      </span>
+                      {% call hint_body() %}{{ _("Nennleistung der Anlage, nur für den Vergleich der Erzeugung mit der Einstrahlung im Reiter „Langzeit“ (spezifischer Ertrag). Optional.") }}{% endcall %}
+                    </div>
                   </div>
                   <div class="edash-dialog-footer" style="justify-content:space-between;">
                     <button type="button" class="btn btn-danger" @click="removeRow(erzeuger, idx, row, t('Erzeuger'))">{{ _("Erzeuger entfernen") }}</button>
@@ -589,6 +598,7 @@
         <span>
           <input type="hidden" name="erzeuger_name" :value="row.name">
           <input type="hidden" name="erzeuger_entity_id" :value="row.entity_id">
+          <input type="hidden" name="erzeuger_kwp" :value="row.kwp">
         </span>
       </template>
     </section>
@@ -1087,6 +1097,63 @@
         <input type="hidden" name="co2_faktor_netzbezug_entity" :value="co2Entity">
         <input type="hidden" id="co2_faktor_netzbezug_fixed_real" name="co2_faktor_netzbezug_fixed" value="{{ co2_fixed if co2_fixed is not none else '' }}">
       </dialog>
+    </section>
+
+    {# Reiter „Langzeit“: welche Bereiche sichtbar sind und die Schwellen der Kenntage. Ein leeres Schwellenfeld heißt „Vorgabe“
+       (steht als Platzhalter); gespeichert werden nur geänderte Werte (siehe energie_langzeit.KENNTAGE_DEFAULTS). Abgewählt
+       ist, was nicht angehakt ist (`langzeit_ausblenden`); der Block „Energie“ bleibt immer. #}
+    <section class="settings-section edash-section-neutral">
+      <h2 class="settings-section-title">{{ _("Langzeit") }} {{ hint_button(_('Langzeit-Anzeige')) }}</h2>
+      <p class="settings-section-description">{{ _("Welche Bereiche der Reiter „Langzeit“ zeigt, und die Schwellen der Kenntage.") }}</p>
+      {% call hint_body() %}{{ _("Bereiche ohne passende Einrichtung (zum Beispiel Speicher ohne Speicher-Rolle) erscheinen ohnehin nicht. Energie in der Tabelle bleibt immer sichtbar.") }}{% endcall %}
+      {% set hidden = config.langzeit_ausblenden or [] %}
+      <div class="field" style="margin-bottom:0;">
+        <label>{{ _("Tabelle „Zeiträume im Vergleich“") }}</label>
+        <div class="edash-toggle-list">
+          <label class="filter-chip"><input type="checkbox" checked disabled><span>{{ _("Energie") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="quoten" {% if 'quoten' not in hidden %}checked{% endif %}><span>{{ _("Quoten") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="speicher" {% if 'speicher' not in hidden %}checked{% endif %}><span>{{ _("Speicher") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="pv" {% if 'pv' not in hidden %}checked{% endif %}><span>{{ _("PV-Anlage, wetterbereinigt") }}</span></label>
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:0;margin-top:14px;">
+        <label>{{ _("Karten") }}</label>
+        <div class="edash-toggle-list">
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="monatsvergleich" {% if 'monatsvergleich' not in hidden %}checked{% endif %}><span>{{ _("Monatsvergleich") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="matrix" {% if 'matrix' not in hidden %}checked{% endif %}><span>{{ _("Jahre × Monate") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="veraenderungen" {% if 'veraenderungen' not in hidden %}checked{% endif %}><span>{{ _("Was hat sich verändert?") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="rekorde" {% if 'rekorde' not in hidden %}checked{% endif %}><span>{{ _("Rekorde") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="kenntage" {% if 'kenntage' not in hidden %}checked{% endif %}><span>{{ _("Kenntage je Jahr") }}</span></label>
+        </div>
+      </div>
+      <div class="field" style="margin:18px 0 6px;">
+        <label>{{ _("Schwellen der Kenntage") }} {{ hint_button(_('Kenntage-Schwellen')) }}</label>
+      </div>
+      <p class="settings-section-description">{{ _("Ein leeres Feld verwendet die Vorgabe.") }}</p>
+      {% call hint_body() %}{{ _("Fast autark zählt Tage, an denen der Netzbezug höchstens (100 − Wert) % des Verbrauchs ausmacht. Sonnentage brauchen bei jedem Erzeuger die Anlagenleistung (kWp). Trübe Tage vergleichen mit dem Tagesmittel des Jahres. Die beiden Speicher-Schwellen sind Prozent der Speicherkapazität und gelten für die Entladung je Tag; ohne bekannte Kapazität erscheinen die beiden Felder nicht.") }}{% endcall %}
+      {% set kt = config.kenntage or {} %}
+      <div class="edash-field-grid">
+        <div class="field">
+          <label>{{ _("Fast autark ab") }}</label>
+          {{ number_field('kt_autark', kt.get('autark'), '90', '', '%') }}
+        </div>
+        <div class="field">
+          <label>{{ _("Sonnentage ab") }}</label>
+          {{ number_field('kt_sonnig', kt.get('sonnig'), '4', '', _('kWh je kWp')) }}
+        </div>
+        <div class="field">
+          <label>{{ _("Trübe Tage unter") }}</label>
+          {{ number_field('kt_truebe', kt.get('truebe'), '10', '', _('% des Tagesmittels')) }}
+        </div>
+        <div class="field">
+          <label>{{ _("Speicher stark genutzt ab") }}</label>
+          {{ number_field('kt_stark', kt.get('speicher_stark'), '80', '', _('% der Kapazität')) }}
+        </div>
+        <div class="field">
+          <label>{{ _("Speicher kaum genutzt unter") }}</label>
+          {{ number_field('kt_schwach', kt.get('speicher_schwach'), '10', '', _('% der Kapazität')) }}
+        </div>
+      </div>
     </section>
 
     <div class="actionbar" style="justify-content:flex-end;">

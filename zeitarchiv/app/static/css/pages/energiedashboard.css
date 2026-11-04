@@ -37,7 +37,7 @@
     background:var(--accent-line-soft);color:var(--accent-line);cursor:pointer;
   }
   .edash-quality-badge:hover{border-color:var(--accent-line);}
-  .edash-quality-badge.is-warn{background:#F3E4C4;color:#8A6414;}
+  .edash-quality-badge.is-warn{background:var(--warning-soft);color:var(--warning);}
   /* Rechtsbündige Gruppe für die übrigen Badges — margin-left:auto sitzt auf
      dem GRUPPEN-Container, nicht auf dem ersten Badge darin, damit die
      Rechtsbündigkeit unabhängig davon funktioniert, welche Kombination aus
@@ -151,8 +151,8 @@
   .edash-period-pills button{font-family:var(--font-mono);font-size:calc(11.5px * var(--font-scale, 1));padding:5px 10px;border-radius:6px;border:0;background:transparent;color:var(--ink-faint);cursor:pointer;}
   .edash-period-pills button.is-active{background:var(--surface);color:var(--ink);box-shadow:var(--shadow);font-weight:600;}
   .edash-period-nav{display:flex;align-items:center;gap:8px;font-size:calc(12.5px * var(--font-scale, 1));color:var(--ink-muted);}
-  .edash-period-nav button{width:22px;height:22px;flex:none;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--ink-faint);cursor:pointer;line-height:1;}
-  .edash-period-nav button:disabled{opacity:.4;cursor:default;}
+  .edash-period-nav > button{width:22px;height:22px;flex:none;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--ink-faint);cursor:pointer;line-height:1;}
+  .edash-period-nav > button:disabled{opacity:.4;cursor:default;}
   /* Feste Breite für das Perioden-Label: "27.08.2026 · 14:00–15:00 Uhr"
      (Stunde) ist deutlich länger als "September 2026" (Monat) oder "2026"
      (Jahr) — ohne Mindestbreite verschob sich beim Umschalten die gesamte
@@ -160,6 +160,8 @@
      sichtbar hin und her, weil .edash-card-head sie per
      justify-content:space-between am rechten Rand verankert. */
   .edash-period-nav-label{min-width:210px;text-align:center;font-variant-numeric:tabular-nums;}
+  .edash-period-nav-pick{border:none;background:none;padding:2px 6px;border-radius:6px;font:inherit;color:inherit;cursor:pointer;}
+  .edash-period-nav-pick:hover{color:var(--ink);background:var(--surface-alt);}
   @media(max-width:560px){
     .edash-period-controls{flex:1 1 100%;justify-content:center;}
     /* Navigation auf eigener, zentrierter Zeile — der Zustand vor 0.87.0.
@@ -278,46 +280,34 @@
      App. Kein Klickziel-Anspruch (nicht alle Kacheln sind klickbar), rein
      als "die Seite reagiert" wahrgenommen. */
   .edash-kpi:hover{transform:translateY(-2px);box-shadow:0 6px 16px rgba(19,28,23,.09);border-color:var(--border-strong);}
-  /* Erzeugung/Verbrauch/Netzbezug/Einspeisung sind jetzt <a>-Elemente (Link
-     zum Entitäts-Chart, siehe _energiedashboard_view.html) — ohne das hier
-     würden sie als Link-Text erscheinen (blau, unterstrichen). Nur mit
-     href tatsächlich klickbar (Erzeugung/Verbrauch bleiben ohne href, wenn
-     mehr als eine Quelle konfiguriert ist — siehe Kommentar dort). */
-  a.edash-kpi{text-decoration:none;color:inherit;}
-  /* is-pickable: Erzeugung/Verbrauch bei mehr als einer konfigurierten
-     Quelle — kein href (kein eindeutiges Linkziel), stattdessen @click, das
-     das Auswahlfenster öffnet (.edash-entity-picker-list unten). */
-  a.edash-kpi[href],a.edash-kpi.is-pickable{cursor:pointer;}
-  /* Kompakt und für alle drei Auswahlfenster (Erzeugung/Verbrauch/Speicher)
-     gleich groß statt der .detail-dialog-Standardbreite (bis 860px, für
-     Datenqualität/Kosten-Tabellen gedacht) — hier reicht eine kurze
-     Namensliste, dieselbe Idee wie .edash-item-dialog/.edash-gruppen-dialog
-     oben. Eine gemeinsame Klasse statt dreier eigener, weil alle drei
-     denselben Inhalt (Name-Liste) in derselben Größenordnung zeigen. */
-  /* Breit genug, dass der längste Titel ("Verbrauch — welche Entität?") ohne
-     Zeilenumbruch neben dem ×-Button passt — alle drei Auswahlfenster
-     bekommen dieselbe Breite (siehe Kommentar oben), unabhängig davon, wie
-     lang der jeweils EIGENE Titel ist, sonst wären sie sichtbar
-     unterschiedlich breit. */
-  .edash-entity-picker-dialog{width:min(340px, calc(100vw - 32px));padding:14px;}
-  /* Kompaktere Kopfzeile als der .detail-dialog-Standard (16px-Titel,
-     14px-Abstand, große "Schließen"-Pille) — für ein derart kurzes Popup
-     (Titel + Namensliste) wirkte das schwer/unpassend groß, siehe
-     Nutzer-Feedback ("gefälliger", "kompakter"). Kleinerer, dezenterer
-     ×-Button statt der vollen Pille — dieselbe method="dialog"-Semantik
-     (Enter/Escape schließen weiterhin), nur optisch zurückhaltender. */
-  .edash-entity-picker-dialog .detail-dialog-header{margin-bottom:8px;align-items:center;}
-  .edash-entity-picker-dialog .detail-dialog-header h2{font-size:calc(14.5px * var(--font-scale, 1));}
-  .edash-entity-picker-dialog .detail-dialog-header .btn{
-    padding:0;width:26px;height:26px;border-radius:50%;font-size:calc(15px * var(--font-scale, 1));
-    line-height:1;flex:none;
+  /* Alle fünf Kennzahlen-Kacheln sind <button>: tastaturbedienbar, öffnen das Diagramm-Popup. Reset auf die Optik
+     der übrigen Kacheln (sonst Browser-Schaltfläche). Ohne konfigurierte Quelle deaktiviert und ohne Hover-Hub. */
+  button.edash-kpi{font:inherit;color:inherit;text-align:left;width:100%;cursor:pointer;}
+  button.edash-kpi:focus-visible{outline:2px solid var(--accent-bar);outline-offset:2px;}
+  button.edash-kpi:disabled{cursor:default;}
+  button.edash-kpi:disabled:hover{transform:none;box-shadow:none;border-color:var(--border);}
+  /* Diagramm-Popup der Kacheln (Verbrauch, Speicher). Breite wie die übrigen Detail-Dialoge, Diagramm flach genug,
+     dass Zeilen darunter ohne Scrollen sichtbar bleiben. */
+  .edash-tile-dialog{width:min(640px,calc(100vw - 32px));padding:16px;}
+  .edash-tile-dialog .detail-dialog-header{align-items:flex-start;margin-bottom:8px;}
+  .edash-tile-dialog .detail-dialog-header .btn{padding:0;width:26px;height:26px;border-radius:50%;line-height:1;flex:none;}
+  .edash-tile-sub{margin:2px 0 0;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);}
+  .edash-tile-chart{height:270px;width:100%;}
+  .edash-tile-modes{display:flex;width:fit-content;margin-left:auto;gap:4px;background:var(--surface-alt);border:1px solid var(--border);border-radius:8px;padding:3px;margin-bottom:8px;}
+  .edash-tile-modes button{font-family:var(--font-mono);font-size:calc(11.5px * var(--font-scale, 1));padding:5px 10px;border-radius:6px;border:0;background:transparent;color:var(--ink-faint);cursor:pointer;}
+  .edash-tile-modes button.is-active{background:var(--surface);color:var(--ink);box-shadow:var(--shadow);font-weight:600;}
+  .edash-tile-open{margin:10px 0 0;text-align:right;}
+  .edash-tile-note{margin:8px 0 0;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);}
+  .edash-tile-rows{list-style:none;margin:10px 0 0;padding:0;}
+  .edash-tile-rows li{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border);font-size:calc(13px * var(--font-scale, 1));}
+  .edash-tile-rows a{color:var(--ink);}
+  .edash-tile-swatch{flex:none;width:9px;height:9px;border-radius:2px;}
+  .edash-tile-value{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink-faint);white-space:nowrap;}
+  @media(max-width:560px){
+    .edash-tile-dialog{padding:12px;}
+    .edash-tile-chart{height:250px;}
+    .edash-tile-rows li{flex-wrap:wrap;}
   }
-  .edash-entity-picker-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;}
-  .edash-entity-picker-list a{
-    display:block;padding:8px 10px;border-radius:8px;color:var(--ink);text-decoration:none;
-    font-size:calc(13px * var(--font-scale, 1));
-  }
-  .edash-entity-picker-list a:hover{background:var(--surface-alt);}
   /* overflow:hidden oben ist für die Sparkline in der Energiefluss-Zeile
      nötig, schneidet aber den [data-tooltip]::after-Ballon ab, wenn ein
      Tooltip auf der ganzen Kachel sitzt (Kostenanalyse-Kacheln haben keine
@@ -503,7 +493,7 @@
      Datenqualität) bleibt center genauso stimmig. */
   .edash-quality-row{display:flex;gap:10px;align-items:center;}
   .edash-quality-icon{width:30px;height:30px;border-radius:8px;background:var(--accent-line-soft);color:var(--accent-line);display:flex;align-items:center;justify-content:center;flex:none;font-size:calc(15px * var(--font-scale, 1));}
-  .edash-quality-row.is-warn .edash-quality-icon{background:#F3E4C4;color:#8A6414;}
+  .edash-quality-row.is-warn .edash-quality-icon{background:var(--warning-soft);color:var(--warning);}
   .edash-quality-row strong{font-size:calc(13px * var(--font-scale, 1));display:block;margin-bottom:3px;}
   /* Immer beide Prüfungen zeigen (nicht nur bei Problemen, siehe Kommentar
      in compute_flow()) — je Zeile ein eigenes ✓/!-Symbol statt eines
@@ -517,7 +507,7 @@
   .edash-quality-list + .edash-quality-row{margin-top:14px;padding-top:10px;border-top:1px solid var(--border);}
   .edash-quality-list li{font-size:calc(11.5px * var(--font-scale, 1));color:var(--ink-muted);display:flex;align-items:baseline;gap:7px;}
   .edash-quality-check-icon{flex:none;color:var(--chart-6);font-weight:700;}
-  .edash-quality-list li.is-warn .edash-quality-check-icon{color:#8A6414;}
+  .edash-quality-list li.is-warn .edash-quality-check-icon{color:var(--warning);}
   .edash-quality-list li.is-warn{color:var(--ink);}
 
   /* Bilanz-Anteilsbalken: erfasste Verbraucher vs. Grundlast, als einfacher

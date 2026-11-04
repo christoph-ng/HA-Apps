@@ -67,6 +67,7 @@ from .progress import JobBusy, JobProgress
 from .route_support import dir_size
 from .storage import backup, backup_external, cleanup, hotbuffer, reconcile
 from .storage import resolution as resolution_mod
+from .storage import rotate as rotate_mod
 from .storage import retention as retention_mod
 from .storage.coordinator import StorageCoordinator
 from .storage.index import Index, resolution_seconds
@@ -152,6 +153,7 @@ class BackgroundService:
         # zurück, was höchstens einen zusätzlichen Lauf beim nächsten Tick
         # bedeutet, keinen verlorenen.
         self._resolution_flush_last_run = 0.0
+        self._rotation_last_run = 0.0
         self._compact_last_run = 0.0
         self._purge_last_run = 0.0
         self.base_dir = deps.base_dir
@@ -994,6 +996,24 @@ class BackgroundService:
             ):
                 return
 
+    def _rotate_stale_months_if_due(self, now: datetime) -> None:
+        """Archiviert die Hot-Datei des Vormonats auch bei Entitäten, die seit dem Monatswechsel nichts mehr
+        gesendet haben.
+
+        Rotiert wurde sonst nur beim nächsten Schreibvorgang der Entität (oder von Hand). Bis dahin liest jede
+        Auswertung für einen vergangenen Monat nur das Archiv und fand dort nichts: Ein selten schaltender Sensor
+        hatte seinen Vormonat in keiner Tages-, Wochen-, Monats- und Jahresansicht. Läuft höchstens stündlich;
+        der Fund kostet ein einziges Verzeichnis-Listing, geschrieben wird nur, wenn etwas fällig ist. Je
+        Entität unter ihrer Entitätssperre (wie die Rotation beim Schreiben), nicht unter der globalen."""
+        now_ts = now.timestamp()
+        if now_ts - self._rotation_last_run < 3600:
+            return
+        self._rotation_last_run = now_ts
+        entity_ids = {row["entity_id"] for row in self.index.list_entities()}
+        for entity_id in sorted(hotbuffer.find_entities_with_stale_hot_files(self.data_dir, entity_ids, now_ts, self.tz)):
+            with self.coordinator.entity(entity_id):
+                rotate_mod.rotate_if_needed(self.data_dir, entity_id, now_ts, self.index, self.tz)
+
     def _flush_stale_resolution_windows(self, now: datetime) -> None:
         """Sicherheitsnetz für die Standard-Live-Auflösung (resolution.py):
         schließt Zeitfenster ab, die nie durch das nächste Live-Event
@@ -1017,7 +1037,9 @@ class BackgroundService:
                 path = hotbuffer.hot_path(self.data_dir, entity_id, now_ts, self.tz)
                 pending_end = resolution_mod.pending_bucket_end(path, interval)
                 if pending_end is not None and now_ts >= pending_end:
-                    resolution_mod.collapse_pending_window(path, interval)
+                    removed = resolution_mod.collapse_pending_window(path, interval)
+                    if removed:
+                        self.index.add_row_count(entity_id, -removed)
 
     def _run_automatic_compaction_if_due(self, now: datetime) -> None:
         """Automatische Verdichtung (Housekeeping → Verdichten) — standardmäßig
@@ -1218,6 +1240,8 @@ class BackgroundService:
                     self._refresh_rollup_hot_size_if_stale()
                 with self._maintenance_step("demo_append"):
                     self._run_demo_append_if_due(datetime.now(self.tz))
+                with self._maintenance_step("rotate_stale_months"):
+                    self._rotate_stale_months_if_due(datetime.now(self.tz))
                 with self._maintenance_step("flush_resolution_windows"):
                     self._flush_stale_resolution_windows(datetime.now(self.tz))
                 with self._maintenance_step("automatic_compaction"):
@@ -1336,8 +1360,13 @@ class BackgroundService:
         if self._storage_reconcile_thread is not None:
             self._storage_reconcile_thread.join(timeout=5)
         # Ein abgebrochener Hintergrundabgleich gilt vorsichtshalber nicht als
-        # sauberer Shutdown; dann wird beim nächsten Start synchron geprüft.
-        if self.requires_synchronous_reconciliation or self._storage_reconcile_completed:
+        # sauberer Shutdown; dann wird beim nächsten Start synchron geprüft. Das gilt ebenso, wenn ein Thread
+        # nach dem join() mit Zeitgrenze noch läuft: er kann mitten in einer Schreibarbeit stecken.
+        threads_stopped = not any(
+            thread is not None and thread.is_alive()
+            for thread in (self._maintenance_scheduler_thread, self._storage_reconcile_thread)
+        )
+        if threads_stopped and (self.requires_synchronous_reconciliation or self._storage_reconcile_completed):
             self.index.set_setting("storage_clean_shutdown", "1")
 
     def lock_status_rows(self) -> list[dict]:

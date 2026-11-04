@@ -614,7 +614,7 @@ def test_vertauschte_lade_und_entladerolle_wird_gemeldet(monkeypatch, tmp: Path)
     vergangenen Monat liest aus Archiv/Rollup, nicht aus dem Hot-Buffer
     (gleiches Muster wie _anomalie_anlage())."""
     a, config = _mit_speicher(tmp, [{
-        "name": "Verdreht",
+        "name": "Verdreht", "capacity_kwh": 5.0,
         "laden_entity_id": "sensor.wenig", "entladen_entity_id": "sensor.viel",
     }])
     for entity_id, start, ende in (("sensor.wenig", 10.0, 11.0), ("sensor.viel", 20.0, 29.0)):
@@ -626,6 +626,7 @@ def test_vertauschte_lade_und_entladerolle_wird_gemeldet(monkeypatch, tmp: Path)
         archiv.mkdir(parents=True, exist_ok=True)
         pq.write_table(tabelle, archiv / "2024-02.parquet")
         rollup.append_completed_month(tmp, entity_id, "counter", tabelle, 2024, 2, TZ)
+        a.index.record_write(entity_id, erster.timestamp())
         a.index.record_write(entity_id, letzter.timestamp())
     monkeypatch.setattr(ed, "datetime", _FesteUhr)
     try:
@@ -635,6 +636,134 @@ def test_vertauschte_lade_und_entladerolle_wird_gemeldet(monkeypatch, tmp: Path)
         assert pruefung["ok"] is False
         assert "Verdreht" in pruefung["detail"]
         assert flow["quality"]["plausible"] is False
+    finally:
+        a.close()
+
+
+def _februar_speicher_ohne_soc(tmp: Path, capacity_kwh: float | None) -> tuple[_Anlage, dict]:
+    """1 kWh geladen, 9 kWh entladen im vollständigen Februar 2024, ohne SOC-Sensor."""
+    speicher = {"name": "Heimspeicher", "laden_entity_id": "sensor.wenig", "entladen_entity_id": "sensor.viel"}
+    if capacity_kwh is not None:
+        speicher["capacity_kwh"] = capacity_kwh
+    a, config = _mit_speicher(tmp, [speicher])
+    for entity_id, start, ende in (("sensor.wenig", 10.0, 11.0), ("sensor.viel", 20.0, 29.0)):
+        a.index.get_or_create_entity(entity_id, "sensor", "total_increasing", "kWh")
+        erster = _dt.datetime(2024, 2, 1, 6, tzinfo=TZ)
+        letzter = _dt.datetime(2024, 2, 28, 18, tzinfo=TZ)
+        tabelle = pa.table({"ts": [erster.timestamp(), letzter.timestamp()], "value": [start, ende]})
+        archiv = tmp / "archive" / entity_id
+        archiv.mkdir(parents=True, exist_ok=True)
+        pq.write_table(tabelle, archiv / "2024-02.parquet")
+        rollup.append_completed_month(tmp, entity_id, "counter", tabelle, 2024, 2, TZ)
+        a.index.record_write(entity_id, erster.timestamp())
+        a.index.record_write(entity_id, letzter.timestamp())
+    return a, config
+
+
+def test_monat_ohne_soc_erlaubt_kapazitaet_als_spielraum(monkeypatch, tmp: Path) -> None:
+    """Ein bei Monatsbeginn voller Speicher entlädt in einem PV-armen Monat legitim mehr, als er
+    lädt — bis zur Kapazität (hier 9 kWh Entladung bei 1 kWh Ladung und 20 kWh Kapazität).
+    Ohne Kapazität (und ohne SOC) wird im Monat gar nicht geprüft."""
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    for unterordner, kapazitaet in (("mit", 20.0), ("ohne", None)):
+        a, config = _februar_speicher_ohne_soc(tmp / unterordner, kapazitaet)
+        try:
+            flow = a.service.compute_flow(config, "month", -1)
+            assert all(c["label"] != "Speicher-Wirkungsgrad plausibel" for c in flow["quality"]["checks"])
+        finally:
+            a.close()
+
+
+def test_lueckenhafter_monat_ohne_soc_wird_nicht_geprueft(monkeypatch, tmp: Path) -> None:
+    """Beginnt das Archiv erst mitten im Monat (hier: ab dem 20.), kann ein zu Beginn
+    gefüllter Speicher scheinbar mehr entladen als laden — kein Hinweis auf vertauschte
+    Rollen. Unter 90 % Abdeckung entfällt die Prüfung, wie beim kurzen Fenster."""
+    a, config = _mit_speicher(tmp, [{
+        "name": "Verdreht",
+        "laden_entity_id": "sensor.wenig", "entladen_entity_id": "sensor.viel",
+    }])
+    for entity_id, start, ende in (("sensor.wenig", 10.0, 11.0), ("sensor.viel", 20.0, 29.0)):
+        a.index.get_or_create_entity(entity_id, "sensor", "total_increasing", "kWh")
+        erster = _dt.datetime(2024, 2, 20, 6, tzinfo=TZ)
+        letzter = _dt.datetime(2024, 2, 28, 18, tzinfo=TZ)
+        tabelle = pa.table({"ts": [erster.timestamp(), letzter.timestamp()], "value": [start, ende]})
+        archiv = tmp / "archive" / entity_id
+        archiv.mkdir(parents=True, exist_ok=True)
+        pq.write_table(tabelle, archiv / "2024-02.parquet")
+        rollup.append_completed_month(tmp, entity_id, "counter", tabelle, 2024, 2, TZ)
+        a.index.record_write(entity_id, erster.timestamp())
+        a.index.record_write(entity_id, letzter.timestamp())
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    try:
+        flow = a.service.compute_flow(config, "month", -1)
+        assert all(c["label"] != "Speicher-Wirkungsgrad plausibel" for c in flow["quality"]["checks"])
+    finally:
+        a.close()
+
+
+def test_erlaubter_zaehlerrueckgang_wird_nicht_gemeldet(monkeypatch, tmp: Path) -> None:
+    """Zählerrückgänge, die an der Entität als „erlaubt“ eingestellt sind, sind keine
+    Auffälligkeit; ohne diese Einstellung bleibt die Meldung."""
+    a, config = _beispielanlage(tmp)
+    a.zaehler("sensor.netz", (13, 10.0))  # Rückgang von 103/106 auf 10
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+
+    def _reset_check() -> dict:
+        flow = a.service.compute_flow(config, "day", -1)
+        return next(c for c in flow["quality"]["checks"]
+                    if c["label"] in ("Zählerrücksetzung erkannt", "Keine Zählerrücksetzungen"))
+
+    try:
+        assert _reset_check()["ok"] is False
+        a.index.set_counter_decreases("sensor.netz", "allow")
+        assert _reset_check()["ok"] is True
+    finally:
+        a.close()
+
+
+def _verdrehter_speicher_mit_soc_im_februar(tmp: Path, erster_tag: int) -> tuple[_Anlage, dict]:
+    """Vertauschte Lade-/Entladerolle (1 geladen, 9 entladen) mit SOC-Sensor, dessen Ladestand im
+    Monat gleich bleibt (50 % -> 50 %, also nichts zu korrigieren); das Archiv beginnt am
+    ``erster_tag`` Februar 2024."""
+    a, config = _mit_speicher(tmp, [{
+        "name": "Verdreht", "soc_entity_id": "sensor.soc", "capacity_kwh": 20.0,
+        "laden_entity_id": "sensor.wenig", "entladen_entity_id": "sensor.viel",
+    }])
+    for entity_id, typ, start, ende in (
+        ("sensor.wenig", "counter", 10.0, 11.0), ("sensor.viel", "counter", 20.0, 29.0),
+        ("sensor.soc", "standard", 50.0, 50.0),
+    ):
+        a.index.get_or_create_entity(
+            entity_id, "sensor", "measurement" if typ == "standard" else "total_increasing",
+            "%" if typ == "standard" else "kWh",
+        )
+        erster = _dt.datetime(2024, 2, erster_tag, 6, tzinfo=TZ)
+        letzter = _dt.datetime(2024, 2, 28, 18, tzinfo=TZ)
+        tabelle = pa.table({"ts": [erster.timestamp(), letzter.timestamp()], "value": [start, ende]})
+        archiv = tmp / "archive" / entity_id
+        archiv.mkdir(parents=True, exist_ok=True)
+        pq.write_table(tabelle, archiv / "2024-02.parquet")
+        rollup.append_completed_month(tmp, entity_id, typ, tabelle, 2024, 2, TZ)
+        a.index.record_write(entity_id, erster.timestamp())
+        a.index.record_write(entity_id, letzter.timestamp())
+    return a, config
+
+
+def test_lueckenhafter_monat_wird_auch_mit_soc_nicht_geprueft(monkeypatch, tmp: Path) -> None:
+    """Die SOC-Korrektur deckt nur den Ladestand im Fenster ab, nicht den vor dem ersten
+    archivierten Wert: Beginnt das Archiv erst am 20., entfällt die Prüfung auch mit SOC-Sensor.
+    Dasselbe mit vollständigem Monat meldet den Tausch (Gegenprobe, sonst prüft der Test nichts)."""
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    a, config = _verdrehter_speicher_mit_soc_im_februar(tmp / "voll", 1)
+    try:
+        flow = a.service.compute_flow(config, "month", -1)
+        assert any(c["label"] == "Speicher-Wirkungsgrad plausibel" for c in flow["quality"]["checks"])
+    finally:
+        a.close()
+    a, config = _verdrehter_speicher_mit_soc_im_februar(tmp / "luecke", 20)
+    try:
+        flow = a.service.compute_flow(config, "month", -1)
+        assert all(c["label"] != "Speicher-Wirkungsgrad plausibel" for c in flow["quality"]["checks"])
     finally:
         a.close()
 
@@ -964,6 +1093,49 @@ def test_anomalie_feuert_im_testaufbau_ueberhaupt(monkeypatch, tmp: Path) -> Non
         a.close()
 
 
+def _vorjahres_februar(tmp: Path, jahr: int, menge: float) -> None:
+    """Archivierter Februar eines früheren Jahres für sensor.geraet."""
+    erster = _dt.datetime(jahr, 2, 1, 6, tzinfo=TZ)
+    letzter = _dt.datetime(jahr, 2, 28, 18, tzinfo=TZ)
+    tabelle = pa.table({"ts": [erster.timestamp(), letzter.timestamp()], "value": [0.0, menge]})
+    archiv = tmp / "archive" / "sensor.geraet"
+    pq.write_table(tabelle, archiv / f"{jahr}-02.parquet")
+    rollup.append_completed_month(tmp, "sensor.geraet", "counter", tabelle, jahr, 2, TZ)
+
+
+def test_anomalie_vergleicht_monat_mit_den_vorjahren(monkeypatch, tmp: Path) -> None:
+    """Ein Verbraucher mit Jahreszeiten (Wärmepumpe) ist im Winter höher als in den
+    Vormonaten, aber nicht höher als im selben Monat der Vorjahre: keine Auffälligkeit.
+    Dieselben Daten ohne Vorjahre (siehe test_anomalie_feuert_im_testaufbau_ueberhaupt)
+    lösen sie aus — dort greift der Rückfall auf die Vormonate."""
+    a, config = _anomalie_anlage(tmp)
+    _vorjahres_februar(tmp, 2023, 38.0)
+    _vorjahres_februar(tmp, 2022, 42.0)
+    a.index.record_write("sensor.geraet", _dt.datetime(2023, 2, 28, 18, tzinfo=TZ).timestamp())
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    try:
+        flow = a.service.compute_flow(config, "month", -1)
+        knoten = next(n for n in flow["nodes"] if n["name"] == "Gerät")
+        assert not knoten.get("anomaly")
+        assert flow["anomalien"] == []
+    finally:
+        a.close()
+
+
+def test_anomalie_vorjahr_faellt_nur_mit_daten_ins_gewicht(monkeypatch, tmp: Path) -> None:
+    """Ein einziges Vorjahr mit Daten genügt als Vergleich: die beiden fehlenden Jahre zählen
+    nicht als 0 (sonst läge der Schnitt bei 13 statt 40 und alles schlüge an)."""
+    a, config = _anomalie_anlage(tmp)
+    _vorjahres_februar(tmp, 2023, 39.0)
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    try:
+        flow = a.service.compute_flow(config, "month", -1)
+        knoten = next(n for n in flow["nodes"] if n["name"] == "Gerät")
+        assert not knoten.get("anomaly")
+    finally:
+        a.close()
+
+
 def test_anomalie_braucht_mindestabstand_zum_vergleichswert(monkeypatch, tmp: Path) -> None:
     """40 kWh gegen 10 kWh überschreiten die Prozentschwelle weit; liegt der
     Mindestabstand aber über den 30 kWh Differenz, ist es keine Auffälligkeit
@@ -1197,5 +1369,44 @@ def test_complete_prices_report_no_gap(monkeypatch, tmp: Path) -> None:
             p for p in flow["quality"]["checks"] if p["label"] == "Preise und Faktoren vollständig"
         )
         assert pruefung["ok"] is True
+    finally:
+        a.close()
+
+
+def test_verbrauch_ist_die_bilanz_inklusive_speicher(monkeypatch, tmp: Path) -> None:
+    """Solange die Grundlast nicht negativ ist, ist der Verbrauch der Live-Ansicht genau die
+    Bilanz, die Trends, Monatsverlauf und die Jahre-×-Monate-Auswertung rechnen:
+    Erzeugung + Bezug + Entladung − Einspeisung − Ladung. 10 + 6 + 3 − 3 − 5 = 11."""
+    a, config = _mit_speicher(tmp, [{
+        "name": "Heimspeicher",
+        "laden_entity_id": "sensor.laden", "entladen_entity_id": "sensor.entladen",
+    }])
+    a.zaehler("sensor.laden", (0, 200.0), (23, 205.0))
+    a.zaehler("sensor.entladen", (0, 300.0), (23, 303.0))
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    try:
+        kpi = a.service.compute_flow(config, "day", -1)["kpi"]
+        bilanz = (kpi["erzeugung"] + kpi["netzbezug"] + kpi["speicher_entladen"]
+                  - kpi["einspeisung"] - kpi["speicher_laden"])
+        assert bilanz == pytest.approx(11.0)
+        assert kpi["verbrauch"] == pytest.approx(bilanz)
+    finally:
+        a.close()
+
+
+def test_verbrauch_ist_nie_kleiner_als_die_summe_der_gemessenen_verbraucher(monkeypatch, tmp: Path) -> None:
+    """Bei negativer Grundlast (Zähler passen nicht zusammen) bleibt die Live-Ansicht bei der
+    Summe der gemessenen Verbraucher und meldet die Bilanz als unplausibel, statt weniger
+    Verbrauch zu zeigen, als nachweislich geflossen ist. Die Bilanz allein wäre hier 13 kWh,
+    gemessen sind 1 + 2 + 20 = 23 kWh. Das ist der einzige Fall, in dem Live und Bilanz
+    auseinanderlaufen (Roadmap 1.45, P0)."""
+    a, config = _beispielanlage(tmp)
+    a.zaehler("sensor.wallbox_gross", (0, 30.0), (12, 40.0), (23, 50.0))   # +20 statt +4
+    config["verbraucher"][2]["entity_id"] = "sensor.wallbox_gross"
+    monkeypatch.setattr(ed, "datetime", _FesteUhr)
+    try:
+        flow = a.service.compute_flow(config, "day", -1)
+        assert flow["kpi"]["verbrauch"] == pytest.approx(23.0)
+        assert flow["quality"]["plausible"] is False
     finally:
         a.close()

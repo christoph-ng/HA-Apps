@@ -33,8 +33,16 @@ internals for developers are in the other documents of this folder (see
   - [Status, data quality and anomalies](#status-data-quality-and-anomalies)
   - [Daily load profile](#daily-load-profile)
   - [Energy report](#energy-report)
+- [Weather dashboard](#weather-dashboard)
+  - [Roles](#roles)
+  - [Tiles and comparison table](#tiles-and-comparison-table)
+  - [Precipitation tab](#precipitation-tab)
+  - [Monthly comparison](#monthly-comparison)
+  - [Long-term tab](#long-term-tab)
+  - [Heating tab](#heating-tab)
 - [Entities and histories](#entities-and-histories)
   - [Deleting several entities](#deleting-several-entities)
+  - [Categories](#categories)
   - [Period navigation](#period-navigation)
   - [Presentation](#presentation)
   - [Zooming into a section](#zooming-into-a-section)
@@ -198,8 +206,8 @@ under **Dashboards**, just permanently assigned to the overview and not
 renamable or deletable. Like any other dashboard it can be populated with
 tiles, rearranged and locked (see below).
 
-What appears when opening Zeitarchiv via the HA sidebar (the overview or the
-energy dashboard directly) is determined by **Settings → Appearance → Start
+What appears when opening Zeitarchiv via the HA sidebar (the overview, the
+energy dashboard or the weather dashboard) is determined by **Settings → Appearance → Start
 page**. The "Overview" entry in the header always leads to the overview
 itself, independently of that.
 
@@ -291,8 +299,8 @@ something to scroll.
   upper limit on the number of dashboards. The default dashboard carries a
   colored header stripe for easier recognition (the same idea as with the
   energy dashboard tile at the top of the list); if **Settings → Appearance →
-  Start page** is set to Energy dashboard, its tile additionally shows a small
-  house icon.
+  Start page** is set to Energy dashboard or Weather dashboard, its tile
+  additionally shows a small house icon.
 - Clicking the tile opens the dashboard; "Edit", "Duplicate", "Set as default"
   and "Delete" are in the tile menu (⋮). Search field, sorting and the
   "Favorites first" switch above the tiles work as with charts and tables (see
@@ -575,10 +583,19 @@ its devices on top.
 Directly below the Sankey are five KPI tiles (generation, consumption, grid
 import, storage, feed-in) for the selected period; with several storage units
 or generators, their tooltip additionally shows the breakdown per device. A
-click on a tile leads to the chart of the underlying entity, with the same
-period currently set in the energy dashboard; if more than one entity is
-behind it (several generators/consumers, or a storage unit with separate
-charge/discharge entities), a short selection window opens instead. The link
+click on a tile opens a chart popup for the period currently set: stacked bars
+per source for generation and consumption (with the base load for consumption;
+switchable to lines and percentage shares), charge and discharge side by side
+for storage (plus the state of charge as a line for hour and day if a
+state-of-charge sensor is set), and bars (switchable to a line) with the
+previous period (previous day, previous month, …) as a dashed line for grid
+import and feed-in; the previous period is the calendar period, while the
+percentage on the tile compares rolling windows, so the two can differ
+slightly while a period is still running. The rows below, or "Open entity" for
+grid import and feed-in, lead to the entity with the same period; the popup
+loads when opened and does not refresh by itself. Generation, grid import and
+feed-in without a configured source are disabled; storage only appears if one
+is configured. The link
 "← back to the energy dashboard" on the entity page (as well as the one from
 the energy report, see below) leads back exactly to this period, not to the
 default view.
@@ -631,6 +648,102 @@ month/year, instead the consumption averaged by weekday (Mon–Sun) over the
 selected period, so that it becomes visible on which weekdays more is
 typically consumed.
 
+### “Long-term” tab
+
+Two tabs sit under the title: **Overview** (the energy flow with all cards,
+unchanged) and **Long-term**. The Long-term tab compares periods with last
+year, built like the comparison table of the weather dashboard: column groups
+**Last month**, **This month** and **This year**, each with last year next to
+it and the difference to last year's value below. The rows are generation,
+feed-in, grid import and consumption. Green means favorable (more generation
+and feed-in, less grid import and consumption), red unfavorable.
+
+- **Reference day:** the “‹ date ›” bar with calendar and “Today” at the top of
+  the card shows the periods as of an earlier day. The day is part of the
+  address (`?date=`) and applies to this tab only; the overview has its own
+  period selection.
+- **Last year:** “So far” compares a running period with the same stretch of
+  last year, “Complete” with the whole period of last year; last month is the
+  same in both cases. “Show difference” shows or hides the difference line.
+  The browser remembers the choice (columns, last year, difference).
+- **Ratios and storage:** Below consumption are self-consumption and
+  self-sufficiency (calculated as on the overview); their difference to last
+  year is in percentage points (pp). With storage assigned, rows for charge
+  and discharge are added, without a green or red rating.
+- **PV system, weather-adjusted:** If a generator has a **system capacity**
+  (kWp) in the setup, the **specific yield** (kWh per kWp) appears. If the
+  weather dashboard also has **irradiation** (W/m²) assigned, **Yield per
+  irradiation** shows how much of the irradiated energy the system generated;
+  this tells a weaker year from a worse summer. Only generators with a capacity
+  count. If the sensor has fewer than 80 % of the hourly values in a period,
+  it shows “–”. The sensor measures horizontally while roofs are tilted
+  differently, so the value is a comparison across years, not an efficiency.
+- **Consumption** here is the balance generation + grid import + storage
+  discharge − feed-in − storage charge, the same calculation as the trends and
+  the monthly course of the report. “This year” compares by calendar (1 Jan up
+  to the reference day); the tiles on the overview compare over a rolling 365
+  days instead, so their percentages differ.
+- **Missing data** is not 0: if a period has no value, it shows “–”, with the
+  start of the archive as a hint if it falls inside the period.
+- **What has changed?** A card with the consumers whose consumption changed most
+  compared with last year (period This year, reference day and last-year mode
+  as in the table). Bars to the right (red) mean more consumption, to the left
+  (green) less. Devices behind a sub-meter are included in the sub-meter; “Other
+  (base load)” is the rest up to the consumption from the balance. A consumer
+  that has values in only one of the two periods is not listed.
+- **Records:** Strongest generation day, highest feed-in, highest consumption and
+  highest grid import as daily values since the start of the archive, with date
+  and a link to the day (for roles with exactly one entity). Records appear only
+  from one year of archive. Days directly after a missing day do not count,
+  because the next reading carries the difference of several days there and
+  would give a false record; in a tie the earlier day counts.
+- **Years:** Above the monthly comparison, “Last 5”, “Last 10” or “All” sets how
+  many years the monthly comparison, “Years × months” and key days show. The
+  average and range are formed only from these years. Records always count since
+  the archive began. The browser remembers the choice.
+- **Key days per year:** Six key days in three pairs, one bar per year with the
+  number of days and their share of the days evaluated: **Almost
+  self-sufficient** (self-sufficiency of 90 % or more, i.e. grid import at most
+  10 % of consumption with at least 0.5 kWh consumption) and **Surplus days**
+  (more feed-in than consumption), **Sunny days** (from 4 kWh per kWp, needs the
+  system size on every generator) and **Dull days** (below 10 % of the year’s
+  daily average), **Battery heavily used** (discharge from 80 % of the battery capacity) and
+  **Battery barely used** (below 10 %). A box appears only if the roles for it
+  are set up; the battery pair also needs the battery capacity (the sum for
+  several batteries). “Full year” counts calendar years, “Until today” counts only up to
+  today’s calendar day in every year so the current year is comparable. Clicking
+  a row opens the year calendar: 12 months of 31 days with the key days filled,
+  clicking a day opens it in the energy dashboard. Only days with all values
+  count, without the day after a missing day. You set the thresholds in the setup
+  under “Key days”; an empty field uses the default.
+- **Hiding areas:** In the setup under “Long term” you can switch every block
+  of the “Periods compared” table (ratios, battery, PV system weather-adjusted)
+  and every card of the tab (monthly comparison, years × months, what has
+  changed?, records, key days per year) on and off. The Energy block is always
+  visible. Cards you switch off do not even load their data.
+- Totals from 10,000 kWh on are shown in MWh. The meters must deliver kWh, as
+  on the overview.
+- **Monthly comparison:** Below it, a line chart shows the monthly values per
+  year (generation, feed-in, grid import or consumption in kWh), one line per
+  year. The dashed line is the average of the completed years, the area their
+  range (“Range of previous years” hides it). The running month is not yet
+  complete and appears only in the tooltip.
+- **Years × months:** The table lists all years of the archive one below the
+  other (newest on top), one field per month: the monthly value on top, below
+  it the deviation from the average of this month over the completed years,
+  colored by favorability. The yearly total is on the right, the average at the
+  bottom. Clicking a field opens the month of the entity (for roles with exactly
+  one entity). A triangle at the top right of a field marks gaps or counter
+  decreases in that month; the tooltip gives the count. Gaps mark only months
+  clearly above the usual level of the role (at least 10 and three times the
+  median), because meters that report rarely have many gaps in every month;
+  counter decreases are always marked. The month in which the archive starts
+  in the middle of the month is only partly covered and does not enter any
+  average. The findings come from the daily counts of the data quality
+  overview; entities not measured there yet
+  count as not checked, not as “no findings”. Months before the start of the
+  archive show “–”, never 0.
+
 ### Energy report
 
 An icon next to the period navigation (active only for month/year) opens a
@@ -644,6 +757,146 @@ library runs in the background — the **"Print / Save as PDF"** button merely
 calls the browser's print dialog, where you can choose "Save as PDF" instead of
 a real printer as usual. There is no automatic dispatch by e-mail — the
 report, like everything in Zeitarchiv, stays exclusively local.
+
+## Weather dashboard
+
+A standalone view for weather values, built like the energy dashboard: you
+assign roles (outdoor temperature, precipitation, humidity, …) to one entity
+each and the page is built from them. It is switched on and off with a fixed
+tile on the dashboards overview and is then available in the **Dashboards**
+menu directly below the energy dashboard.
+
+### Roles
+
+The role decides how values are calculated; setup only offers entities of the
+matching type for each role and rejects wrong assignments.
+
+| Role | Type | Figures |
+|---|---|---|
+| Outdoor temperature (required) | Measurement | Max and min with time, mean |
+| Precipitation (amount) | Counter | Sum, rain days, wettest day |
+| Rain (on/off) | Switch | Rain minutes, rain days, rainiest day |
+| Humidity, pressure, wind, gust, radiation | Measurement | Max and min with time, mean |
+
+A rain sensor that only reports on and off is enough: the page then shows rain
+minutes and rain days instead of millimetres. If you have both, both rows are
+shown side by side. Many on/off sensors also report “rain” in fog, dew or when
+the sensor is wet; the drying time then counts too. You set when a day counts
+as a rain day in setup (default 1 mm or 10 min). In the **Display** section you can hide blocks of the comparison table (key days, precipitation, rain, humidity, pressure, wind, gust, radiation); the outdoor temperature and additional sensors are always shown, and the tiles at the top do not change. The period of a column is in the tooltip of its heading ("ⓘ"), not on a line of its own. For max and min, the day appears as a small line under the value in the month, previous month and year columns; the difference to the previous year can be switched on and off in the "Previous year" menu with "Show difference" (remembered by the browser).
+
+The **Suggest** button in the readings section fills the roles that are still empty, based on device class, unit, names ("outdoor", "rain", "gust") and the weather integration; entities on the same device as the outdoor temperature are preferred. Roles that are already assigned stay unchanged, and nothing is saved until you press Save. Close calls are marked "check" and list further candidates. Heating counters (names with heating, heat pump, heating element …) are suggested too, and so are further temperature and humidity sensors (indoor rooms as well) for "More sensors" as long as none is set. Matching entities that are not archived yet are named; a link opens the selection assistant (topic Weather).
+
+**Additional sensors** (temperature or humidity, for example cellar or attic)
+become their own rows, shown on the **Temperature & climate** tab, and are never averaged with the outdoor temperature. Backups include the assignment; the
+selective restore brings it back as a whole ("Weather dashboard configuration").
+
+### Tiles and comparison table
+
+Tiles and comparison table share one card whose title names the day (Today, Yesterday, otherwise Looking back; a click on it jumps back to today). The tiles show the current value and the day's range for each role. The **Overview** holds temperature, precipitation, rain, humidity and pressure; wind, gust and radiation have their own **Wind & sun** tab, additional sensors the **Temperature & climate** tab (each appears only when something is assigned), with the same tiles and the same comparison table. The **Temperature & climate** tab also has the **Temperature comparison** chart: daily averages of the outdoor temperature and all additional sensors for 7, 30 or 90 days.
+The table below has the columns **Today, Yesterday, This month, Last month**
+and **This year**, each optionally with a **Last year** column next to it; the
+header shows the concrete period (“November”, “2026”). The difference to last
+year sits next to the current value and is deliberately neutral in colour, as
+warmer is not automatically better. For max and min a tooltip shows when the value
+occurred (the hour for today and yesterday, otherwise the day); the period of the last year is in the tooltip of the “Last year” column heading.
+
+You choose the **last year** comparison with the “Last year ▾” button (Off, So far, Complete); it shows the state even when closed.
+With the **reference-date bar** (as on the dashboards: ‹ date ›, calendar; no step buttons, ‹ › always moves one day, "Today" appears once an earlier day is chosen) the table shows the periods as of an earlier day: Today, Yesterday,
+Month, Last month and Year then refer to it, and the stretch of last year ends on the same
+calendar day. The date is part of the address (`?date=2026-01-15`), so the view can
+be linked; "Today" resets it. The bar also applies to the tiles: for an earlier day they show the value at the end of the day, the day's minimum and maximum and, for precipitation and rain, the previous day. You choose the
+columns with **Columns ▾**; a click on a tile opens the entity.
+
+**So far** compares the running period with the same stretch of last year
+(1–2 Nov 2026 against 1–2 Nov 2025), **Complete** with the whole period of last
+year. Completed periods (yesterday, last month) are the same in both cases. If
+a period has no data it shows “–”, never 0; a tooltip tells when the archive
+begins. The browser remembers the column selection.
+
+### Precipitation tab
+
+Once a precipitation entity is assigned, the **Precipitation** tab shows the
+running total since the start of the year as a line, plus last year and the
+average of the completed previous years (dashed, with the range from the driest to
+the wettest curve). A headline sums it up, for example "412 mm until 02.11., 21 %
+below the mean (520 mm, from 3 years)"; the comparison with the mean needs at
+least two completed previous years. The bars along the bottom are the daily
+values. Tiles name rain days, the wettest or rainiest day, the longest dry spell
+and a running dry spell. With an on/off rain sensor the page counts rain time in
+hours and rain minutes; if both kinds are assigned, **Amount/Duration** switches
+between them. 29 February counts to 28 February, a gap holds the running total,
+and the line ends after the last real value.
+
+### Monthly comparison
+
+On the overview, below the table, sits the monthly comparison: one line per year,
+the last previous year stronger, the current year strongest, plus the average
+(dashed) and optionally the range of previous years. The average contains only
+completed previous years and says how many years it comes from; the running month
+only shows its state so far. For temperature a sentence sits above the chart, such
+as "November so far mean 3.6 °C, 1.2 K colder than the mean of 2023–2025 (1–2, from
+3 years)": the running month up to yesterday against the same stretch of previous
+years. It appears from two previous years with enough values.
+
+### Long-term tab
+
+**Characteristic days per year** counts by the fixed thresholds of the German
+Weather Service: frost day (minimum below 0 °C), ice day (maximum below 0 °C),
+summer day (maximum from 25 °C), hot day (from 30 °C). Each kind has its own small chart with its own axis (every ice day is also a frost
+day, every hot day also a summer day), so rare kinds stay readable next to frost days;
+the dashed line is the average of the completed years. "All years" or "Last 5" limits
+the selection. The current year is marked with *.
+Pointing at a bar shows the split across months in the tooltip. Only completed days
+with at least 18 hours of values are counted. The same numbers appear as **Characteristic days** rows under the
+outdoor temperature in the comparison table (for month and year columns).
+
+**Mean temperature per month and year** shows one row per year, one column per month and
+the annual mean on the right. The colour shows how far a month deviates from the mean of
+that month over all completed years in the archive (blue colder, red warmer). Each cell
+shows the temperature on top and the difference in kelvin below. A
+comparison exists only once a month has at least two completed years; until then the
+values are shown uncoloured. The annual mean appears from six months with values; the
+current year is marked with * and does not count towards the mean. At most the last ten
+years are shown.
+
+**Years compared, day by day** stacks all years as a matrix: one row per year (the
+newest on top), one column per calendar day, coloured by the daily value. You can
+choose mean, max or min of the outdoor temperature, or precipitation (white to blue).
+Shifts in the seasons stand out: a heat wave or an early frost lines up vertically
+across all rows. Grey cells are days without enough values, blank is before the archive
+began and from today on; a day without a value is never drawn as 0. A click opens the
+day in the entity. 29 February has a column of its own.
+
+**Records** (warmest and coldest day, highest and lowest value, strongest gust,
+wettest day) appear once the archive holds at least a year of daily values and apply
+since the archive began. A single measurement error can set a record: **Open day**
+jumps straight to the entity on that day, where faulty values can be marked; only after
+they are deleted for good do the records exclude them.
+
+### Heating tab
+
+As soon as one or more energy counters of the heating are assigned under **Edit roles →
+Heating energy** (heat pump, heating element, convectors, electric underfloor heating), the
+**Heating** tab appears. The counters are added up to a total; counters in Wh or MWh are
+converted to kWh.
+
+The **scatter chart** shows every heating day as a point: daily mean outdoor temperature
+against kWh, one colour per heating season. The regression line runs only over the days below
+the **heating limit** (default 15 °C, shown as a vertical line); its slope is listed as "kWh
+per kelvin" below. Room temperature (default 20 °C) and heating limit can be changed at the
+top, as can the selection of counters, without reloading; the browser remembers the values.
+
+The **degree-day figure** (G20/15 to VDI 3807) counts, for each day, room temperature minus
+daily mean, but only on days below the heating limit. **kWh per degree day** is the
+weather-adjusted consumption: it lets you compare cold and mild winters, which the plain total
+cannot. The table shows, per month and for the whole heating season (fixed 1 Oct to 30 Apr),
+degree days, kWh and kWh per degree day for the last three seasons, plus the change against
+the previous season. A "1 Oct–yesterday" row compares the running season with the same stretch
+of earlier seasons, so the start of a winter does not look like a slump. A sentence at the top
+sums it up. Only completed days with enough temperature values count.
+
+With several counters, **Share per counter** shows stacked bars per month for a selectable
+heating season, with each counter's share in percent.
 
 ## Entities and histories
 
@@ -692,6 +945,54 @@ and table list, as a note above “Used in” and as a warning symbol on the til
 title. The references are deliberately not removed: if Home Assistant keeps
 sending values, the integration recreates the entity. If you no longer need it,
 take it out in the editor of the chart or table.
+
+### Categories
+
+Categories group entities by topic, for example heat pump, solar or weather.
+They are independent of the favorite star: the star says "important", the
+category says "belongs to". Each entity has at most one category; new entities
+arrive without one.
+
+They are created and ordered on the **Categories** tab next to "List" and
+"Selection & history". When first opened it offers suggestions to take over
+(Solar, Heat pump, Battery, EV, Weather, Consumers, Grid); deselect what does
+not fit. Afterwards they are ordinary categories of your own. Each row can be
+renamed, colored (the color comes from the chart palette) and deleted; deleting
+releases the assigned entities, the entities themselves are untouched. The
+**order** of the rows sets the sorting in the list: change it by dragging the
+handle or with the arrows. At most 30 categories, names up to 40 characters and
+each name only once; colors may repeat.
+
+The list shows the **Category** column as soon as at least one category exists;
+**Columns ▾** can hide it. Clicking the heading sorts by the order of the
+categories (not alphabetically), entities without a category come last. You
+assign in selection mode: mark entities, choose **Set category ▾** and click
+the category (or "No category" to release). A single entity can be set in its
+configuration, in the **Category** field.
+
+Next to the column the **Category: All ▾** filter appears: several categories
+can be chosen at once, **No category** shows what still needs sorting. If you
+hide the column, the filter is reset.
+
+In the **selection assistant** the confirmation step has a **Set category**
+field. It is preset to the category of the same name as the topic; if there is
+none, it is offered as "new" and created when you apply (the step says so).
+As long as you do not use categories yet, the field stays on "No category". The
+category applies to the entities that newly join the selection now, even before
+their first value arrives; those that already have a category keep it unless
+you tick **Also re-sort entities that already have a category**. Topic and
+category stay separate.
+
+On the **Selection & history** tab a row **Filter by category** sits below the
+search (display only, as in the list, including "No category"); the category is
+also shown under the name of each entity there.
+
+The **export** has the **Category** filter too, so that, for example, all heat
+pump entities can be exported in one go with "Select all entities". Backups
+include the assignment. The selective restore brings it back by the category's
+name (a missing category is created): for an entity that no longer exists
+locally together with it, for existing entities as its own field group
+**Category** under "Settings".
 
 ### Period navigation
 
@@ -962,7 +1263,10 @@ Own editor, reachable via **Charts** → new chart or editing an existing one
   first and can be narrowed with chips by **Type** and **Unit**. Once something
   is selected, matches with a fitting unit come first ("Fits an existing
   axis"). Under **Selected** the chosen entities can be renamed, reordered,
-  hidden and removed with ✕.
+  hidden and removed with ✕. Clicking the color dot opens the color picker:
+  “Auto” (palette by order), one of the eight palette colors, or a custom
+  color. The color applies in the chart and its dashboard tiles; palette colors
+  follow the theme, custom colors stay the same.
 - Overlay any number of entities; different units automatically get separate Y
   axes so that, e.g., temperature and humidity remain sensibly readable in one
   chart.
@@ -1229,6 +1533,15 @@ Purely visual settings, they never affect the calculated values:
 - **Comparison:** set comparison columns (previous day, previous month,
   previous year …) apart visually, show percentage deviation from the
   associated comparison column.
+- **Sum column:** An extra column (left or right of the periods, label of
+  your choice) shows the sum over the periods for each row. Each column
+  card has “Include in sum”, so with 8 days you can leave out the oldest.
+  Hidden columns never count. Counters and switches are summed, as are rows
+  with the aggregation “Σ Sum”; average, minimum, maximum and states show
+  “–”. Formula rows evaluate their formula again on the sums, so a quotient
+  like “A / B” gives ΣA ÷ ΣB. If included columns overlap in time (e.g. week
+  and day), the header cell warns because values are counted twice. The column
+  also appears in dashboard tiles and the CSV export.
 - **Numbers / units:** show/hide units, align them in a fixed column or show
   them smaller, align the decimal separator column-wise, spell out missing
   values as "No data" instead of as a dash.
@@ -1314,6 +1627,16 @@ opened entity. Every setting applies **only to this one entity** and
 overrides the global default from **Settings → Archiving**. New global
 defaults never apply retroactively to entities that already exist.
 
+The page is divided into five sections: **General**, **Recording**,
+**Retention**, **Display** and **Checks**, with a jump line at the top. Each
+field is one row with a short line; the detailed text is behind the info button
+(i). The **customised** badge shows that a value differs from the current
+global default (the default is in the tooltip), a click on it resets the field to the
+default after a confirmation, and the jump line and section
+heading count such fields. Fields that cannot be set for the entity's type
+show their fixed value with the **fixed** badge; the reason is behind the info
+button.
+
 ### Where do I start?
 
 The fields act at very different points. This classification matters
@@ -1340,6 +1663,12 @@ Zeitarchiv** (lists, selection fields, diagrams, tables) — Home Assistant's ow
 `friendly_name` and the entity ID remain untouched. A tag icon marks
 everywhere where a custom name is active. Leaving it empty restores the HA
 name.
+
+### Category
+
+Assigns the entity to a topic, for example heat pump or solar (see
+[Categories](#categories)). The choice applies immediately. Without any
+categories the field links to the management page.
 
 ### Historic
 
@@ -2260,7 +2589,7 @@ Menu item of its own **System → Backup / Restore** (not under Settings):
     Deleted data points of the entity follow the backup afterwards. Writes
     pause briefly during the swap.
   - **Settings:** brings back dashboards, charts, comparison tables, field
-    groups of the entity settings (name, retention, filters, counter, display)
+    groups of the entity settings (name, retention, filters, counter, display, category)
     and general settings one by one, also without a restart. Matching is done
     by name. By default an object that does not exist currently, or differs,
     is added as a **copy** and nothing existing is changed; optionally a
@@ -2414,7 +2743,7 @@ If you want to look something up later, download it first.
 
 | Area | Contains |
 | --- | --- |
-| **Appearance** | Language (Automatic/German/English — default German; "Automatic" follows the browser language; untranslated places appear in German), number and date format (Automatic/German/English UK/English US — "Automatic" follows the browser: `en-GB` → `1,234.5` and `07/10/2026`, `en-US` → `10/07/2026` with a 12-hour clock, `de-*` → `1.234,5` and `07.10.2026`; independent of the language; CSV exports and file names stay unchanged), currency (Automatic/EUR/GBP/USD/CHF — "Automatic" takes it from Home Assistant, otherwise euro; amounts are not converted, enter your prices again after changing it), start page (overview/energy dashboard), color scheme (Zeitarchiv/Home Assistant/Modern), light/dark/automatic, font size, dashboard tile fade animation, starting values for the chart options of the entity history view |
+| **Appearance** | Language (Automatic/German/English — default German; "Automatic" follows the browser language; untranslated places appear in German), number and date format (Automatic/German/English UK/English US — "Automatic" follows the browser: `en-GB` → `1,234.5` and `07/10/2026`, `en-US` → `10/07/2026` with a 12-hour clock, `de-*` → `1.234,5` and `07.10.2026`; independent of the language; CSV exports and file names stay unchanged), currency (Automatic/EUR/GBP/USD/CHF — "Automatic" takes it from Home Assistant, otherwise euro; amounts are not converted, enter your prices again after changing it), start page (overview/energy dashboard/weather dashboard), color scheme (Zeitarchiv/Home Assistant/Modern), light/dark/automatic, font size, dashboard tile fade animation, starting values for the chart options of the entity history view |
 | **Archiving** | Default values for newly detected entities (never act retroactively on existing entities): resolution, retention, decimal places, value change filter, gap/outlier detection |
 | **Notices** | Switch the tip display on/off and dialog with all tips (see [Housekeeping](#housekeeping)); overview of muted system notices with remaining duration, individually re-enableable early |
 | **Connection** | Show/regenerate API token, last received value, number of writes and auth errors since start, connected integration version with "last seen" time (notice for outdated or newly available version) |

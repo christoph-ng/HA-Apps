@@ -381,6 +381,24 @@
       return midnight.getTime() / 1000;
     }
 
+    // Beginnt ein rollierendes Fenster mitten im Tag, liegt der erste Bucket
+    // (Mitternacht) vor dem Achsenanfang: der Balken ragt über die y-Achse und
+    // verdeckt deren Beschriftung. Die Achse beginnt dann eine halbe
+    // Bucket-Breite vor dem ersten Balken, sodass er ganz im Diagramm liegt.
+    // Gleiche Funktion in dashboard-tiles.js.
+    function axisMinForBars(seriesList, windowStartMs) {
+      if (windowStartMs == null) return undefined;
+      let min = windowStartMs;
+      seriesList.filter(s => s.type === 'bar' && s.data && s.data.length > 1).forEach(s => {
+        const xs = s.data.map(p => p[0]).filter(Number.isFinite).sort((a, b) => a - b);
+        if (xs.length < 2 || xs[0] >= windowStartMs) return;
+        let step = Infinity;
+        for (let i = 1; i < xs.length; i++) if (xs[i] > xs[i - 1]) step = Math.min(step, xs[i] - xs[i - 1]);
+        if (Number.isFinite(step)) min = Math.min(min, xs[0] - step / 2);
+      });
+      return min;
+    }
+
     function resamplePoints(points, range, preset, aggregationType, windowStart) {
       const seconds = RESOLUTION_SECONDS[range] && RESOLUTION_SECONDS[range][preset];
       if (!seconds || !points.length || windowStart == null) return points;
@@ -420,7 +438,7 @@
       const groups = Array.from({length: 12}, () => []);
       points.forEach(point => {
         if (!Number.isFinite(point.value)) return;
-        groups[new Date(point.ts * 1000).getMonth()].push(point.value);
+        groups[window.ServerTime.parts(point.ts).month - 1].push(point.value);  // Kalendermonat des Servers, nicht des Browsers
       });
       return groups.map(values => {
         if (!values.length) return null;
@@ -549,6 +567,8 @@
         // gezeichnet — dieselbe Bedeutung wie hidden bei Spalten und Zeilen
         // im Tabellen-Editor.
         hiddenEntityIds: [...HIDDEN_ENTITY_IDS],
+        seriesColors: {...SERIES_COLORS},
+        colorPickerFor: null,
         name: CHART_NAME,
         entityNames: {...ENTITY_NAMES},
         series: [],
@@ -706,6 +726,7 @@
         // gezeichnet werden (siehe load()).
         droppedStateIds: [],
         loading: false,
+        loadError: false,
         saving: false,
         savedMessage: '',
         _requestId: 0,
@@ -724,6 +745,26 @@
         colorIndexFor(entityId) {
           const idx = this.selectedEntityIds.indexOf(entityId);
           return idx === -1 ? 0 : idx;
+        },
+        // Eigene Farbe je Serie ("palette:N" oder "#rrggbb", siehe
+        // saved_charts.series_colors), sonst Palettenfarbe nach Position.
+        // Gleiche Regel wie colorFor() in dashboard-tiles.js.
+        colorFor(entityId) {
+          const own = this.seriesColors[entityId];
+          if (typeof own === 'string') {
+            if (own.startsWith('palette:') && PALETTE[+own.slice(8)]) return PALETTE[+own.slice(8)];
+            if (/^#[0-9a-f]{6}$/i.test(own)) return own;
+          }
+          return PALETTE[this.colorIndexFor(entityId) % PALETTE.length];
+        },
+        // null = zurück auf Auto. Neues Objekt statt Mutation, damit Alpine
+        // die Änderung sicher bemerkt (wie bei heatmapStates).
+        setSeriesColor(entityId, value) {
+          const next = {...this.seriesColors};
+          if (value) next[entityId] = value;
+          else delete next[entityId];
+          this.seriesColors = next;
+          this.render();
         },
         toggleEntityHidden(entityId) {
           const idx = this.hiddenEntityIds.indexOf(entityId);
@@ -920,7 +961,7 @@
               name: this.entityNames[s.entity_id] || s.friendly_name,
               isState: s.aggregation_type === 'state',
               stateRows: s.aggregation_type === 'state' ? this.stateRowsFor(s) : [],
-              color: PALETTE[this.colorIndexFor(s.entity_id) % PALETTE.length],
+              color: this.colorFor(s.entity_id),
               ...this.seriesStatsFor(s, s.points, this.windowEnd),
               // Min/Max/Ø über Zustandsindizes sind keine Aussage.
               ...(s.aggregation_type === 'state' ? {last: '—', min: '—', max: '—', average: '—', sum: null} : {}),
@@ -948,7 +989,7 @@
           const previousYear = currentYear - 1;
           this.series.forEach(s => {
             if (!s.compare_points) return;
-            const color = PALETTE[this.colorIndexFor(s.entity_id) % PALETTE.length];
+            const color = this.colorFor(s.entity_id);
             const name = this.entityNames[s.entity_id] || s.friendly_name;
             // Die Soll-Entität bekommt EINEN Eintrag ohne Jahreszahl (siehe
             // renderYearsCompare(): sie ist eine einzelne Ziel-Linie, kein
@@ -1108,7 +1149,7 @@
         // Farbe je Entität wie überall im Editor, nach Alter abgestuft, damit
         // auch "Alle" mit vielen Linien lesbar bleibt.
         multiYearColor(index, total) {
-          const color = PALETTE[this.colorIndexFor(this.series[0].entity_id) % PALETTE.length];
+          const color = this.colorFor(this.series[0].entity_id);
           if (index === 0) return color;
           const steps = Math.max(total - 1, 1);
           return withOpacity(color, total === 2 ? 0.55 : 0.75 - 0.5 * (index - 1) / Math.max(steps - 1, 1));
@@ -1582,6 +1623,7 @@
           if (this.compare && this.compareMode === 'longterm' && !this.longtermAvailable) this.compareMode = 'previous';
           const requestId = ++this._requestId;
           this.loading = true;
+          this.loadError = false;
           const params = new URLSearchParams({
             entity_ids: this.visibleEntityIds.join(','),
             range: this.range, offset: String(this.offset), continuous: String(this.continuous),
@@ -1605,16 +1647,26 @@
           columnsParams.set('compare', 'false');
           const chartEl = document.getElementById('chart');
           columnsParams.set('px', String(Math.max(60, Math.round((chartEl ? chartEl.clientWidth : 600) - 30))));
-          const [res, heatmapRes, columnsRes] = await Promise.all([
-            fetch(`${BASE}/api/query-multi?${params}`),
-            wantHeatmap ? fetch(`${BASE}/api/query-multi?${heatmapParams}`) : Promise.resolve(null),
-            wantColumns ? fetch(`${BASE}/api/query-multi?${columnsParams}`) : Promise.resolve(null),
-          ]);
-          const columnsData = columnsRes && columnsRes.ok ? await columnsRes.json() : null;
-          // Die Rohabfrage bricht bei zu vielen Wechseln mit einem Fehler ab: dann gilt die
-          // Spaltenantwort (Fenster, Zustandsliste und Spalten je Zustands-Entität).
-          const data = res.ok ? await res.json() : (columnsData || {});
-          const heatmapData = heatmapRes ? await heatmapRes.json() : null;
+          let res, heatmapRes, columnsRes, columnsData, data, heatmapData;
+          try {
+            [res, heatmapRes, columnsRes] = await Promise.all([
+              fetch(`${BASE}/api/query-multi?${params}`),
+              wantHeatmap ? fetch(`${BASE}/api/query-multi?${heatmapParams}`) : Promise.resolve(null),
+              wantColumns ? fetch(`${BASE}/api/query-multi?${columnsParams}`) : Promise.resolve(null),
+            ]);
+            columnsData = columnsRes && columnsRes.ok ? await columnsRes.json() : null;
+            // Die Rohabfrage bricht bei zu vielen Wechseln mit einem Fehler ab: dann gilt die
+            // Spaltenantwort (Fenster, Zustandsliste und Spalten je Zustands-Entität).
+            data = res.ok ? await res.json() : (columnsData || {});
+            heatmapData = heatmapRes && heatmapRes.ok ? await heatmapRes.json() : null;
+          } catch (error) {
+            // Netzwerkfehler oder ein 502 vom Proxy mit HTML statt JSON: sonst bliebe "Lädt …" für immer stehen.
+            if (requestId === this._requestId) {
+              this.loading = false;
+              this.loadError = true;
+            }
+            return;
+          }
           if (requestId !== this._requestId) return;
           if (heatmapData) {
             const cellsById = new Map((heatmapData.series || []).map(x => [x.entity_id, x.cells]));
@@ -1676,7 +1728,10 @@
         },
 
         render() {
-          if (!chartInstance) chartInstance = echarts.init(document.getElementById('chart'));
+          if (!chartInstance) {
+            chartInstance = echarts.init(document.getElementById('chart'));
+            AxisFit.attach(chartInstance);
+          }
           if (!this.hasData) { chartInstance.clear(); return; }
           // Nur die Zustands-Balken brauchen mehr Höhe (ein Diagramm je Entität).
           if (!(this.timeline && this.hasState && this.stateMode !== 'timeline')) document.getElementById('chart').style.height = '';
@@ -1775,7 +1830,10 @@
           // Anzeigename je Entität, in Auswahlreihenfolge — dieselbe Quelle
           // wie die Legende (this.entityNames[entity_id] || friendly_name),
           // damit Kategorie-Beschriftung und Legende nie auseinanderlaufen.
-          const entityCategories = this.series.map(s => this.entityNames[s.entity_id] || s.friendly_name);
+          // Wh- und kWh-Serien teilen sich eine Achse (Kopien in der größten
+          // Einheit); die Kennzahlen-Tabelle liest weiter this.series.
+          const chartSeries = NumberFormat.harmonizeUnits(this.series);
+          const entityCategories = chartSeries.map(s => this.entityNames[s.entity_id] || s.friendly_name);
 
           // Eine Y-Achse je unterschiedlicher Einheit (wie die Wachstums-Chart auf
           // der Statistik-Seite mit zwei Achsen, hier verallgemeinert auf N) —
@@ -1787,7 +1845,7 @@
           // statt als Dauer beschriftet.
           const isDurationSeries = s => s.aggregation_type === 'switch' && s.display_mode === 'time';
           const axisKey = s => isDurationSeries(s) ? ' duration' : s.unit;
-          const units = [...new Set(this.series.map(axisKey))];
+          const units = [...new Set(chartSeries.map(axisKey))];
           // Balken-Serien stapeln je Einheit statt in einem globalen "total"-
           // Topf — sonst würden z. B. kWh- und Dauer-Serien auf derselben
           // Achse zusammenaddiert, sobald ein Chart mehrere Einheiten
@@ -1802,7 +1860,7 @@
           // die gestapelten Balken gemeint ist, und zeigte ihre eigenen (nicht
           // normierten) Werte dadurch verzerrt.
           const barOnlyAxis = new Set(
-            units.filter(u => this.series.every(s => axisKey(s) !== u || s.chart_type === 'bar'))
+            units.filter(u => chartSeries.every(s => axisKey(s) !== u || s.chart_type === 'bar'))
           );
           // Achsen mit MINDESTENS einer Balken-Serie (nicht nur reine
           // Balken-Achsen wie barOnlyAxis oben) dürfen "Dynamische Y-Achse"
@@ -1814,20 +1872,20 @@
           // (dashboard-tiles.js, axisHasBar) und Einzel-Entitäts-Charts
           // (entity_detail.js, chartType !== 'bar') — hier bisher gefehlt.
           const axisHasBar = new Set(
-            units.filter(u => this.series.some(s => axisKey(s) === u && s.chart_type === 'bar'))
+            units.filter(u => chartSeries.some(s => axisKey(s) === u && s.chart_type === 'bar'))
           );
           // Resampelte Punkte je Serie einmal vorab berechnen (statt weiter
           // unten im Haupt-Loop) — die Prozent-Normierung braucht die Werte
           // ALLER Serien einer Achse zum selben Bucket-Zeitpunkt, bevor die
           // erste Serie fertig gebaut werden kann.
-          const preparedPoints = this.series.map(s => resamplePoints(
+          const preparedPoints = chartSeries.map(s => resamplePoints(
             s.points, this.range, this.resolutionPreset, s.aggregation_type, this.windowStart
           ));
           // ts -> Summe je Achse, nur für tatsächlich normierte reine
           // Balken-Achsen.
           const axisTotals = new Map();
           if (normalizeActive) {
-            this.series.forEach((s, i) => {
+            chartSeries.forEach((s, i) => {
               const u = axisKey(s);
               if (!barOnlyAxis.has(u)) return;
               if (!axisTotals.has(u)) axisTotals.set(u, new Map());
@@ -1840,7 +1898,7 @@
           // die "strengste" (kleinste) Rundung aller beteiligten Entitäten, damit
           // kein Wert unpassend abgeschnitten wirkt.
           const unitDecimals = new Map();
-          this.series.forEach(s => {
+          chartSeries.forEach(s => {
             const d = this.effectiveDecimals(s);
             if (d == null) return;
             const current = unitDecimals.get(axisKey(s));
@@ -1922,13 +1980,16 @@
           // Zähler zeigen Bucket-Summen, ein Schalter eine Einschaltdauer je
           // Bucket — beides liest sich als Balken natürlicher als als Linie.
           const echartsSeries = [];
+          // Linien- und Balken-Serien, deren Tooltip-Zeile auch dann erscheint,
+          // wenn die Serie am Cursor keinen eigenen Punkt hat (tooltip-hold.js).
+          const holdSeries = [];
           // Für legend.selected unten — nur die Hauptserie ist über die
           // eigene Legende (siehe HTML-Template) umschaltbar, nicht die
           // Vergleichs-Nebenserie (die folgt dem "Vergleichen"-Menü als
           // Ganzes, siehe setCompareMode()/disableCompare()).
           const legendSelected = {};
-          this.series.forEach((s, i) => {
-            const color = PALETTE[this.colorIndexFor(s.entity_id) % PALETTE.length];
+          chartSeries.forEach((s, i) => {
+            const color = this.colorFor(s.entity_id);
             // chart_type kommt vom Server (query.py: "bar" für Zähler/Schalter,
             // sonst "line", im Raw-Modus immer "line") statt hier redundant aus
             // aggregation_type neu abgeleitet zu werden — sonst würde z. B. ein
@@ -1950,7 +2011,7 @@
             // ihre Achse nicht in barOnlyAxis steht).
             const axisNormalized = normalizeActive && chartType === 'bar' && barOnlyAxis.has(axisKey(s));
             // Bei singleBucket (Kategorie-Achse, s. o.) ist die X-Position die
-            // EIGENE Kategorie dieser Entität (ihre Position in this.series,
+            // EIGENE Kategorie dieser Entität (ihre Position in chartSeries,
             // s. entityCategories) statt eines Zeitstempels — der Halte-Punkt
             // bis windowEnd (nächster Block) ergibt bei einer einzelnen
             // Kategorie je Entität ohnehin keinen Sinn und entfällt deshalb
@@ -2098,6 +2159,9 @@
                 data: [horizontalActive ? {xAxis: durchschnitt} : {yAxis: durchschnitt}],
               };
             }
+            if (!singleBucket && !horizontalActive) {
+              holdSeries.push({seriesIndex: echartsSeries.length, name: displayName, color, data: mainData, bucket: chartType === 'bar'});
+            }
             echartsSeries.push(main);
             if (showRollingAverage) {
               const windowPoints = movingAverageWindow(mainPoints.length);
@@ -2188,7 +2252,10 @@
             // (siehe legend weiter unten), nicht mehr im Chart selbst. top um
             // 8px erhöht (20→28), damit das toolbox-Icon (oben rechts, s. o.)
             // nicht mit der obersten Y-Achsen-Beschriftung kollidiert.
-            grid: {left: 10, right: 10, top: 28, bottom: 40, containLabel: true},
+            // left 24 statt 10: containLabel misst die breiteste Beschriftung etwas zu knapp, bei langen
+            // Werten (z. B. „25,000 ct/kWh“) fehlte links eine Ziffer. AxisFit (axis-fit.js) setzt den Rand
+            // nach dem Zeichnen aus der gemessenen Breite; 24 ist der Wert fürs erste Bild.
+            grid: {left: 24, right: 10, top: 28, bottom: 40, containLabel: true},
             // min/max explizit auf das Abfragefenster fixiert, statt ECharts
             // per Default auf den tatsächlichen Datenbereich auto-fitten zu
             // lassen — sonst hört die Achse (und damit sichtbar der Chart) beim
@@ -2197,7 +2264,7 @@
             // Fensterende (bei "Heute" also bis zur aktuellen Uhrzeit) zu reichen.
             xAxis: singleBucket ? (horizontalActive ? xAxisForHorizontal : categoryAxisObj) : {
               type: 'time',
-              min: this.windowStart != null ? this.windowStart * 1000 : undefined,
+              min: axisMinForBars(echartsSeries, this.windowStart != null ? this.windowStart * 1000 : null),
               // periodEnd statt windowEnd: eine laufende Periode (z. B. Woche)
               // zeigt so bis zur vollen Kalendergrenze (Sonntag), auch für die
               // noch datenlose Zukunft — windowEnd (an "jetzt" gedeckelt) bleibt
@@ -2261,29 +2328,45 @@
               // App, siehe dashboard-tiles.js/entity_detail.html).
               formatter: allParams => {
                 // Auffüll-Punkte gestapelter Serien (padStackedSeries) haben keinen Wert.
-                const params = allParams.filter(p => p.data[1] != null);
+                // Danach jede sichtbare Linien-Serie mit ihrem letzten bekannten Wert
+                // (tooltip-hold.js) — auch wenn sie am Cursor keinen eigenen Punkt hat.
+                const legendState = chartInstance.getOption().legend?.[0]?.selected || {};
+                const params = TooltipHold.complete(
+                  allParams.filter(p => p.data[1] != null),
+                  holdSeries,
+                  name => legendState[name] !== false
+                );
                 if (!params.length) return '';
                 const times = params.map(p => fmtTooltipTimestamp(p.data[2], tooltipBucketSeconds));
-                const sameTime = times.every(t => t === times[0]);
+                // Veraltete Zeilen (holdAgeMs) tragen ihren Zeitpunkt selbst, Balken
+                // (holdBucket) liegen am Bucket-Anfang statt am Cursor — beide zählen
+                // für die gemeinsame Kopfzeile nicht mit, sie richtet sich nach den
+                // Linien (nur Balken: nach den Balken).
+                let freshIndexes = params.map((p, i) => i).filter(i => !params[i].holdAgeMs && !params[i].holdBucket);
+                if (!freshIndexes.length) freshIndexes = params.map((p, i) => i).filter(i => !params[i].holdAgeMs);
+                const sameTime = freshIndexes.every(i => times[i] === times[freshIndexes[0]]);
                 // 100%-Normierung: zeigt IMMER beides — Anteil und
                 // Original-Absolutwert in Klammern (data[6]/[7]/[8], siehe
                 // mainData oben) — sonst verliert der Tooltip genau die Zahl,
                 // die die Normierung aus dem Balken selbst entfernt.
-                const row = p => {
+                const faint = 'var(--ink-faint)';
+                const row = (p, withStamp) => {
                   const [, , , , , , absValue, absUnit, absDecimals] = p.data;
                   const extra = absValue != null
-                    ? ` <span style="color:var(--ink-faint);">(${fmtNum(absValue, absDecimals)}${absUnit ? ' ' + absUnit : ''})</span>`
+                    ? ` <span style="color:${faint};">(${fmtNum(absValue, absDecimals)}${absUnit ? ' ' + escapeHtml(absUnit) : ''})</span>`
                     : '';
                   return `<div style="display:flex;justify-content:space-between;gap:18px;margin-bottom:4px;">`
-                       + `<span>${p.marker}${p.seriesName}</span>`
-                       + `<strong style="margin-left:8px;">${formatPointValue(p.data)}${extra}</strong></div>`;
+                       + `<span>${p.marker}${escapeHtml(p.seriesName)}</span>`
+                       + `<span style="margin-left:8px;text-align:right;"><strong>${escapeHtml(formatPointValue(p.data))}${extra}</strong>`
+                       + `${TooltipHold.note(p, faint, withStamp ? ms => fmtTooltipTimestamp(ms, tooltipBucketSeconds) : null)}</span></div>`;
                 };
                 if (sameTime) {
-                  return `<div style="font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);margin-bottom:4px;">${times[0]}</div>`
-                       + params.map(row).join('');
+                  const header = freshIndexes.length ? times[freshIndexes[0]] : times[0];
+                  return `<div style="font-size:calc(11px * var(--font-scale, 1));color:${faint};margin-bottom:4px;">${header}</div>`
+                       + params.map(p => row(p, true)).join('');
                 }
                 return params.map((p, i) =>
-                  `<div style="font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);margin-bottom:2px;">${times[i]}</div>${row(p)}`
+                  `<div style="font-size:calc(11px * var(--font-scale, 1));color:${faint};margin-bottom:2px;">${times[i]}</div>${row(p, false)}`
                 ).join('');
               },
               appendToBody: true,
@@ -2321,7 +2404,7 @@
           data.push(...stateTimeline.items);
           this.series.forEach((s, catIndex) => {
             if (s.aggregation_type === 'state') return;
-            const color = PALETTE[this.colorIndexFor(s.entity_id) % PALETTE.length];
+            const color = this.colorFor(s.entity_id);
             const points = s.points;
             for (let i = 0; i < points.length; i++) {
               const start = points[i].ts;
@@ -2343,7 +2426,7 @@
               fontSize: Math.round(12 * uiFontScale * 10) / 10,
             },
             // top um 8px erhöht (16→24), Begründung wie in render().
-            grid: {left: 10, right: 20, top: 24, bottom: 40, containLabel: true},
+            grid: {left: 24, right: 20, top: 24, bottom: 40, containLabel: true},
             xAxis: {
               type: 'time',
               min: this.windowStart != null ? this.windowStart * 1000 : undefined,
@@ -2374,7 +2457,7 @@
                 const fmtTime = ms => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
                 const span = `${fmtTime(startMs)}–${fmtTime(endMs)} · <strong>${NumberFormat.fmtDuration((endMs - startMs) / 1000)}</strong>`;
                 const s = this.series[catIndex];
-                if (!s || s.aggregation_type !== 'state') return `${categories[catIndex]}<br>${span}`;
+                if (!s || s.aggregation_type !== 'state') return `${escapeHtml(categories[catIndex])}<br>${span}`;
                 if (partsIndex >= 0) {
                   const stamp = ms => new Date(ms).toLocaleString(LOCALE, {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'});
                   return StateEntities.condensedTooltip(timelineParts[partsIndex], startMs, endMs, s.states, stamp, escapeHtml(categories[catIndex]));
@@ -2383,7 +2466,7 @@
                 const name = StateEntities.label(s.states, idx);
                 const raw = StateEntities.raw(s.states, idx);
                 const rawPart = raw && raw !== name ? ` <span style="opacity:.6">${escapeHtml(raw)}</span>` : '';
-                return `${categories[catIndex]}<br><strong>${escapeHtml(name)}</strong>${rawPart}<br>${span}`;
+                return `${escapeHtml(categories[catIndex])}<br><strong>${escapeHtml(name)}</strong>${rawPart}<br>${span}`;
               },
               appendToBody: true,
             },
@@ -2526,7 +2609,7 @@
           const echartsSeries = [];
           this.series.forEach(s => {
             if (!hasCompare(s)) return;
-            const color = PALETTE[this.colorIndexFor(s.entity_id) % PALETTE.length];
+            const color = this.colorFor(s.entity_id);
             const displayName = this.entityNames[s.entity_id] || s.friendly_name;
             const decimals = unitDecimals.get(axisUnit(s));
             const unitIndex = units.indexOf(axisUnit(s));
@@ -2617,7 +2700,7 @@
             // wurde am Kartenrand abgeschnitten — gemessen mit aktiver
             // Laufsumme bei zwei Einheiten gleichzeitig.
             grid: {
-              left: visibleAxisCount > 1 ? 20 : 10,
+              left: visibleAxisCount > 1 ? 34 : 24,
               right: visibleAxisCount > 1 ? 40 : 24,
               top: 36, bottom: 40, containLabel: true,
             },
@@ -2680,7 +2763,7 @@
               color: style.getPropertyValue('--ink-muted'),
               fontSize: Math.round(12 * uiFontScale * 10) / 10,
             },
-            grid: {left: 10, right: 24, top: 36, bottom: 40, containLabel: true},
+            grid: {left: 24, right: 24, top: 36, bottom: 40, containLabel: true},
             xAxis: {type: 'category', data: MONTHS},
             yAxis: {
               type: 'value',
@@ -2702,7 +2785,7 @@
                     const value = typeof p.value === 'object' ? p.value.value : p.value;
                     const partial = p.seriesName === String(my.years[0].year) && m === my.cutMonth
                       ? ` (${t('bis {cut}', {cut: my.cutLabel})})` : '';
-                    return `${p.marker}${p.seriesName}: <strong>${format(value)}</strong>${partial}`;
+                    return `${p.marker}${escapeHtml(p.seriesName)}: <strong>${escapeHtml(format(value))}</strong>${partial}`;
                   });
                 const reference = my.currentReference ? my.currentReference[m] : null;
                 const delta = this.multiYearDelta(my.years[0].monthly[m], reference);
@@ -2865,7 +2948,7 @@
           const data = this.series.map(s => ({
             name: this.entityNames[s.entity_id] || s.friendly_name,
             value: Math.max(0, this.donutValueFor(s)),
-            itemStyle: {color: PALETTE[this.colorIndexFor(s.entity_id) % PALETTE.length]},
+            itemStyle: {color: this.colorFor(s.entity_id)},
           }));
           // Serien-Umschalter der Legende (toggleLegendItem()/legendHiddenIds)
           // wirkt bei type:'pie' auf einzelne DATENPUNKTE statt auf ganze
@@ -2886,8 +2969,8 @@
               trigger: 'item',
               formatter: p => {
                 const s = this.series[p.dataIndex];
-                const unit = s.unit ? ` ${s.unit}` : '';
-                return `${p.marker} ${p.name}: <strong>${fmtNum(p.value, this.effectiveDecimals(s))}${unit}</strong> (${fmtNum(p.percent, 1)} %)`;
+                const unitHtml = s.unit ? ` ${escapeHtml(s.unit)}` : '';
+                return `${p.marker} ${escapeHtml(p.name)}: <strong>${fmtNum(p.value, this.effectiveDecimals(s))}${unitHtml}</strong> (${fmtNum(p.percent, 1)} %)`;
               },
               appendToBody: true,
             },
@@ -2964,6 +3047,9 @@
         },
 
         async save() {
+          // Enter im Namensfeld ruft save() direkt auf, am gesperrten Knopf vorbei: ohne diesen Wächter entstanden bei
+          // Doppel-Enter oder Enter plus Klick zwei Einträge.
+          if (this.saving) return;
           if (!this.name.trim()) { appAlert(t('Bitte einen Namen für das Chart angeben.')); return; }
           if (this.selectedEntityIds.length === 0) { appAlert(t('Bitte mindestens eine Entität auswählen.')); return; }
           this.saving = true;
@@ -3000,6 +3086,7 @@
             legend_style: this.legendStyle,
             chart_type: this.donut ? 'donut' : (this.timeline ? (this.hasState ? (this.heatmapWanted ? 'heatmap' : (this.stateChosen ? this.stateMode : 'auto')) : 'timeline') : (this.allSwitch ? 'bar' : 'auto')),
             heatmap_states: this.heatmapStates,
+            series_colors: this.seriesColors,
             decimals: this.decimals,
             show_values: this.showValues,
             average_line: this.averageLine,
@@ -3029,6 +3116,9 @@
             this.savedMessage = t('✓ Gespeichert');
             this.editing = false;
             setTimeout(() => { this.savedMessage = ''; }, 2000);
+          } catch (error) {
+            // Netzwerkfehler: fetch() wirft nur dann; sonst bliebe nur der wieder freigegebene Knopf als Hinweis.
+            appAlert(t('Speichern fehlgeschlagen.'));
           } finally {
             this.saving = false;
           }

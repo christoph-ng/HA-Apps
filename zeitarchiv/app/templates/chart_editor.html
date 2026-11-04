@@ -124,8 +124,31 @@
                      die Palette ist fest über die Position vergeben (siehe PALETTE in
                      chart_editor.js), der Punkt verbindet den Eintrag damit sichtbar mit
                      Legende und Kurve. -->
-                <span class="entity-name-dot" aria-hidden="true"
-                      :style="'--dot:var(--chart-' + (colorIndexFor(id) % 8 + 1) + ')'"></span>
+                <!-- Der Punkt öffnet die Farbwahl: Auto (Palette nach Position), eine der
+                     acht Palettenfarben (themefähig) oder eine eigene Farbe (fest). -->
+                <div class="menu-wrap" @click.outside="colorPickerFor === id && (colorPickerFor = null)">
+                  <button type="button" class="entity-name-dot entity-name-dot-btn"
+                          :style="'--dot:' + colorFor(id)"
+                          title="{{ _('Farbe wählen') }}" aria-label="{{ _('Farbe wählen') }}"
+                          @click="colorPickerFor = colorPickerFor === id ? null : id"></button>
+                  <div class="menu-popover color-popover" x-show="colorPickerFor === id" x-cloak
+                       x-transition:enter="menu-pop-enter" x-transition:enter-start="menu-pop-enter-start" x-transition:enter-end="menu-pop-enter-end">
+                    <div class="color-swatches">
+                      <button type="button" class="color-swatch color-swatch-auto" :class="{on: !seriesColors[id]}"
+                              title="{{ _('Auto') }}" aria-label="{{ _('Auto') }}" @click="setSeriesColor(id, null)">A</button>
+                      <template x-for="n in 8" :key="n">
+                        <button type="button" class="color-swatch" :class="{on: seriesColors[id] === 'palette:' + (n - 1)}"
+                                :style="'--dot:var(--chart-' + n + ')'" :aria-label="'{{ _('Palettenfarbe') }} ' + n"
+                                @click="setSeriesColor(id, 'palette:' + (n - 1))"></button>
+                      </template>
+                    </div>
+                    <div class="color-custom">
+                      <span>{{ _("Eigene Farbe") }}</span>
+                      <input type="color" :value="colorFor(id)" @input="setSeriesColor(id, $event.target.value)">
+                    </div>
+                    <p class="color-hint" x-show="(seriesColors[id] || '').startsWith('#')" x-cloak>{{ _("Eigene Farben bleiben in allen Themes gleich, Palettenfarben passen sich an.") }}</p>
+                  </div>
+                </div>
                 <span class="entity-name-default">
                   <span class="name" x-text="labelFor(id)"></span>
                   <span class="id" x-text="id"></span>
@@ -446,6 +469,7 @@
                     <button :class="{active: decimals === '1'}" @click="decimals = '1'; render()">1</button>
                     <button :class="{active: decimals === '2'}" @click="decimals = '2'; render()">2</button>
                     <button :class="{active: decimals === '3'}" @click="decimals = '3'; render()">3</button>
+                    <button :class="{active: decimals === '4'}" @click="decimals = '4'; render()">4</button>
                   </div>
                 </div>
                 <label class="menu-row" x-show="!donut && !timeline">
@@ -631,7 +655,8 @@
 
         <div class="card">
           <div id="chart" x-show="hasData"></div>
-          <div class="empty" x-show="!hasData" x-text="loading ? t('Lädt …') : (selectedCount === 0 ? t('Bitte mindestens eine Entität auswählen.') : t('Keine Daten für diesen Zeitraum.'))"></div>
+          <div class="empty" x-show="!hasData" x-text="loading ? t('Lädt …') : (loadError ? t('Die Daten konnten nicht geladen werden.') : (selectedCount === 0 ? t('Bitte mindestens eine Entität auswählen.') : t('Keine Daten für diesen Zeitraum.')))"></div>
+          <div class="empty" x-show="!hasData && loadError && !loading" x-cloak><button type="button" class="btn" @click="load()">{{ _("Erneut versuchen") }}</button></div>
           {# Zustands- und Zahlen-Entitäten zusammen sind nicht vorgesehen
              (ROADMAP 1.29) — die Zustände fallen heraus, und das steht hier. #}
           <p class="hint hint-status" x-show="droppedStateIds.length" x-cloak
@@ -962,6 +987,8 @@
        Einzel-Entität-Picker (siehe _csv_import_section.html/table_editor.html). -->
   <script src="{{ asset('js/entity-picker.js') }}"></script>
   <script src="{{ asset('js/number-format.js') }}"></script>
+  <script src="{{ asset('js/axis-fit.js') }}"></script>
+  <script src="{{ asset('js/tooltip-hold.js') }}"></script>
   <script src="{{ asset('js/dynamic-back-link.js') }}"></script>
   <script src="{{ asset('js/menu-popover-clamp.js') }}"></script>
   <!-- Tooltips in der scrollenden Entitätenauswahl, siehe data-tooltip-fixed dort. -->
@@ -985,6 +1012,8 @@
     const HIDDEN_ENTITY_IDS = {{ hidden_entity_ids | tojson }};
     // Gezeichneter Zustand je Zustands-Entität der Heatmap (Rohtext).
     const HEATMAP_STATES = {{ heatmap_states | default({}) | tojson }};
+    // Eigene Serienfarben {entity_id: "palette:N" | "#rrggbb"}.
+    const SERIES_COLORS = {{ series_colors | default({}) | tojson }};
     const ENTITY_OPTIONS = {{ entity_options | tojson }};
     const RESOLUTION_PRESET = {{ resolution_preset | tojson }};
     const DYNAMIC_Y_AXIS = {{ dynamic_y_axis | tojson }};

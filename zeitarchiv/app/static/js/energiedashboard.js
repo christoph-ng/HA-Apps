@@ -264,6 +264,12 @@
   let lastSankeyData = null;
   let lastSankeyIsNarrow = null;
   let currentRenderChart = null;
+  // Diagramm-Popup der Kacheln Verbrauch/Speicher (openTile): modulweit wie die übrigen Chart-Instanzen.
+  // tileFetchToken verwirft veraltete Antworten, wenn man schnell zwei Kacheln hintereinander öffnet.
+  let tileChartInstance = null;
+  let tileResizeObserver = null;
+  let tileFetchToken = 0;
+  const TILE_MODES = ['bar', 'line', 'share'];
 
   // Zeitraum/Offset spiegeln sich in der URL (?range=...&offset=...) statt
   // nur im Alpine-Zustand — sonst würde ein "zurück zum Energiedashboard"-
@@ -296,16 +302,24 @@
   window.energieFlow = function energieFlow() {
     const initialPeriod = readInitialRangeOffset();
     return {
+      // Reiter „Übersicht“ (der Energiefluss) und „Langzeit“ (Vergleich mit dem Vorjahr, energie-langzeit.js).
+      tab: 'over',
       ranges: [{key: 'hour', label: t('Stunde')}, {key: 'day', label: t('Tag')}, {key: 'month', label: t('Monat')}, {key: 'year', label: t('Jahr')}],
       range: initialPeriod.range,
       offset: initialPeriod.offset,
       loading: false,
       loadError: false,
+      // Laufnummern von load()/loadHeatmap(): Klickt man schnell dreimal auf ‹, kann eine ältere, langsamere Antwort
+      // zuletzt ankommen und die neuere überschreiben. Kopf und Charts zeigten dann einen anderen Zeitraum als
+      // this.offset, und der nächste Pfeil sprang unerwartet.
+      _loadSeq: 0,
+      _heatmapSeq: 0,
       kpi: {},
       kpiCompare: {},
       compareLabel: '',
       quality: {plausible: true, checks: []},
       periodText: '',
+      windowStart: null,  // Beginn des angezeigten Zeitraums (Sekunden), Ausgangspunkt des Kalender-Sprungs
       hasFlow: false,
       // Farblegende unter dem Sankey. Wird in renderChart() aus DERSELBEN
       // palette/colorForNode-Quelle gefüllt wie die Knoten selbst — eine
@@ -324,6 +338,7 @@
       speicherBreakdown: [],
       speicherSocNowBreakdown: [],
       anomalien: [],
+      anomalienAktiv: true,
       // Die vier Ring-Trends kommen NICHT mehr mit load() mit, sondern erst
       // beim ersten Öffnen eines Trend-Popups (openTrend/loadTrends) — sie
       // machten serverseitig den Großteil der Rechenzeit eines /data-Requests
@@ -339,6 +354,7 @@
       trendsLoading: false,
       trendsError: false,
       heatmap: {rows: [], max_value: 0},
+      tile: {kpi: null, title: '', mode: 'bar', loading: false, error: false, data: null},
       get canGoForward() { return this.offset < 0; },
 
       // Bilanz (Grundlast plausibel) und Datenqualität (die übrigen Checks)
@@ -358,6 +374,24 @@
       get grundlastShare() {
         const g = this.verbraucherBreakdown.find((v) => v.name === t('Grundlast'));
         return g ? g.share : null;
+      },
+
+      // Reiter wechseln. Die Diagramme der Übersicht ändern ihre Größe nicht, solange sie verborgen sind;
+      // nach der Rückkehr bekommen sie ein resize, falls das Fenster inzwischen anders war.
+      showTab(tab) {
+        this.tab = tab;
+        window.dispatchEvent(new CustomEvent('energie-tab', {detail: tab}));
+        if (tab === 'over') this.$nextTick(() => window.dispatchEvent(new Event('resize')));
+      },
+
+      tabKey(event) {
+        const keys = ['over', 'long'];
+        const step = {ArrowRight: 1, ArrowLeft: -1}[event.key];
+        if (!step) return;
+        const next = keys[(keys.indexOf(this.tab) + step + keys.length) % keys.length];
+        this.showTab(next);
+        this.$nextTick(() => document.getElementById('ed-tab-' + next)?.focus());
+        event.preventDefault();
       },
 
       init() {
@@ -396,6 +430,7 @@
           heatmapResizeObserver.disconnect();
           heatmapResizeObserver = null;
         }
+        this.disposeTileChart();
         currentRenderChart = (data) => this.renderChart(data);
         this.load();
         if (!resizeListenerAdded) {
@@ -447,6 +482,25 @@
         if (key === this.range && this.offset === 0) return;
         this.range = key;
         this.offset = 0;
+        syncUrlWithPeriod(this.range, this.offset);
+        this.load();
+      },
+      // Rückruf des Kalenders (calendarPicker(..., onJump)): Datum JJJJ-MM-TT in
+      // einen Versatz zum angezeigten Zeitraum umrechnen. Je nach Zeitraum zählt
+      // nur Jahr, Jahr+Monat oder der Tag; bei „Stunde“ bleibt die Uhrzeit.
+      jumpTo(dateStr) {
+        if (this.windowStart == null) return;
+        const [y, m, d] = dateStr.split('-').map(Number);
+        const cur = window.ServerTime.parts(this.windowStart);
+        let delta;
+        if (this.range === 'year') delta = y - cur.year;
+        else if (this.range === 'month') delta = (y - cur.year) * 12 + (m - cur.month);
+        else {
+          const days = Math.round((Date.UTC(y, m - 1, d) - Date.UTC(cur.year, cur.month - 1, cur.day)) / 86400000);
+          delta = this.range === 'hour' ? days * 24 : days;
+        }
+        if (delta === 0) return;
+        this.offset = Math.min(0, this.offset + delta);
         syncUrlWithPeriod(this.range, this.offset);
         this.load();
       },
@@ -659,6 +713,210 @@
           + `<path class="area" d="${paths.area}"/><path class="line" d="${paths.line}"/></svg>`;
       },
 
+      // --- Diagramm-Popup Verbrauch/Speicher ---------------------------------
+      // Öffnet sofort, lädt daneben (wie openTrend). Der Fetch trägt Zeitraum/Offset der Seite; das Popup hat
+      // bewusst keine eigene Navigation und aktualisiert sich nicht von selbst (der 60-Sekunden-Refresh betrifft
+      // nur die Kacheln dahinter).
+      async openTile(kpi) {
+        const title = {speicher: t('Speicher'), verbrauch: t('Verbrauch'), erzeugung: t('Erzeugung'), netzbezug: t('Netzbezug'), einspeisung: t('Einspeisung')}[kpi];
+        this.tile = {kpi, title, mode: this.storedTileMode(kpi), loading: true, error: false, data: null};
+        this.$refs.tileDialog.showModal();
+        const token = ++tileFetchToken;
+        try {
+          const params = new URLSearchParams({kpi, range: this.range, offset: String(this.offset)});
+          const res = await fetch(`energiedashboard/tile?${params}`);
+          if (token !== tileFetchToken) return;
+          if (!res.ok) { this.tile.loading = false; this.tile.error = true; return; }
+          const data = await res.json();
+          if (token !== tileFetchToken) return;
+          this.tile.data = data;
+          this.tile.loading = false;
+          if (!this.tileHasModes() || (this.tile.mode === 'share' && !this.tileHasShare())) this.tile.mode = 'bar';
+          await this.$nextTick();
+          this.renderTileChart();
+        } catch (e) {
+          if (token !== tileFetchToken) return;
+          this.tile.loading = false;
+          this.tile.error = true;
+        }
+      },
+
+      // Escape schließt das <dialog> ohne das Formular: deshalb am close-Ereignis aufräumen, nicht am Button.
+      closeTile() {
+        tileFetchToken += 1;
+        this.disposeTileChart();
+        this.tile = {kpi: null, title: '', mode: 'bar', loading: false, error: false, data: null};
+      },
+
+      disposeTileChart() {
+        if (tileResizeObserver) {
+          tileResizeObserver.disconnect();
+          tileResizeObserver = null;
+        }
+        if (tileChartInstance) {
+          tileChartInstance.dispose();
+          tileChartInstance = null;
+        }
+      },
+
+      // Umschalter: Balken/Linie bei Verbrauch und Erzeugung (mehrere Serien) sowie bei Netzbezug/Einspeisung;
+      // Anteile in Prozent nur dort, wo mehrere Serien eine Summe teilen. Der Speicher bleibt bei Balken + Ladestand.
+      tileStacks() {
+        return this.tile.kpi === 'verbrauch' || this.tile.kpi === 'erzeugung';
+      },
+      tileHasShare() {
+        return this.tileStacks() && !!this.tile.data && this.tile.data.series.length > 1;
+      },
+      tileHasModes() {
+        if (!this.tile.data) return false;
+        if (this.tile.kpi === 'netzbezug' || this.tile.kpi === 'einspeisung') return true;
+        return this.tileStacks() && this.tile.data.series.length > 1;
+      },
+
+      storedTileMode(kpi) {
+        if (kpi === 'speicher') return 'bar';
+        try {
+          const mode = window.sessionStorage.getItem('edash.tileMode.' + kpi);
+          return TILE_MODES.includes(mode) ? mode : 'bar';
+        } catch (e) {
+          return 'bar';
+        }
+      },
+
+      setTileMode(mode) {
+        this.tile.mode = mode;
+        try { window.sessionStorage.setItem('edash.tileMode.' + this.tile.kpi, mode); } catch (e) { /* ohne Speicher weiter */ }
+        this.renderTileChart();
+      },
+
+      // Relativ wie die fetch()-Aufrufe in dieser Datei (energiedashboard/tile, /trends): unter Ingress lösen
+      // beide gegen denselben Präfix auf; app_root steht nur serverseitig in den Vorlagen zur Verfügung.
+      entityHref(entityId) {
+        return `entities/${encodeURIComponent(entityId)}?range=${this.range}&offset=${this.offset}`;
+      },
+
+      // Dieselben Farben wie Tabelle und Donut der Anteile: Verbrauch über die Blätter der Verbraucheranteile
+      // (Grundlast ist dort ein Blatt mit Palettenfarbe), Erzeugung über die Position in den Versorgungsanteilen.
+      // Eine Zwischenzähler- oder Gruppenzeile hat im Popup EINEN Balken und nimmt die Farbe ihres ersten Blatts.
+      // Fehlt die Gegenstelle (Anteile noch nicht geladen), gilt die Reihenfolge der Serien.
+      tileSeriesColors(series) {
+        if (this.tile.kpi === 'verbrauch') return series.map((row, i) => this.verbrauchRowColor(row, i));
+        if (this.tile.kpi === 'erzeugung') {
+          return series.map((row, i) => {
+            const idx = this.versorgungBreakdown.findIndex((item) => item.entity_id && item.entity_id === row.entity_id);
+            return this.shareColor(idx === -1 ? i : idx);
+          });
+        }
+        return series.map((_row, i) => this.shareColor(i));
+      },
+
+      verbrauchRowColor(row, fallbackIdx) {
+        const item = this.verbraucherBreakdown.find((entry) => (
+          row.entity_id ? entry.entity_id === row.entity_id : (!entry.entity_id && entry.name === row.name)
+        ));
+        if (!item) return this.shareColor(fallbackIdx);
+        const leaf = this.isSummenzeile(item)
+          ? this.verbraucherLeaves.find((entry) => entry.name === this.leafNamesUnder(item)[0])
+          : item;
+        return leaf ? this.leafColor(leaf) : this.shareColor(fallbackIdx);
+      },
+
+      // Zeilen unter dem Diagramm: Verbrauch je Zeile der obersten Ebene (mit Anteil), Speicher je Ladung/Entladung.
+      tileRows() {
+        const data = this.tile.data;
+        if (!data) return [];
+        const fmtKwh = (value) => this.fmt(value, value < 10 ? 2 : 1) + ' kWh';
+        if (data.kpi === 'speicher') {
+          const palette = colors();
+          const rows = [];
+          (data.units || []).forEach((unit, i) => {
+            if (unit.laden_entity_id) {
+              rows.push({key: `l${i}`, name: t('{name} (Ladung)', {name: unit.name}), entity_id: unit.laden_entity_id,
+                         color: palette.storage, valueText: fmtKwh(unit.laden)});
+            }
+            if (unit.entladen_entity_id) {
+              rows.push({key: `e${i}`, name: t('{name} (Entladung)', {name: unit.name}), entity_id: unit.entladen_entity_id,
+                         color: palette.storageOut, valueText: fmtKwh(unit.entladen)});
+            }
+          });
+          return rows;
+        }
+        // Netzbezug/Einspeisung sind genau eine Entität: statt Zeilen steht „Entität öffnen“ im Popup.
+        if (data.kpi === 'netzbezug' || data.kpi === 'einspeisung') return [];
+        const colorsList = this.tileSeriesColors(data.series);
+        return data.series.map((row, i) => ({
+          key: `v${i}`, name: row.name, entity_id: row.entity_id, color: colorsList[i],
+          valueText: fmtKwh(row.value) + (row.share != null ? ` · ${this.fmt(row.share, 0)} %` : ''),
+        }));
+      },
+
+      renderTileChart() {
+        const el = this.$refs.tileChartEl;
+        const data = this.tile.data;
+        if (!el || typeof echarts === 'undefined' || !data) return;
+        if (!tileChartInstance) tileChartInstance = echarts.init(el);
+        const ink = cssVar('--ink-faint');
+        const gridLine = cssVar('--border');
+        const palette = colors();
+        const stacks = data.kpi === 'verbrauch' || data.kpi === 'erzeugung';
+        // Ein gespeicherter Modus gilt nur, wenn die Kachel ihn gerade anbietet (eine Serie: kein Umschalter, kein
+        // Anteil in %), sonst bliebe das Diagramm in einer Ansicht, aus der es keinen Weg zurück gibt.
+        const mode = this.tileHasModes() ? this.tile.mode : 'bar';
+        const isShare = stacks && this.tileHasShare() && mode === 'share';
+        const isLine = mode === 'line' && data.kpi !== 'speicher';
+        const singleColor = {netzbezug: palette.grid, einspeisung: palette.exportColor}[data.kpi];
+        const colorsList = data.kpi === 'speicher' ? [palette.storage, palette.storageOut]
+          : (singleColor ? [singleColor] : this.tileSeriesColors(data.series));
+        // Ladestand (nur Stunde/Tag, mit SOC-Sensor): Linie auf einer zweiten Achse in Prozent.
+        const hasSoc = data.kpi === 'speicher' && Array.isArray(data.soc);
+        if (hasSoc) colorsList.push(cssVar('--chart-4'));
+        if (data.previous) colorsList.push(ink);
+        let columns = data.series.map((row) => row.values);
+        if (isShare) {
+          // Anteile je Achsenposition: Summe der Reihen = 100 %, ohne Verbrauch (Summe 0) bleibt der Platz leer.
+          const totals = data.keys.map((_k, i) => columns.reduce((sum, values) => sum + (values[i] || 0), 0));
+          columns = columns.map((values) => values.map((v, i) => (totals[i] > 0 && v != null ? (v / totals[i]) * 100 : null)));
+        }
+        const unit = isShare ? ' %' : ' kWh';
+        const fmt = (value) => (value == null ? '—' : this.fmt(value, value < 10 ? 2 : 1) + unit);
+        tileChartInstance.setOption({
+          color: colorsList,
+          // top: Platz für die Legende (oben) UND den Achsentitel darunter, sonst überlagern sie sich.
+          grid: {left: 8, right: 12, top: 52, bottom: 4, containLabel: true},
+          legend: {top: 0, left: 64, right: 8, type: 'scroll', textStyle: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, itemWidth: 10, itemHeight: 10},
+          tooltip: {trigger: 'axis', axisPointer: {type: isLine ? 'line' : 'shadow'}, valueFormatter: fmt},
+          xAxis: {type: 'category', data: data.labels, axisLabel: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, axisLine: {lineStyle: {color: gridLine}}},
+          yAxis: [{
+            type: 'value', name: unit.trim(), nameTextStyle: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, max: isShare ? 100 : undefined,
+            axisLabel: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, splitLine: {lineStyle: {color: gridLine}},
+          }].concat(hasSoc ? [{
+            type: 'value', name: '%', min: 0, max: 100, nameTextStyle: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)},
+            axisLabel: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, splitLine: {show: false},
+          }] : []),
+          series: data.series.map((row, i) => ({
+            name: row.name,
+            type: isLine ? 'line' : 'bar',
+            // Verbrauch gestapelt (Summe = Gesamtverbrauch), Speicher nebeneinander (Ladung gegen Entladung).
+            stack: stacks && !isLine ? 'total' : undefined,
+            data: columns[i],
+            symbolSize: 4,
+            barMaxWidth: 22,
+          })).concat(hasSoc ? [{
+            name: t('Ladestand'), type: 'line', yAxisIndex: 1, data: data.soc, symbol: 'none', lineStyle: {width: 2},
+            tooltip: {valueFormatter: (value) => (value == null ? '—' : this.fmt(value, 0) + ' %')},
+          }] : []).concat(data.previous ? [{
+            // Vorzeitraum (Vortag/Vormonat …) als gestrichelte Linie auf derselben Achse.
+            name: data.previous.name, type: 'line', data: data.previous.values, symbol: 'none',
+            lineStyle: {width: 1.5, type: 'dashed', color: ink}, itemStyle: {color: ink}, z: 5,
+          }] : []),
+        }, true);
+        if (typeof ResizeObserver !== 'undefined') {
+          if (tileResizeObserver) tileResizeObserver.disconnect();
+          tileResizeObserver = new ResizeObserver(() => { if (tileChartInstance) tileChartInstance.resize(); });
+          tileResizeObserver.observe(el);
+        }
+      },
+
       shareColor(idx) {
         return cssVar(SHARE_COLORS[idx % SHARE_COLORS.length]);
       },
@@ -789,18 +1047,22 @@
       },
 
       async load() {
+        const seq = ++this._loadSeq;
         this.loading = true;
         this.loadError = false;
         try {
           const params = new URLSearchParams({range: this.range, offset: String(this.offset)});
           const res = await fetch(`energiedashboard/data?${params}`);
+          if (seq !== this._loadSeq) return; // eine neuere Anfrage ist schon unterwegs
           if (!res.ok) { this.loadError = true; return; }
           const data = await res.json();
+          if (seq !== this._loadSeq) return;
           this.kpi = data.kpi;
           this.kpiCompare = data.kpi_compare || {};
           this.compareLabel = data.compare_label || '';
           this.quality = data.quality;
           this.periodText = periodLabel(data);
+          this.windowStart = data.window_start_ts;
           this.hasFlow = data.nodes.some(n => n.role !== 'bus' && n.value > 0);
           this.verbraucherBreakdown = data.verbraucher_breakdown || [];
           this.versorgungBreakdown = data.versorgung_breakdown || [];
@@ -808,15 +1070,17 @@
           this.speicherBreakdown = data.speicher_breakdown || [];
           this.speicherSocNowBreakdown = data.speicher_soc_now_breakdown || [];
           this.anomalien = data.anomalien || [];
+          this.anomalienAktiv = data.anomalien_aktiv !== false;
           this.renderChart(data);
           this.renderShareChart(this.verbraucherLeaves);
           this.renderVersorgungChart(this.versorgungBreakdown);
           this.renderSparklines(data.kpi_series || {});
         } catch (e) {
-          this.loadError = true;
+          if (seq === this._loadSeq) this.loadError = true;
         } finally {
-          this.loading = false;
+          if (seq === this._loadSeq) this.loading = false;
         }
+        if (seq !== this._loadSeq) return;
         // Eigener, unabhängiger Fetch (eigenes try/catch unten) — ein
         // Fehlschlag hier soll die restliche Seite nicht als loadError
         // markieren, die Karte blendet sich per x-show einfach aus.
@@ -865,11 +1129,14 @@
       // Zustand wie load(), deshalb hier nicht als Parameter, sondern direkt
       // aus this gelesen.
       async loadHeatmap() {
+        const seq = ++this._heatmapSeq;
         try {
           const params = new URLSearchParams({range: this.range, offset: String(this.offset)});
           const res = await fetch(`energiedashboard/heatmap?${params}`);
           if (!res.ok) return;
-          this.heatmap = await res.json();
+          const heatmap = await res.json();
+          if (seq !== this._heatmapSeq) return;
+          this.heatmap = heatmap;
           // Die Karte hängt an x-show="heatmap.rows.length" (startet leer,
           // also unsichtbar) — ohne $nextTick() initialisiert echarts.init()
           // hier auf einem noch display:none-Element (0×0 Breite), bevor
@@ -1293,8 +1560,8 @@
             formatter: (p) => {
               if (p.dataType !== 'edge') {
                 const node = nodeByName[p.name];
-                const label = labelFor(p.name);
-                const head = `${label}: ${fmt(p.value)} kWh${nodeShareSuffix(p.name, p.value)}`;
+                const label = escapeHtml(labelFor(p.name));
+                const head = `${label}: ${fmt(p.value)} kWh${escapeHtml(nodeShareSuffix(p.name, p.value))}`;
                 if (node && node.anomaly) {
                   return `${head}<br/>`
                     + `<span style="color:${palette.warning}">`
@@ -1303,8 +1570,8 @@
                 }
                 return head;
               }
-              return `${labelFor(p.data.source)} → ${labelFor(p.data.target)}: `
-                + `${fmt(p.data.value)} kWh${shareSuffix(p.data.source, p.data.target, p.data.value)}`;
+              return `${escapeHtml(labelFor(p.data.source))} → ${escapeHtml(labelFor(p.data.target))}: `
+                + `${fmt(p.data.value)} kWh${escapeHtml(shareSuffix(p.data.source, p.data.target, p.data.value))}`;
             },
           },
           series: [{
@@ -1383,7 +1650,7 @@
         shareChartInstance.setOption({
           tooltip: {
             trigger: 'item',
-            formatter: (p) => `${p.marker}${p.name}: <strong>${fmt(p.value)} kWh</strong> (${this.fmt(p.percent, 0)} %)`,
+            formatter: (p) => `${p.marker}${escapeHtml(p.name)}: <strong>${fmt(p.value)} kWh</strong> (${this.fmt(p.percent, 0)} %)`,
           },
           series: [{
             type: 'pie',
@@ -1444,7 +1711,7 @@
         versorgungChartInstance.setOption({
           tooltip: {
             trigger: 'item',
-            formatter: (p) => `${p.marker}${p.name}: <strong>${fmt(p.value)} kWh</strong> (${this.fmt(p.percent, 0)} %)`,
+            formatter: (p) => `${p.marker}${escapeHtml(p.name)}: <strong>${fmt(p.value)} kWh</strong> (${this.fmt(p.percent, 0)} %)`,
           },
           series: [{
             type: 'pie',

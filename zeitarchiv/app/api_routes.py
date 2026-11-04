@@ -15,11 +15,12 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field, model_validator
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from . import ai_settings, ha_integration, selection_jobs
 from .ai_routes import AiDependencies, create_ai_router
+from .card_routes import create_card_router
 from .selection_routes import create_catalog_router
 from .chart_period import stichtag_or_400, stichtag_window
 from .formatting import decimals_to_int, entity_display_name
@@ -27,6 +28,7 @@ from .limits import (
     MAX_EVENT_TEXT_LENGTH,
     MAX_MARKED_RANGES,
     MAX_MULTI_QUERY_ENTITIES,
+    MAX_TABLE_COLUMNS,
     MAX_WRITE_EVENTS,
 )
 from .logging_setup import log_rate_limited
@@ -78,7 +80,11 @@ EventText = Annotated[str, Field(max_length=MAX_EVENT_TEXT_LENGTH)]
 # zurücknehmen. "state": /api/write nimmt Text-Zustände (state/state_label).
 # "ai": /api/ai/* existiert (ROADMAP 1.31); ob der Zugriff eingeschaltet ist,
 # sagt erst die Antwort dort (403 = aus).
-API_CAPABILITIES = ("state", "ai", "catalog", "selection")
+# "cards": /api/card/items und /api/card/chart existieren, gespeicherte Charts für
+# die Lovelace-Karte. "card_series": /api/card/entities und /api/card/series, die
+# Karte ohne gespeichertes Chart. "card_spark": /api/card/spark, die Sparkline unter
+# einer Kachelkarte. "card_table": /api/card/table, gespeicherte Tabellen.
+API_CAPABILITIES = ("state", "ai", "catalog", "selection", "cards", "card_series", "card_spark", "card_table")
 
 
 class EventIn(BaseModel):
@@ -124,7 +130,7 @@ class TableQueryRequest(BaseModel):
     """Alle Zeitfenster einer Vergleichstabelle in einem Storage-Snapshot."""
 
     entity_ids: list[EntityId] = Field(min_length=1, max_length=MAX_MULTI_QUERY_ENTITIES)
-    columns: list[TableQueryColumn] = Field(min_length=1, max_length=100)
+    columns: list[TableQueryColumn] = Field(min_length=1, max_length=MAX_TABLE_COLUMNS)
     # Stichtag der Zeitraum-Navigation eines Dashboards (JJJJ-MM-TT), siehe
     # chart_period.stichtag_window(). None = heute.
     at: str | None = None
@@ -406,7 +412,11 @@ def create_api_router(deps: ApiDependencies, state: ApiState) -> APIRouter:
         komplett fehlender Token an diesem einen Endpunkt gilt als Healthcheck,
         kein echtes Auth-Problem."""
         expected = f"Bearer {deps.api_token()}"
-        if authorization is None or not secrets.compare_digest(authorization, expected):
+        # Als Bytes vergleichen: compare_digest() wirft bei str mit Nicht-ASCII-Zeichen einen TypeError, und den
+        # Header kann auf dem öffentlichen Port jeder Client frei wählen (500 statt 401, ohne Auth-Fehlerzähler).
+        if authorization is None or not secrets.compare_digest(
+            authorization.encode("utf-8", "surrogatepass"), expected.encode("utf-8", "surrogatepass")
+        ):
             if not (missing_token_is_healthcheck and authorization is None):
                 state.connection_stats["auth_failures"] += 1
                 state.connection_stats["last_auth_failure_ts"] = time.time()
@@ -494,15 +504,18 @@ def create_api_router(deps: ApiDependencies, state: ApiState) -> APIRouter:
             "selection_rev": selection_jobs.rev(deps.data_dir),
         }
 
-    @router.post("/api/write")
-    def write(
-        payload: WriteRequest,
+    def require_write_auth(
         request: Request,
         authorization: str | None = Header(default=None),
         x_zeitarchiv_integration_version: str | None = Header(default=None),
-    ) -> dict:
+    ) -> None:
+        check_auth(authorization, getattr(request.state, "request_id", "-"), x_zeitarchiv_integration_version)
+
+    # Der Token wird als Abhängigkeit geprüft: FastAPI führt sie vor der Schema-Validierung des Bodys aus. Ein
+    # Client ohne gültigen Token bekommt so 401 statt einer 422 mit den Feldern des Schemas.
+    @router.post("/api/write", dependencies=[Depends(require_write_auth)])
+    def write(payload: WriteRequest, request: Request) -> dict:
         request_id = getattr(request.state, "request_id", "-")
-        check_auth(authorization, request_id, x_zeitarchiv_integration_version)
         state.connection_stats["write_requests_ok"] += 1
         now = time.time()
         captured_now = False
@@ -1064,10 +1077,26 @@ def create_api_router(deps: ApiDependencies, state: ApiState) -> APIRouter:
             })
         return {"columns": column_results}
 
+    def card_table_query(body: dict) -> dict:
+        """Tabellenabfrage der Karte. Eine Tabelle über den Grenzen der Abfrage (Entitäten, Spalten) ergab hier einen
+        rohen ValidationError, also 500; jetzt eine Antwort mit Begründung."""
+        try:
+            request = TableQueryRequest(**body)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=tr("Die Tabelle ist zu groß für die Abfrage (höchstens {entities} Entitäten und {columns} Spalten)", entities=MAX_MULTI_QUERY_ENTITIES, columns=MAX_TABLE_COLUMNS),
+            ) from exc
+        return api_query_table(request)
+
     router.include_router(create_ai_router(AiDependencies(
         data_dir=deps.data_dir, index=deps.index, tz=deps.tz,
         coordinator=deps.coordinator, check_auth=check_auth,
         collect_notices=deps.collect_notices, latest_backup=deps.latest_backup,
     )))
     router.include_router(create_catalog_router(deps.data_dir, check_auth))
+    router.include_router(create_card_router(
+        deps.index, str(deps.tz), check_auth, api_query_multi,
+        card_table_query,
+    ))
     return router

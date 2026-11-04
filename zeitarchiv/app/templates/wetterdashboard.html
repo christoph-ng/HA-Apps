@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% from "_dashboard_period_nav.html" import assets as period_assets with context %}
+{% block title %}{{ _("Zeitarchiv — Wetterdashboard") }}{% endblock %}
+{% block page_css %}
+<link rel="stylesheet" href="{{ asset('css/pages/wetterdashboard.css') }}">
+{% endblock %}
+{% block content %}
+
+  <div class="page">
+    <div id="wetter-root">
+      {% include "_wetter_view.html" %}
+    </div>
+  </div>
+
+  <script src="{{ asset('vendor/htmx.min.js') }}"></script>
+  <script src="{{ asset('vendor/echarts.min.js') }}"></script>
+  <script src="{{ asset('js/number-format.js') }}"></script>
+  <script src="{{ asset('js/dd-picker.js') }}"></script>
+  <script src="{{ asset('js/entity-picker.js') }}"></script>
+  <script src="{{ asset('js/hint-toggle.js') }}"></script>
+  <script src="{{ asset('js/fixed-tooltip.js') }}"></script>
+  {{ period_assets() }}
+  <script src="{{ asset('js/wetter-layout.js') }}"></script>
+  <script src="{{ asset('js/wetter-heating.js') }}"></script>
+  <script src="{{ asset('js/wetter.js') }}"></script>
+{% endblock %}

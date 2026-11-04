@@ -129,6 +129,7 @@ _NAME_UNIQUE_TABLES = {
     "dashboards": N_("Ein Dashboard"),
     "saved_charts": N_("Ein Chart"),
     "saved_tables": N_("Eine Tabelle"),
+    "entity_categories": N_("Eine Kategorie"),
 }
 
 
@@ -145,6 +146,13 @@ MAX_SAVED_NAME_LENGTH = 50
 # HA-friendly_name steht: Entitätenliste, Dropdowns/Picker, Kachel- und
 # Legendenbeschriftungen.
 MAX_CUSTOM_NAME_LENGTH = 40
+
+# Kategorien der Entitätenliste (ROADMAP 1.42): Name höchstens so lang wie ein
+# Anzeigename, weil er als Pille in einer Tabellenspalte steht; die Anzahl ist
+# begrenzt, damit das Auswahlmenü und die Verwaltung überschaubar bleiben.
+MAX_CATEGORY_NAME_LENGTH = 40
+MAX_CATEGORIES = 30
+CATEGORY_COLOR_SLOTS = 8
 
 
 class InvalidNameError(ValueError):
@@ -377,7 +385,12 @@ SORTABLE_COLUMNS = {
     # — CAST auf INTEGER für den natürlichen Größenvergleich.
     "gap_threshold": "CASE WHEN gap_threshold = 'off' THEN 999999 ELSE CAST(gap_threshold AS INTEGER) END",
     "outlier_threshold": "CASE WHEN outlier_threshold = 'off' THEN 999999 ELSE CAST(outlier_threshold AS INTEGER) END",
+    # Nur Zähler haben die Einstellung; alle anderen („—“) ans Ende.
+    "counter_decreases": "CASE WHEN aggregation_type = 'counter' THEN counter_decreases ELSE 'zz' END",
     "historic": "historic",
+    # Reihenfolge der Kategorien (nicht alphabetisch); ohne Kategorie ans Ende.
+    # Braucht den Join aus list_entities().
+    "category": "COALESCE(cat.position, 999999)",
 }
 
 _SCHEMA = """
@@ -457,6 +470,24 @@ CREATE TABLE IF NOT EXISTS entity_states (
     PRIMARY KEY (entity_id, idx),
     UNIQUE (entity_id, text)
 );
+
+-- Kategorien für Entitäten (ROADMAP 1.42): eigene Ordnung der App, unabhängig
+-- von Home-Assistant-Labels und vom Favoriten-Stern. position legt die
+-- Sortierung in der Entitätenliste fest, color_slot (1–8) einen Platz der
+-- Diagrammpalette (--chart-N). Die Zuordnung hängt bewusst nicht an der
+-- Zeile in entities: So lässt sie sich auch für Entitäten vorbereiten, die
+-- erst später ankommen, und beim Löschen einer Kategorie in einem Zug lösen.
+CREATE TABLE IF NOT EXISTS entity_categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    color_slot INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS entity_category (
+    entity_id TEXT PRIMARY KEY,
+    category_id INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entity_category_category ON entity_category(category_id);
 
 CREATE TABLE IF NOT EXISTS compacted_months (
     entity_id TEXT NOT NULL,
@@ -745,7 +776,8 @@ CREATE TABLE IF NOT EXISTS table_columns (
     hidden INTEGER NOT NULL DEFAULT 0,
     group_label TEXT NOT NULL DEFAULT '',
     heatmap INTEGER NOT NULL DEFAULT 0,
-    width INTEGER
+    width INTEGER,
+    in_sum INTEGER NOT NULL DEFAULT 1
 );
 
 -- Eine Zeile ist eine von drei Arten (Konzept: v1 entity, v2 group, v3
@@ -1295,6 +1327,13 @@ class Index:
             # Entität gültig und verschiebt sich, wenn sie neu zugeordnet
             # wird. '{}' = überall die Vorbelegung (größte Streuung).
             self._conn.execute("ALTER TABLE saved_charts ADD COLUMN heatmap_states TEXT NOT NULL DEFAULT '{}'")
+        if "series_colors" not in sc_columns:
+            # Eigene Farbe je Serie als JSON {entity_id: "palette:N" | "#rrggbb"}.
+            # Nur Überschreibungen; fehlt ein Eintrag, gilt wie bisher die
+            # Palettenfarbe nach Position in entity_ids ("Auto"). "palette:N"
+            # statt des aufgelösten Hex-Werts, damit die Farbe beim Wechsel
+            # des Themes mitgeht. Siehe series_colors_clean() in chart_types.py.
+            self._conn.execute("ALTER TABLE saved_charts ADD COLUMN series_colors TEXT NOT NULL DEFAULT '{}'")
 
         if self._conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='saved_tables'").fetchone()[0]:
             st_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(saved_tables)")}
@@ -1362,6 +1401,10 @@ class Index:
             # main.py _TableColumnBody.width) — kein DEFAULT 0 o.ä., damit
             # bestehende Spalten unverändert automatisch breit bleiben.
             self._conn.execute("ALTER TABLE table_columns ADD COLUMN width INTEGER")
+        if "in_sum" not in table_column_columns:
+            # DEFAULT 1: bestehende Spalten zählen zur Σ-Spalte, sobald diese
+            # eingeschaltet wird (siehe main.py _TableColumnBody.in_sum).
+            self._conn.execute("ALTER TABLE table_columns ADD COLUMN in_sum INTEGER NOT NULL DEFAULT 1")
 
         dashboard_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(dashboard_pins)")}
         if "grid_cols" not in dashboard_columns:
@@ -1951,6 +1994,7 @@ class Index:
         type_filter: str | list[str] | None,
         unit_filter: str | None,
         favorites_only: bool,
+        category_filter: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
         if isinstance(type_filter, str):
             type_filter = [type_filter]
@@ -1976,6 +2020,22 @@ class Index:
                 params.append(unit_filter)
         if favorites_only:
             conditions.append("entities.is_favorite = 1")
+        # Kategorie: Kategorie-IDs und/oder „none“ (ohne Kategorie), ODER-verknüpft;
+        # „all“, leer oder nichts Brauchbares heißt: kein Filter.
+        category_ids = [int(c) for c in (category_filter or []) if c.isdigit()]
+        without = "none" in (category_filter or [])
+        if category_ids or without:
+            parts: list[str] = []
+            if category_ids:
+                placeholders = ", ".join("?" for _ in category_ids)
+                parts.append(
+                    "entities.entity_id IN (SELECT entity_id FROM entity_category "
+                    f"WHERE category_id IN ({placeholders}))"
+                )
+                params += category_ids
+            if without:
+                parts.append("entities.entity_id NOT IN (SELECT entity_id FROM entity_category)")
+            conditions.append("(" + " OR ".join(parts) + ")")
         return conditions, params
 
     def list_entities(
@@ -1988,6 +2048,7 @@ class Index:
         favorites_only: bool = False,
         limit: int | None = None,
         offset: int = 0,
+        category_filter: list[str] | None = None,
     ) -> list[sqlite3.Row]:
         """search filtert per LIKE auf entity_id/friendly_name, type_filter auf
         aggregation_type — ein einzelner Typ (Rückwärtskompatibilität), eine Liste
@@ -2017,10 +2078,15 @@ class Index:
         direction_sql = "DESC" if direction == "desc" else "ASC"
 
         conditions, params = self._entity_filter_conditions(
-            search, type_filter, unit_filter, favorites_only
+            search, type_filter, unit_filter, favorites_only, category_filter
         )
 
         query = "SELECT entities.* FROM entities"
+        if sort == "category":
+            query += (
+                " LEFT JOIN entity_category AS ec ON ec.entity_id = entities.entity_id"
+                " LEFT JOIN entity_categories AS cat ON cat.id = ec.category_id"
+            )
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += f" ORDER BY {column} {direction_sql}, entities.entity_id ASC"
@@ -2036,11 +2102,12 @@ class Index:
         type_filter: str | list[str] | None = None,
         unit_filter: str | None = None,
         favorites_only: bool = False,
+        category_filter: list[str] | None = None,
     ) -> int:
         """Gesamtzahl der Treffer für dieselben Filter wie list_entities() —
         Grundlage für die Seiteninfo bei SQL-seitiger Pagination (ZP-004)."""
         conditions, params = self._entity_filter_conditions(
-            search, type_filter, unit_filter, favorites_only
+            search, type_filter, unit_filter, favorites_only, category_filter
         )
         query = "SELECT COUNT(*) AS total FROM entities"
         if conditions:
@@ -2048,6 +2115,188 @@ class Index:
         with self._lock, self._conn:
             row = self._conn.execute(query, params).fetchone()
             return int(row["total"])
+
+    # ---- Kategorien (ROADMAP 1.42) ---------------------------------------------------------
+
+    def list_entity_categories(self) -> list[dict]:
+        """Alle Kategorien in der Reihenfolge der Sortierung, je mit der Zahl
+        der zugeordneten Entitäten."""
+        rows = self._read_conn().execute(
+            "SELECT c.id, c.name, c.position, c.color_slot, "
+            "(SELECT COUNT(*) FROM entity_category ec WHERE ec.category_id = c.id) AS entity_count "
+            "FROM entity_categories c ORDER BY c.position ASC, c.id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def category_map_for(self, entity_ids: list[str]) -> dict[str, int]:
+        """entity_id → category_id für die genannten Entitäten (ohne Kategorie
+        fehlt der Schlüssel) — ein Aufruf je Seite der Liste statt einer
+        Abfrage je Zeile."""
+        if not entity_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in entity_ids)
+        rows = self._read_conn().execute(
+            f"SELECT entity_id, category_id FROM entity_category WHERE entity_id IN ({placeholders})",  # noqa: S608 — nur Platzhalter
+            entity_ids,
+        ).fetchall()
+        return {row["entity_id"]: row["category_id"] for row in rows}
+
+    def get_entity_category_id(self, entity_id: str) -> int | None:
+        row = self._read_conn().execute(
+            "SELECT category_id FROM entity_category WHERE entity_id = ?", (entity_id,)
+        ).fetchone()
+        return int(row["category_id"]) if row else None
+
+    def _validate_category_name_locked(self, name: str, exclude_id: int | None = None) -> str:
+        trimmed = name.strip()
+        if not trimmed:
+            raise InvalidNameError(tr("Bitte einen Namen eingeben."))
+        if len(trimmed) > MAX_CATEGORY_NAME_LENGTH:
+            raise NameTooLongError(
+                tr("Der Name darf höchstens {MAX_SAVED_NAME_LENGTH} Zeichen lang sein (aktuell {len}).",
+                   MAX_SAVED_NAME_LENGTH=MAX_CATEGORY_NAME_LENGTH, len=len(trimmed))
+            )
+        if _normalized_name(trimmed) in self._taken_names_locked("entity_categories", exclude_id):
+            raise DuplicateNameError(
+                tr("{v} mit dem Namen \"{trimmed}\" gibt es bereits. Bitte einen anderen Namen wählen.",
+                   v=tr(_NAME_UNIQUE_TABLES["entity_categories"]), trimmed=trimmed)
+            )
+        return trimmed
+
+    def validate_new_category_name(self, name: str) -> str:
+        """Prüft Länge, Eindeutigkeit und die Obergrenze, ohne etwas anzulegen —
+        für Aufrufer, die erst nach einem anderen Schritt anlegen."""
+        with self._lock:
+            trimmed = self._validate_category_name_locked(name)
+            count = self._conn.execute("SELECT COUNT(*) FROM entity_categories").fetchone()[0]
+            if count >= MAX_CATEGORIES:
+                raise InvalidNameError(tr("Es sind höchstens {n} Kategorien möglich.", n=MAX_CATEGORIES))
+            return trimmed
+
+    def _create_category_locked(self, name: str, color_slot: int | None) -> int:
+        trimmed = self._validate_category_name_locked(name)
+        count, max_pos = self._conn.execute(
+            "SELECT COUNT(*), MAX(position) FROM entity_categories"
+        ).fetchone()
+        if count >= MAX_CATEGORIES:
+            raise InvalidNameError(
+                tr("Es sind höchstens {n} Kategorien möglich.", n=MAX_CATEGORIES)
+            )
+        if color_slot is None or not 1 <= color_slot <= CATEGORY_COLOR_SLOTS:
+            # Reihum vergeben: die ersten acht Kategorien unterscheiden sich,
+            # danach wiederholen sich die Farben (bewusst erlaubt).
+            color_slot = count % CATEGORY_COLOR_SLOTS + 1
+        cursor = self._conn.execute(
+            "INSERT INTO entity_categories (name, position, color_slot) VALUES (?, ?, ?)",
+            (trimmed, (max_pos or 0) + 1, color_slot),
+        )
+        return int(cursor.lastrowid)
+
+    def create_entity_category(self, name: str, color_slot: int | None = None) -> int:
+        with self._lock, self._conn:
+            return self._create_category_locked(name, color_slot)
+
+    def create_entity_categories(self, names: list[str]) -> list[int]:
+        """Mehrere Kategorien in einem Zug (die Vorschläge aus dem Leer-
+        Zustand): alles oder nichts, eine bereits vorhandene oder doppelte
+        Namensangabe bricht das Ganze ab."""
+        with self._lock, self._conn:
+            return [self._create_category_locked(name, None) for name in names]
+
+    def rename_entity_category(self, category_id: int, name: str) -> bool:
+        with self._lock, self._conn:
+            trimmed = self._validate_category_name_locked(name, exclude_id=category_id)
+            cursor = self._conn.execute(
+                "UPDATE entity_categories SET name = ? WHERE id = ?", (trimmed, category_id)
+            )
+            return cursor.rowcount > 0
+
+    def set_entity_category_color(self, category_id: int, color_slot: int) -> bool:
+        if not 1 <= color_slot <= CATEGORY_COLOR_SLOTS:
+            return False
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE entity_categories SET color_slot = ? WHERE id = ?", (color_slot, category_id)
+            )
+            return cursor.rowcount > 0
+
+    def reorder_entity_categories(self, ordered_ids: list[int]) -> None:
+        """Legt die Reihenfolge fest; nicht genannte Kategorien rücken ans Ende
+        (in ihrer bisherigen Reihenfolge), damit nichts durch einen veralteten
+        Aufruf verloren geht oder doppelt positioniert wird."""
+        with self._lock, self._conn:
+            existing = [
+                row["id"] for row in self._conn.execute(
+                    "SELECT id FROM entity_categories ORDER BY position ASC, id ASC"
+                ).fetchall()
+            ]
+            seen: set[int] = set()
+            final: list[int] = []
+            for category_id in [*ordered_ids, *existing]:
+                if category_id in existing and category_id not in seen:
+                    seen.add(category_id)
+                    final.append(category_id)
+            for position, category_id in enumerate(final, start=1):
+                self._conn.execute(
+                    "UPDATE entity_categories SET position = ? WHERE id = ?", (position, category_id)
+                )
+
+    def delete_entity_category(self, category_id: int) -> int:
+        """Löscht die Kategorie; ihre Entitäten stehen danach ohne Kategorie da
+        (die Entitäten selbst bleiben unberührt). Gibt die Zahl der gelösten
+        Zuordnungen zurück, -1 wenn es die Kategorie nicht gibt."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute("DELETE FROM entity_categories WHERE id = ?", (category_id,))
+            if cursor.rowcount == 0:
+                return -1
+            released = self._conn.execute(
+                "DELETE FROM entity_category WHERE category_id = ?", (category_id,)
+            )
+            return released.rowcount
+
+    def set_entities_category(
+        self, entity_ids: list[str], category_id: int | None, *,
+        only_known: bool = True, keep_existing: bool = False,
+    ) -> int:
+        """Ordnet die Entitäten einer Kategorie zu; category_id=None löst die
+        Zuordnung. Unbekannte Entitäten werden übersprungen (eine Auswahl kann
+        zwischen Markieren und Absenden gelöscht worden sein). Gibt die Zahl der
+        tatsächlich geänderten Entitäten zurück. Eine unbekannte Kategorie
+        führt zu ValueError, damit keine Zuordnung ins Leere zeigt.
+
+        only_known=False ordnet auch Entitäten zu, die es noch nicht gibt (der
+        Auswahl-Assistent setzt die Kategorie, bevor der erste Wert ankommt);
+        keep_existing=True lässt Entitäten mit Kategorie unverändert."""
+        with self._lock, self._conn:
+            if category_id is not None:
+                known = self._conn.execute(
+                    "SELECT 1 FROM entity_categories WHERE id = ?", (category_id,)
+                ).fetchone()
+                if known is None:
+                    raise ValueError(tr("Kategorie nicht gefunden"))
+            changed = 0
+            for entity_id in dict.fromkeys(entity_ids):
+                if only_known:
+                    exists = self._conn.execute(
+                        "SELECT 1 FROM entities WHERE entity_id = ?", (entity_id,)
+                    ).fetchone()
+                    if exists is None:
+                        continue
+                if keep_existing and category_id is not None and self._conn.execute(
+                    "SELECT 1 FROM entity_category WHERE entity_id = ?", (entity_id,)
+                ).fetchone():
+                    continue
+                if category_id is None:
+                    cursor = self._conn.execute("DELETE FROM entity_category WHERE entity_id = ?", (entity_id,))
+                else:
+                    cursor = self._conn.execute(
+                        "INSERT INTO entity_category (entity_id, category_id) VALUES (?, ?) "
+                        "ON CONFLICT(entity_id) DO UPDATE SET category_id = excluded.category_id "
+                        "WHERE category_id != excluded.category_id",
+                        (entity_id, category_id),
+                    )
+                changed += cursor.rowcount
+            return changed
 
     def set_entity_favorite(self, entity_id: str, favorite: bool) -> None:
         with self._lock, self._conn:
@@ -2441,6 +2690,7 @@ class Index:
         period_anchor: str | None = None,
         compare_settings: dict | None = None,
         heatmap_states: dict | None = None,
+        series_colors: dict | None = None,
     ) -> int:
         now = time.time()
         with self._lock, self._conn:
@@ -2452,8 +2702,8 @@ class Index:
                 "dynamic_y_axis, dashboard_animation, chart_stats, legend_metrics, legend_style, "
                 "chart_type, decimals, show_values, average_line, area_fill, show_points, stacked, normalize, "
                 "average_style, horizontal, donut_aggregation, period_anchor, compare_settings, "
-                "heatmap_states, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "heatmap_states, series_colors, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name, json.dumps(entity_ids), range_key, int(continuous),
                     json.dumps(entity_names or {}), json.dumps(hidden_entity_ids or []),
@@ -2463,7 +2713,8 @@ class Index:
                     legend_style, chart_type, decimals, int(show_values),
                     int(average_line), int(area_fill), int(show_points), int(stacked), int(normalize),
                     average_style, int(horizontal), donut_aggregation, period_anchor,
-                    json.dumps(compare_settings or {}), json.dumps(heatmap_states or {}), now, now,
+                    json.dumps(compare_settings or {}), json.dumps(heatmap_states or {}),
+                    json.dumps(series_colors or {}), now, now,
                 ),
             )
             return cur.lastrowid
@@ -2497,6 +2748,7 @@ class Index:
         period_anchor: str | None = None,
         compare_settings: dict | None = None,
         heatmap_states: dict | None = None,
+        series_colors: dict | None = None,
     ) -> None:
         with self._lock, self._conn:
             self._ensure_valid_name_locked("saved_charts", name, exclude_id=chart_id)
@@ -2507,7 +2759,7 @@ class Index:
                 "chart_stats = ?, legend_metrics = ?, legend_style = ?, chart_type = ?, decimals = ?, "
                 "show_values = ?, average_line = ?, area_fill = ?, show_points = ?, stacked = ?, normalize = ?, "
                 "average_style = ?, horizontal = ?, donut_aggregation = ?, period_anchor = ?, "
-                "compare_settings = ?, heatmap_states = ?, updated_at = ? WHERE id = ?",
+                "compare_settings = ?, heatmap_states = ?, series_colors = ?, updated_at = ? WHERE id = ?",
                 (
                     name, json.dumps(entity_ids), range_key, int(continuous),
                     json.dumps(entity_names or {}), json.dumps(hidden_entity_ids or []),
@@ -2517,7 +2769,8 @@ class Index:
                     legend_style, chart_type, decimals, int(show_values),
                     int(average_line), int(area_fill), int(show_points), int(stacked), int(normalize),
                     average_style, int(horizontal), donut_aggregation, period_anchor,
-                    json.dumps(compare_settings or {}), json.dumps(heatmap_states or {}), time.time(), chart_id,
+                    json.dumps(compare_settings or {}), json.dumps(heatmap_states or {}),
+                    json.dumps(series_colors or {}), time.time(), chart_id,
                 ),
             )
 
@@ -2544,6 +2797,7 @@ class Index:
         d["period_anchor"] = d.get("period_anchor") or None
         d["compare_settings"] = json.loads(d["compare_settings"]) if d.get("compare_settings") else {}
         d["heatmap_states"] = json.loads(d["heatmap_states"]) if d.get("heatmap_states") else {}
+        d["series_colors"] = json.loads(d["series_colors"]) if d.get("series_colors") else {}
         d["entity_names"] = json.loads(d["entity_names"]) if d.get("entity_names") else {}
         d["hidden_entity_ids"] = (
             json.loads(d["hidden_entity_ids"]) if d.get("hidden_entity_ids") else []
@@ -3237,7 +3491,7 @@ class Index:
             return cursor.rowcount > 0
 
     def set_dashboard_entity_pin_decimals(self, dashboard_id: int, pin_id: int, decimals: str) -> bool:
-        if decimals not in ("auto", "0", "1", "2", "3"):
+        if decimals not in ("auto", "0", "1", "2", "3", "4"):
             raise ValueError(tr("Ungültige Nachkommastellen"))
         with self._lock, self._conn:
             cursor = self._conn.execute(
@@ -3343,13 +3597,13 @@ class Index:
         # zweites with self._lock hier würde deadlocken).
         self._conn.executemany(
             "INSERT INTO table_columns "
-            "(table_id, position, label, range_key, offset, year_over_year, decimals, hidden, group_label, heatmap, width) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(table_id, position, label, range_key, offset, year_over_year, decimals, hidden, group_label, heatmap, width, in_sum) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     table_id, i, c["label"], c["range_key"], c["offset"], int(c["year_over_year"]),
                     c.get("decimals", "auto"), int(c.get("hidden", False)), c.get("group_label", ""),
-                    int(c.get("heatmap", False)), c.get("width"),
+                    int(c.get("heatmap", False)), c.get("width"), int(c.get("in_sum", True)),
                 )
                 for i, c in enumerate(columns)
             ],
@@ -3457,6 +3711,7 @@ class Index:
                     "label": c["label"], "range_key": c["range_key"], "offset": c["offset"],
                     "year_over_year": bool(c["year_over_year"]), "decimals": c["decimals"],
                     "hidden": bool(c["hidden"]), "group_label": c["group_label"], "heatmap": bool(c["heatmap"]),
+                    "in_sum": bool(c["in_sum"]),
                 }
                 for c in column_rows
             ]
@@ -4189,6 +4444,7 @@ class Index:
                 "dashboard_pins", "table_rows", "table_columns", "saved_tables",
                 "saved_charts", "entity_actions", "retention_jobs",
                 "memory_snapshots", "entities", "entity_states",
+                "entity_category", "entity_categories",
             ):
                 self._conn.execute(f"DELETE FROM {table}")  # noqa: S608 — feste Namen
             # Das Default-Dashboard (id 1) ist fest verankert und nicht
@@ -4222,6 +4478,9 @@ class Index:
             )
             self._conn.execute(
                 "DELETE FROM entity_states WHERE entity_id = ?", (entity_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM entity_category WHERE entity_id = ?", (entity_id,)
             )
             # Werte-Kacheln referenzieren die Entität direkt (kein Chart/keine
             # Tabelle dazwischen) — ohne diese Bereinigung bliebe ein

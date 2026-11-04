@@ -468,6 +468,7 @@ function selectBrush() {
         periodEnd: null,
         isCurrent: true,
         loading: false,
+        loadError: false,
         _requestId: 0,
         // Bleibt über mehrere reine Auflösungswechsel hinweg erhalten. Ohne
         // diesen separaten Anker würde z. B. der 22. eines laufenden Monats
@@ -1101,6 +1102,7 @@ function selectBrush() {
           // (Achsen-Skalierung/Daten aus zwei verschiedenen Anfragen gemischt).
           const requestId = ++this._requestId;
           this.loading = true;
+          this.loadError = false;
           const params = new URLSearchParams({
             entity_id: ENTITY_ID, range: this.range, offset: String(this.offset),
             continuous: String(this.continuous), compare: String(this.compare),
@@ -1135,17 +1137,27 @@ function selectBrush() {
           columnsParams.set('compare', 'false');
           const chartEl = document.getElementById('chart');
           columnsParams.set('px', String(Math.max(60, Math.round((chartEl ? chartEl.clientWidth : 600) - 30))));
-          const [res, shareRes, heatmapRes, columnsRes] = await Promise.all([
-            fetch(`${BASE}/api/query?${params}`),
-            wantShares ? fetch(`${BASE}/api/query?${shareParams}`) : Promise.resolve(null),
-            wantHeatmap ? fetch(`${BASE}/api/query?${heatmapParams}`) : Promise.resolve(null),
-            wantColumns ? fetch(`${BASE}/api/query?${columnsParams}`) : Promise.resolve(null),
-          ]);
-          // Die Rohabfrage bricht bei zu vielen Wechseln mit einem Fehler ab: dann ohne Punkte weiter.
-          const data = res.ok ? await res.json() : {};
-          const shareData = shareRes && shareRes.ok ? await shareRes.json() : null;
-          const heatmapData = heatmapRes ? await heatmapRes.json() : null;
-          const columnsData = columnsRes && columnsRes.ok ? await columnsRes.json() : null;
+          let res, shareRes, heatmapRes, columnsRes, data, shareData, heatmapData, columnsData;
+          try {
+            [res, shareRes, heatmapRes, columnsRes] = await Promise.all([
+              fetch(`${BASE}/api/query?${params}`),
+              wantShares ? fetch(`${BASE}/api/query?${shareParams}`) : Promise.resolve(null),
+              wantHeatmap ? fetch(`${BASE}/api/query?${heatmapParams}`) : Promise.resolve(null),
+              wantColumns ? fetch(`${BASE}/api/query?${columnsParams}`) : Promise.resolve(null),
+            ]);
+            // Die Rohabfrage bricht bei zu vielen Wechseln mit einem Fehler ab: dann ohne Punkte weiter.
+            data = res.ok ? await res.json() : {};
+            shareData = shareRes && shareRes.ok ? await shareRes.json() : null;
+            heatmapData = heatmapRes && heatmapRes.ok ? await heatmapRes.json() : null;
+            columnsData = columnsRes && columnsRes.ok ? await columnsRes.json() : null;
+          } catch (error) {
+            // Netzwerkfehler oder ein 502 vom Proxy mit HTML statt JSON: sonst bliebe "Lädt …" für immer stehen.
+            if (requestId === this._requestId) {
+              this.loading = false;
+              this.loadError = true;
+            }
+            return;
+          }
           if (requestId !== this._requestId) return; // eine neuere Anfrage ist schon unterwegs/angekommen
           this.sharePoints = shareData && shareData.chart_type === 'shares' ? shareData.points : [];
           this.heatmapCells = heatmapData && heatmapData.chart_type === 'heatmap' ? heatmapData.cells || [] : null;
@@ -1175,6 +1187,7 @@ function selectBrush() {
           if (!this.hasData) return;
           if (!chartInstance) {
             chartInstance = echarts.init(document.getElementById('chart'));
+            AxisFit.attach(chartInstance);
             // Einmalig bei der Instanzerzeugung registriert, nicht bei jedem
             // Rendern — sonst stapeln sich mit jedem Neuzeichnen weitere
             // Handler auf derselben Instanz.
@@ -1487,7 +1500,11 @@ function selectBrush() {
             // Werten (z. B. "0.0347 kWh" bei kleinen Zähler-Deltas) nicht immer aus
             // und schnitt die führende Ziffer links ab, was wie eine falsche/
             // unplausible Skala aussah, obwohl nur die Beschriftung geclippt war.
-            grid: {left: 10, right: 20, top: (UNIT || DURATION_DISPLAY) ? 36 : 20, bottom: this.compare ? 64 : 40, containLabel: true},
+            // containLabel misst die breiteste Beschriftung etwas zu knapp: bei „24,782 ct/kWh“ (drei
+            // Nachkommastellen plus Einheit) fehlte links eine Ziffer. Deshalb setzt AxisFit (axis-fit.js) den
+            // Rand nach dem Zeichnen aus der gemessenen Breite; 24 gilt nur für das erste Bild und für
+            // Diagramme, die AxisFit nicht anfasst (mehrere Raster oder Achsen).
+            grid: {left: 24, right: 20, top: (UNIT || DURATION_DISPLAY) ? 36 : 20, bottom: this.compare ? 64 : 40, containLabel: true},
             // min/max explizit auf das Abfragefenster fixiert, statt ECharts
             // per Default auf den tatsächlichen Datenbereich auto-fitten zu
             // lassen — sonst hört die Achse (und damit sichtbar der Chart) beim
@@ -1567,7 +1584,7 @@ function selectBrush() {
                 const times = params.map(p => fmtTooltipTimestamp(p.data[2], tooltipBucketSeconds));
                 const sameTime = times.every(t => t === times[0]);
                 const row = p => {
-                  const val = UNIT ? `${fmtValue(p.value[1])} ${UNIT}` : fmtValue(p.value[1]);
+                  const val = UNIT ? `${fmtValue(p.value[1])} ${escapeHtml(UNIT)}` : fmtValue(p.value[1]);
                   return `<span style="display:flex;align-items:center;gap:5px;">${p.marker}<strong>${val}</strong></span>`;
                 };
                 if (sameTime) {
@@ -1576,7 +1593,7 @@ function selectBrush() {
                 }
                 return params.map((p, i) =>
                   `<div style="display:flex;align-items:center;gap:5px;font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);margin-bottom:2px;">${p.marker}${times[i]}</div>`
-                  + `<strong style="display:block;margin-bottom:4px;">${UNIT ? `${fmtValue(p.value[1])} ${UNIT}` : fmtValue(p.value[1])}</strong>`
+                  + `<strong style="display:block;margin-bottom:4px;">${UNIT ? `${fmtValue(p.value[1])} ${escapeHtml(UNIT)}` : fmtValue(p.value[1])}</strong>`
                 ).join('');
               },
               // appendToBody: die Karte hat overflow:hidden (verhindert, dass die

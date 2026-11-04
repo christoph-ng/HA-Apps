@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -39,10 +40,13 @@ from zoneinfo import ZoneInfo
 
 from ..i18n import N_, tr
 from . import reconcile
+from .atomic import write_file_atomically
 from .backup import BACKUP_MANIFEST_NAME
 from .coordinator import StorageCoordinator
-from .index import Index, _normalized_name
+from .index import MAX_CATEGORIES, Index, _normalized_name
 from .paths import entity_dir, validate_entity_id
+
+logger = logging.getLogger(__name__)
 
 ROLLBACK_PREFIX = ".zeitarchiv-selective-rollback-"
 ROLLBACK_RE = re.compile(r"^\.zeitarchiv-selective-rollback-\d{8}T\d{6}Z$")
@@ -62,6 +66,10 @@ ENTITY_GROUPS: dict[str, tuple[str, ...]] = {
     "filter": ("value_filter", "ignore_values_enabled", "ignore_values", "gap_threshold", "outlier_threshold"),
     "counter": ("counter_decreases", "counter_auto_mark"),
     "disp": ("decimals", "display_mode", "chart_options", "is_favorite"),
+    # Keine Spalte von entities, sondern die Zuordnung in entity_category (Name
+    # statt ID, die IDs der Kategorien unterscheiden sich zwischen Installationen);
+    # siehe _backup_categories() und apply_settings().
+    "cat": (),
 }
 ENTITY_GROUP_LABELS = {
     "name": N_("Name"),
@@ -69,6 +77,7 @@ ENTITY_GROUP_LABELS = {
     "filter": N_("Filter"),
     "counter": N_("Zähler"),
     "disp": N_("Anzeige"),
+    "cat": N_("Kategorie"),
 }
 _COLUMN_LABELS = {
     "custom_name": N_("Eigener Name"),
@@ -125,6 +134,9 @@ GENERAL_SETTINGS: list[tuple[str, str]] = [
     ("compact_min_age_months", N_("Verdichten ab Alter (Monate)")),
 ]
 _ENERGIE_KEYS = ("energiedashboard_enabled", "energiedashboard_config")
+_WETTER_KEYS = ("wetterdashboard_enabled", "wetterdashboard_config")
+#: Zusatz-Einträge der Einstellungs-Wiederherstellung, die ein Bündel von settings-Schlüsseln als Ganzes übernehmen.
+_SETTING_BUNDLES = {"x:energie": _ENERGIE_KEYS, "x:wetter": _WETTER_KEYS}
 SYMCON_FILE = "symcon_names.json"
 _SETTING_NEXT_RUN = {
     "backup_schedule": "backup_schedule_next_run",
@@ -145,6 +157,7 @@ _CHART_FIELD_LABELS = {
     "compare_settings": N_("Vergleich"),
     "chart_type": N_("Typ"),
     "heatmap_states": N_("Typ"),
+    "series_colors": N_("Farben"),
     "resolution_preset": N_("Auflösung"),
 }
 
@@ -405,6 +418,61 @@ def list_entity_diff(source: BackupSource, index: Index, tz: ZoneInfo) -> list[d
     return out
 
 
+def _category_assignments(conn: sqlite3.Connection) -> dict[str, tuple[str, int]]:
+    """entity_id → (Name, Farbplatz) der Kategorie. Leer, wenn die Datenbank
+    keine Kategorien kennt (Backup von vor ihrer Einführung)."""
+    try:
+        rows = conn.execute(
+            "SELECT ec.entity_id, c.name, c.color_slot FROM entity_category ec "
+            "JOIN entity_categories c ON c.id = ec.category_id"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def _assign_category(conn: sqlite3.Connection, entity_id: str, category: tuple[str, int] | None, created: list[int]) -> bool:
+    """Setzt die Kategorie einer Entität nach Namen: eine gleichnamige vorhandene
+    wird genutzt, sonst entsteht sie (mit der Farbe aus dem Backup, ans Ende der
+    Reihenfolge; ihre ID kommt in ``created``). Ist die Obergrenze erreicht, bleibt
+    die Entität ohne Kategorie und der Aufruf liefert False, damit der Restore es
+    melden kann. ``None`` löst die Zuordnung."""
+    if category is None:
+        conn.execute("DELETE FROM entity_category WHERE entity_id = ?", (entity_id,))
+        return True
+    name, slot = category
+    row = next(
+        (r for r in conn.execute("SELECT id, name FROM entity_categories").fetchall()
+         if _normalized_name(r[1]) == _normalized_name(name)),
+        None,
+    )
+    if row is None:
+        count, last = conn.execute("SELECT COUNT(*), MAX(position) FROM entity_categories").fetchone()
+        if count >= MAX_CATEGORIES:
+            return False
+        row = (conn.execute(
+            "INSERT INTO entity_categories (name, position, color_slot) VALUES (?, ?, ?)",
+            (name, (last or 0) + 1, slot if isinstance(slot, int) and 1 <= slot <= 8 else 1),
+        ).lastrowid,)
+        created.append(row[0])
+    conn.execute(
+        "INSERT INTO entity_category (entity_id, category_id) VALUES (?, ?) "
+        "ON CONFLICT(entity_id) DO UPDATE SET category_id = excluded.category_id",
+        (entity_id, row[0]),
+    )
+    return True
+
+
+def _drop_unused_categories(conn: sqlite3.Connection, category_ids: list[int]) -> None:
+    """Nimmt Kategorien zurück, die ein Restore angelegt hat und die danach leer sind."""
+    for category_id in category_ids:
+        conn.execute(
+            "DELETE FROM entity_categories WHERE id = ? "
+            "AND NOT EXISTS (SELECT 1 FROM entity_category WHERE category_id = ?)",
+            (category_id, category_id),
+        )
+
+
 def _recount_deleted(conn: sqlite3.Connection, entity_id: str) -> None:
     conn.execute(
         "UPDATE entities SET deleted_count = "
@@ -484,6 +552,9 @@ def _swap_entities(
 ) -> dict:
     moved: list[tuple[Path, Path]] = []
     placed: list[Path] = []
+    snapshots: dict[str, dict] = {}
+    created_categories: list[int] = []
+    db_committed = False
     rollback.mkdir(parents=True)
     try:
         for entity_id in ids:
@@ -506,9 +577,10 @@ def _swap_entities(
                 placed.append(data_dir / rel)
 
         now = time.time()
-        snapshots: dict[str, dict] = {}
+        over_limit = 0
         with index._lock, index._conn:
             conn = index._conn
+            backup_categories = _category_assignments(source.db)
             for entity_id in ids:
                 snapshots[entity_id] = _snapshot_entity_db(conn, entity_id)
                 _clear_entity_db(conn, entity_id)
@@ -522,7 +594,13 @@ def _swap_entities(
                         _insert_row(conn, table, row, drop=("id",))
                 if not snapshots[entity_id]["existed"]:
                     _insert_row(conn, "entities", backup_rows[entity_id], override={"updated_at": now})
+                    # Wie die übrigen Einstellungen: nur, wenn die Entität lokal fehlte.
+                    if entity_id in backup_categories and not _assign_category(
+                        conn, entity_id, backup_categories[entity_id], created_categories
+                    ):
+                        over_limit += 1
                 _recount_deleted(conn, entity_id)
+        db_committed = True
         # Statistik (row_count, size_bytes, first_ts, last_ts) neu aus den Dateien bilden.
         reconcile.audit_storage_metadata(data_dir, index, tz, entity_ids=ids, repair=True)
 
@@ -532,6 +610,7 @@ def _swap_entities(
             "source": source_label,
             "entities": ids,
             "db": snapshots,
+            "created_categories": created_categories,
         }
         (rollback / INFO_NAME).write_text(json.dumps(info), encoding="utf-8")
     except Exception:
@@ -544,6 +623,17 @@ def _swap_entities(
             if target.exists():
                 original.parent.mkdir(parents=True, exist_ok=True)
                 target.replace(original)
+        if db_committed:
+            # Die Datenbank ist schon auf dem Stand des Backups (eigene Transaktion, danach folgten noch Audit und
+            # Info-Datei): ohne diese Rücksicherung stünden alte Dateien neben Löschmarkierungen und
+            # Zustandstexten aus dem Backup, und das Rollback-Verzeichnis ist gleich weg.
+            try:
+                _restore_db_snapshots(index, ids, snapshots, created_categories)
+                existing = [e for e in ids if snapshots[e]["existed"]]
+                if existing:
+                    reconcile.audit_storage_metadata(data_dir, index, tz, entity_ids=existing, repair=True)
+            except Exception:  # noqa: BLE001 — der ursprüngliche Fehler soll beim Aufrufer ankommen
+                logger.exception("Datenbank nach abgebrochenem selektivem Restore nicht zurückgesetzt")
         shutil.rmtree(rollback, ignore_errors=True)
         raise
     prune_rollbacks(data_dir)
@@ -552,9 +642,47 @@ def _swap_entities(
         "rollback": rollback.name,
         "entities": ids,
         "created": [e for e in ids if not snapshots[e]["existed"]],
+        "category_limit": over_limit, "category_max": MAX_CATEGORIES,
         "rows": sum(max(int(backup_rows[e].get("row_count") or 0) - int(backup_rows[e].get("deleted_count") or 0), 0)
                     for e in ids),
     }
+
+
+def _restore_db_snapshots(
+    index: Index, ids: list[str], db: dict[str, dict], created_categories: list[int],
+) -> None:
+    """Stellt die Datenbankzeilen der Entitäten aus den gesicherten Zuständen wieder her (eine Transaktion).
+
+    Genutzt vom Rückgängigmachen und vom Abbruch eines selektiven Restores nach dem Schreiben der Datenbank."""
+    with index._lock, index._conn:
+        conn = index._conn
+        for entity_id in ids:
+            snap = db[entity_id]
+            _clear_entity_db(conn, entity_id)
+            for ts, deleted_at in snap["deleted_points"]:
+                conn.execute("INSERT INTO deleted_points (entity_id, ts, deleted_at) VALUES (?, ?, ?)",
+                             (entity_id, ts, deleted_at))
+            for ts in snap["counter_mark_ignored"]:
+                conn.execute("INSERT OR IGNORE INTO counter_mark_ignored (entity_id, ts) VALUES (?, ?)",
+                             (entity_id, ts))
+            for year, month, target, compacted_at in snap["compacted_months"]:
+                conn.execute(
+                    "INSERT OR REPLACE INTO compacted_months "
+                    "(entity_id, year, month, target_resolution, compacted_at) VALUES (?, ?, ?, ?, ?)",
+                    (entity_id, year, month, target, compacted_at))
+            # .get(): Rollback-Infos von vor diesem Update kennen den Schlüssel nicht.
+            for idx, text, label, first_seen in snap.get("entity_states", []):
+                conn.execute(
+                    "INSERT OR REPLACE INTO entity_states "
+                    "(entity_id, idx, text, label, first_seen) VALUES (?, ?, ?, ?, ?)",
+                    (entity_id, idx, text, label, first_seen))
+            if not snap["existed"]:
+                conn.execute("DELETE FROM entities WHERE entity_id = ?", (entity_id,))
+                conn.execute("DELETE FROM entity_category WHERE entity_id = ?", (entity_id,))
+            else:
+                _recount_deleted(conn, entity_id)
+        # .get(): Rollback-Infos von vor den Kategorien kennen den Schlüssel nicht.
+        _drop_unused_categories(conn, created_categories)
 
 
 def _undo_entities(
@@ -583,32 +711,7 @@ def _undo_entities(
                         (data_dir / rel).parent.mkdir(parents=True, exist_ok=True)
                         (rollback / rel).replace(data_dir / rel)
                         returned.append((data_dir / rel, rollback / rel))
-            with index._lock, index._conn:
-                conn = index._conn
-                for entity_id in ids:
-                    snap = info["db"][entity_id]
-                    _clear_entity_db(conn, entity_id)
-                    for ts, deleted_at in snap["deleted_points"]:
-                        conn.execute("INSERT INTO deleted_points (entity_id, ts, deleted_at) VALUES (?, ?, ?)",
-                                     (entity_id, ts, deleted_at))
-                    for ts in snap["counter_mark_ignored"]:
-                        conn.execute("INSERT OR IGNORE INTO counter_mark_ignored (entity_id, ts) VALUES (?, ?)",
-                                     (entity_id, ts))
-                    for year, month, target, compacted_at in snap["compacted_months"]:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO compacted_months "
-                            "(entity_id, year, month, target_resolution, compacted_at) VALUES (?, ?, ?, ?, ?)",
-                            (entity_id, year, month, target, compacted_at))
-                    # .get(): Rollback-Infos von vor diesem Update kennen den Schlüssel nicht.
-                    for idx, text, label, first_seen in snap.get("entity_states", []):
-                        conn.execute(
-                            "INSERT OR REPLACE INTO entity_states "
-                            "(entity_id, idx, text, label, first_seen) VALUES (?, ?, ?, ?, ?)",
-                            (entity_id, idx, text, label, first_seen))
-                    if not snap["existed"]:
-                        conn.execute("DELETE FROM entities WHERE entity_id = ?", (entity_id,))
-                    else:
-                        _recount_deleted(conn, entity_id)
+            _restore_db_snapshots(index, ids, info["db"], info.get("created_categories", []))
             existing = [e for e in ids if info["db"][e]["existed"]]
             if existing:
                 reconcile.audit_storage_metadata(data_dir, index, tz, entity_ids=existing, repair=True)
@@ -761,6 +864,10 @@ def load_settings_overview(source: BackupSource, index: Index, data_dir: Path) -
                            "detail": detail, "needs": needs, "dep": dep, "missing_entities": missing})
 
     entity_cfg = []
+    # None bei Backups von vor den Kategorien: dann gibt es nichts zu vergleichen.
+    backup_cats = _category_assignments(bconn) if source.has_table("entity_category") else None
+    with index._lock:
+        current_cats = _category_assignments(index._conn)
     if source.has_table("entities"):
         for brow in _rows(bconn, "SELECT * FROM entities ORDER BY entity_id"):
             crow = c_entities.get(brow["entity_id"])
@@ -778,6 +885,11 @@ def load_settings_overview(source: BackupSource, index: Index, data_dir: Path) -
                 if "retention" in changed:
                     short = _retention_days(brow["retention"]) < _retention_days(crow["retention"])
                 groups[group] = {"lines": lines, "short": short}
+            if backup_cats is not None:
+                b_cat, c_cat = backup_cats.get(brow["entity_id"]), current_cats.get(brow["entity_id"])
+                if (b_cat[0] if b_cat else None) != (c_cat[0] if c_cat else None):
+                    groups["cat"] = {"lines": [f"{tr('Kategorie')}: {c_cat[0] if c_cat else '—'} → {b_cat[0] if b_cat else '—'}"],
+                                     "short": False}
             if groups:
                 entity_cfg.append({
                     "entity_id": brow["entity_id"],
@@ -797,10 +909,13 @@ def load_settings_overview(source: BackupSource, index: Index, data_dir: Path) -
                             "old": crow_settings.get(key, "—"), "new": brow_settings[key], "warn": warn})
 
     extra = []
-    energie_changed = any(k in brow_settings and brow_settings[k] != crow_settings.get(k) for k in _ENERGIE_KEYS)
-    if any(k in brow_settings for k in _ENERGIE_KEYS):
-        extra.append({"key": "x:energie", "label": tr("Energiedashboard-Konfiguration"),
-                      "st": "diff" if energie_changed else "same", "detail": tr("Speicher, Netzanschluss, Tarife")})
+    for key, keys, label, detail in (
+        ("x:energie", _ENERGIE_KEYS, tr("Energiedashboard-Konfiguration"), tr("Speicher, Netzanschluss, Tarife")),
+        ("x:wetter", _WETTER_KEYS, tr("Wetterdashboard-Konfiguration"), tr("Rollen, Heizzähler, Schwellenwerte")),
+    ):
+        if any(k in brow_settings for k in keys):
+            changed = any(k in brow_settings and brow_settings[k] != crow_settings.get(k) for k in keys)
+            extra.append({"key": key, "label": label, "st": "diff" if changed else "same", "detail": detail})
     b_symcon = source.read_bytes(SYMCON_FILE)
     if b_symcon is not None:
         current = (data_dir / SYMCON_FILE)
@@ -884,6 +999,7 @@ def apply_settings(
     bconn = source.db
     rollback = _reserve_rollback_dir(data_dir)
     journal: list[dict] = []
+    symcon_data: bytes | None = None
     skipped_pins = 0
     now = time.time()
     rollback.mkdir(parents=True)
@@ -1004,7 +1120,20 @@ def apply_settings(
                 skipped_pins += copy_pins(item["id"], cur["id"])
 
             b_entities = {r["entity_id"]: r for r in _rows(bconn, "SELECT * FROM entities")}
+            b_cats = _category_assignments(bconn)
+            created_categories: list[int] = []
+            over_limit = 0
+            # Vor den Zuordnungen eingetragen: beim Rückgängigmachen läuft das Journal
+            # rückwärts, die angelegten Kategorien werden also erst entfernt, wenn
+            # keine Entität mehr auf sie zeigt.
+            journal.append({"op": "drop_categories", "ids": created_categories})
             for entity_id, group in plan["groups"]:
+                if group == "cat":
+                    old = conn.execute("SELECT category_id FROM entity_category WHERE entity_id = ?", (entity_id,)).fetchone()
+                    journal.append({"op": "set_category", "entity_id": entity_id, "category_id": old[0] if old else None})
+                    if not _assign_category(conn, entity_id, b_cats.get(entity_id), created_categories):
+                        over_limit += 1
+                    continue
                 cols = [c for c in ENTITY_GROUPS[group] if c in b_entities[entity_id]]
                 old = conn.execute(f"SELECT {', '.join(cols)} FROM entities WHERE entity_id = ?", (entity_id,)).fetchone()
                 if old is None:
@@ -1028,8 +1157,8 @@ def apply_settings(
                 if item["name"] in _SETTING_NEXT_RUN:
                     reset_runs.add(_SETTING_NEXT_RUN[item["name"]])
             for item in plan["extra"]:
-                if item["key"] == "x:energie":
-                    for key in _ENERGIE_KEYS:
+                if item["key"] in _SETTING_BUNDLES:
+                    for key in _SETTING_BUNDLES[item["key"]]:
                         if key in b_settings:
                             put_setting(key, b_settings[key])
                 elif item["key"] == "x:symcon":
@@ -1037,11 +1166,10 @@ def apply_settings(
                     if target.is_file():
                         shutil.copy2(target, rollback / SYMCON_FILE)
                     journal.append({"op": "symcon", "had_file": target.is_file()})
-                    data = source.read_bytes(SYMCON_FILE)
-                    if data is not None:
-                        tmp = target.with_suffix(".json.tmp")
-                        tmp.write_bytes(data)
-                        tmp.replace(target)
+                    # Erst als letzten Schritt schreiben (unten): Schlägt davor etwas fehl, rollt die Datenbank
+                    # zurück und das Rollback-Verzeichnis wird gelöscht; eine schon ersetzte Datei bliebe sonst
+                    # ohne Sicherung stehen.
+                    symcon_data = source.read_bytes(SYMCON_FILE)
             # Geänderte Zeitpläne müssen ihren nächsten Lauf neu berechnen.
             for key in reset_runs:
                 put_setting(key, "")
@@ -1049,11 +1177,14 @@ def apply_settings(
             (rollback / INFO_NAME).write_text(json.dumps({
                 "kind": "settings", "created_at": now, "source": source_label, "journal": journal,
             }), encoding="utf-8")
+            if symcon_data is not None:
+                write_file_atomically(data_dir / SYMCON_FILE, lambda tmp: tmp.write_bytes(symcon_data))
     except Exception:
         shutil.rmtree(rollback, ignore_errors=True)
         raise
     prune_rollbacks(data_dir)
-    return {"kind": "settings", "rollback": rollback.name, "total": plan["total"], "skipped_pins": skipped_pins, "n": plan["n"]}
+    return {"kind": "settings", "rollback": rollback.name, "total": plan["total"], "skipped_pins": skipped_pins, "n": plan["n"],
+            "category_limit": over_limit, "category_max": MAX_CATEGORIES}
 
 
 def _undo_settings(data_dir: Path, index: Index, rollback: Path, info: dict) -> dict:
@@ -1075,6 +1206,16 @@ def _undo_settings(data_dir: Path, index: Index, rollback: Path, info: dict) -> 
                 values = op["values"]
                 conn.execute(f"UPDATE entities SET {', '.join(f'{c} = ?' for c in values)} WHERE entity_id = ?",
                              (*values.values(), op["entity_id"]))
+            elif kind == "set_category":
+                if op["category_id"] is None:
+                    conn.execute("DELETE FROM entity_category WHERE entity_id = ?", (op["entity_id"],))
+                else:
+                    conn.execute(
+                        "INSERT INTO entity_category (entity_id, category_id) VALUES (?, ?) "
+                        "ON CONFLICT(entity_id) DO UPDATE SET category_id = excluded.category_id",
+                        (op["entity_id"], op["category_id"]))
+            elif kind == "drop_categories":
+                _drop_unused_categories(conn, op["ids"])
             elif kind == "set_setting":
                 if op["value"] is None:
                     conn.execute("DELETE FROM settings WHERE key = ?", (op["key"],))

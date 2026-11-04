@@ -15,7 +15,7 @@
     </div>
     <p class="sub" data-dynamic-back data-app-root="{{ app_root }}">
       {% if display_name != entity_id %}<code style="font-family:var(--font-mono);">{{ entity_id }}</code> &middot; {% endif %}
-      Typ: <strong>{{ type_label }}</strong>{% if state_class %} ({{ state_class }}){% endif %} &middot; <a href="{{ app_root }}/entities">{{ _("&larr; zurück zu Entitäten") }}</a>
+      <a href="{{ app_root }}/entities">{{ _("&larr; zurück zu Entitäten") }}</a>
       {% if historic %}&middot; <span class="badge historic" title="{{ _('Keine neuen Werte mehr erwartet: wird nicht als inaktiv gemeldet') }}">{{ _("Historisch") }}</span>{% endif %}
       {% if used_in_energiedashboard %}
       {# Statisch statt referrer-basiert (dynamic-back-link.js unten deckt
@@ -30,6 +30,7 @@
       {% endif %}
     </p>
 
+    {% include "_entity_facts.html" %}
     {% with active = 'verlauf' %}{% include "_entity_tabs.html" %}{% endwith %}
 
     {% include "_pending_purge_banner.html" %}
@@ -262,6 +263,7 @@
                 <button :class="{active: decimals === '1'}" @click="setDecimals('1')">1</button>
                 <button :class="{active: decimals === '2'}" @click="setDecimals('2')">2</button>
                 <button :class="{active: decimals === '3'}" @click="setDecimals('3')">3</button>
+                <button :class="{active: decimals === '4'}" @click="setDecimals('4')">4</button>
               </div>
             </div>
             <label class="menu-row">
@@ -358,7 +360,8 @@
           <span class="chip-zoom-x" aria-hidden="true">&times;</span>
         </button>
       </div>
-      <div class="empty" x-show="!hasData" x-text="loading ? t('Lädt …') : t('Keine Daten für diesen Zeitraum.')"></div>
+      <div class="empty" x-show="!hasData" x-text="loading ? t('Lädt …') : (loadError ? t('Die Daten konnten nicht geladen werden.') : t('Keine Daten für diesen Zeitraum.'))"></div>
+      <div class="empty" x-show="!hasData && loadError && !loading" x-cloak><button type="button" class="btn" @click="load()">{{ _("Erneut versuchen") }}</button></div>
       <div class="chart-legend" x-show="!isState && points.length && chartStats && legendStyle === 'chips'">
         <span class="chart-legend-item static">
           <span class="dot" :style="{background: `var(--chart-${chartType === 'line' ? 'line' : 'bar'})`}"></span>
@@ -510,6 +513,7 @@
   <script src="{{ asset('vendor/echarts.min.js') }}"></script>
   <script src="{{ asset('js/confirm-dialog.js') }}"></script>
   <script src="{{ asset('js/number-format.js') }}"></script>
+  <script src="{{ asset('js/axis-fit.js') }}"></script>
   <script src="{{ asset('js/favorite-toggle.js') }}"></script>
   <script src="{{ asset('js/calendar-picker.js') }}"></script>
   <script src="{{ asset('js/period-navigation.js') }}"></script>

@@ -78,6 +78,9 @@ from .formatting import (
 )
 from .limits import (
     MAX_CSV_UPLOAD_BYTES,
+    MAX_MULTI_QUERY_ENTITIES,
+    MAX_TABLE_COLUMNS,
+    MAX_SETTINGS_UPLOAD_BYTES,
     MAX_UI_ANALYSIS_ROWS,
     MAX_ZIP_MEMBERS,
     MAX_ZIP_UNCOMPRESSED_BYTES,
@@ -133,10 +136,10 @@ from .storage.index import (
 )
 from .storage.ingestion import IngestionService
 from .storage.coordinator import CoordinatorBusy, StorageCoordinator
-from .storage.paths import ENTITY_ID_MAX_LENGTH, ENTITY_ID_PATTERN, validate_entity_id
+from .storage.paths import ENTITY_ID_MAX_LENGTH, ENTITY_ID_PATTERN, InvalidEntityIdError, validate_entity_id
 from .timezone_config import load_timezone
 from .version import APP_VERSION
-from . import ai_settings_routes, api_routes, ha_integration, selection_routes
+from . import ai_settings_routes, api_routes, entity_category_routes, ha_integration, selection_routes
 from .import_routes import ImportDependencies, ImportService
 from .index_optimization import (
     build_index_detail_context,
@@ -162,15 +165,24 @@ from .energiedashboard_routes import (
     entity_has_energiedashboard_role,
     is_energiedashboard_configured,
 )
-from . import cleanup_stats, counter_bulk, data_quality, entity_usage
+from .wetter_routes import WetterDependencies, WetterService, is_wetter_configured, wetter_role_count
+from . import cleanup_stats, counter_bulk, data_quality, entity_usage, value_range
 from . import dashboard_tiles
 from .dashboard_tiles import tile_metric_context as _tile_metric_context
-from .route_support import UploadLimitExceeded, copy_upload_limited, dir_size, storage_locked
+from .route_support import (
+    MAX_FORM_FIELDS,
+    UI_EXCLUSIVE_TIMEOUT_SECONDS,
+    UploadLimitExceeded,
+    UploadSizeLimitMiddleware,
+    copy_upload_limited,
+    dir_size,
+    storage_locked,
+)
 from . import notices as notices_mod
 from . import version_check
 from .notices import collect_notices
 from .chart_period import calendar_bounds, compare_settings_or_400, period_anchor_or_400
-from .chart_types import CHART_EDITOR_CHART_TYPES, ENTITY_CHART_TYPES, chart_type_label, chart_type_key, editor_display_prefill, effective_chart_type, heatmap_states_clean
+from .chart_types import CHART_EDITOR_CHART_TYPES, ENTITY_CHART_TYPES, chart_type_label, chart_type_key, editor_display_prefill, effective_chart_type, heatmap_states_clean, series_colors_clean
 from .progress import activity_snapshot, register_source
 
 logger = logging.getLogger(__name__)
@@ -291,7 +303,9 @@ DASHBOARD_ANIMATION_LABELS = {"1": N_("An"), "0": N_("Aus")}
 # Übersicht führt, unabhängig von dieser Einstellung (sonst würde er bei
 # startseite="energiedashboard" auf sich selbst zurückverweisen und die
 # Übersicht wäre über die Topnav gar nicht mehr erreichbar).
-STARTSEITE_LABELS = {"uebersicht": N_("Übersicht"), "energiedashboard": N_("Energiedashboard")}
+STARTSEITE_LABELS = {
+    "uebersicht": N_("Übersicht"), "energiedashboard": N_("Energiedashboard"), "wetterdashboard": N_("Wetterdashboard"),
+}
 
 
 def _current_font_scale() -> str:
@@ -351,6 +365,7 @@ def _nav_dashboards_context(request: Request) -> dict:
     return {
         "nav_dashboards_list": index.list_dashboards(),
         "nav_energiedashboard_enabled": index.get_setting("energiedashboard_enabled", "0") == "1",
+        "nav_wetterdashboard_enabled": index.get_setting("wetterdashboard_enabled", "0") == "1",
     }
 
 
@@ -414,6 +429,7 @@ templates.env.filters["retranslate"] = i18n.retranslate
 app.include_router(i18n.make_router(lambda: index))
 app.include_router(ai_settings_routes.make_router(lambda: index, templates, TZ))
 app.include_router(selection_routes.make_router(lambda: index, templates, DATA_DIR, TZ))
+app.include_router(entity_category_routes.make_router(lambda: index, templates, lambda: _add_category_column()))
 
 
 class RequestLoggingMiddleware:
@@ -516,6 +532,15 @@ class _CachedStaticFiles(StaticFiles):
         return response
 
 
+# Zuerst eingehängt, damit sie innen sitzt: Die Anfrage-Protokollierung sieht dann auch die abgewiesenen Uploads.
+app.add_middleware(
+    UploadSizeLimitMiddleware,
+    limits={
+        "/import/upload": MAX_ZIP_UPLOAD_BYTES,
+        "/import/settings-upload": MAX_SETTINGS_UPLOAD_BYTES,
+        "/import/csv/upload": MAX_CSV_UPLOAD_BYTES,
+    },
+)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=500)  # bislang kein Content-Encoding irgendwo
@@ -775,6 +800,15 @@ _energiedashboard_service = EnergieDashboardService(EnergieDashboardDependencies
 _background.energiedashboard_service = _energiedashboard_service
 app.include_router(_energiedashboard_service.router())
 
+_wetter_service = WetterService(WetterDependencies(
+    data_dir=DATA_DIR,
+    index=index,
+    tz=TZ,
+    templates=templates,
+    app_root_context=_app_root_context,
+))
+app.include_router(_wetter_service.router())
+
 
 @app.exception_handler(cleanup.ResultLimitExceeded)
 async def _result_limit_handler(
@@ -794,6 +828,12 @@ async def _invalid_name_handler(
     zu langen Namen. Die Editoren zeigen "detail" unverändert an."""
     status = 409 if isinstance(exc, DuplicateNameError) else 400
     return JSONResponse(status_code=status, content={"detail": str(exc)})
+
+
+@app.exception_handler(InvalidEntityIdError)
+async def _invalid_entity_id_handler(_request: Request, exc: InvalidEntityIdError) -> JSONResponse:
+    """Eine ungültige Entitäts-ID aus Pfad oder Formular ist ein Eingabefehler (400), kein Serverfehler."""
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.exception_handler(IndexBusy)
@@ -883,7 +923,7 @@ def app_root(request: Request) -> RedirectResponse:
     if startseite not in STARTSEITE_LABELS:
         startseite = "uebersicht"
     app_root = _app_root_context(request)["app_root"]
-    target = "energiedashboard" if startseite == "energiedashboard" else "uebersicht"
+    target = startseite  # die Schlüssel der Einstellung sind zugleich die Pfade der Seiten
     return RedirectResponse(url=f"{app_root}/{target}", status_code=307)
 
 
@@ -923,8 +963,9 @@ def entities_list_view(request: Request) -> HTMLResponse:
         "entities_list.html",
         {
             "unit_options": unit_options,
-            "column_options": ENTITIES_OPTIONAL_COLUMNS,
+            "column_options": _entities_column_options(),
             "visible_columns": _entities_visible_columns(),
+            "categories": index.list_entity_categories(),
         },
     )
 
@@ -1307,35 +1348,39 @@ async def mute_notice_route(request: Request, notice_id: str) -> dict:
     Dauer kommt aus einer festen Preset-Liste (SNOOZE_PRESETS) statt einem
     frei wählbaren Datum — "forever" (None) eingeschlossen, bleibt trotzdem
     sicher, siehe Kommentar dort (Fingerprint statt Ablaufdatum)."""
-    purge_preview = _background.load_purge_preview()
-    notice = next(
-        (
-            n for n in notices_mod.build_notices(
-                index, DATA_DIR / "index.sqlite", TZ, purge_preview["totals"],
-                _background.storage_reconcile_last, _background.stale_entity_count_cached, _background.last_scheduler_tick,
-                _background.last_reconcile_tick, _background.reconcile_in_progress(), _background.host_disk_usage_cached,
-                demo_dir_info=_background.demo_dir_info_cached,
-                coordinator_busy_events=storage_coordinator.recent_busy_events(),
-                duplicate_ratio_events=ingestion_service.recent_duplicate_ratio_events(),
-                purge_rows=purge_preview["rows"],
-            )
-            if n["id"] == notice_id
-        ),
-        None,
-    )
-    if notice is None:
-        raise HTTPException(status_code=404, detail=tr("Meldung nicht gefunden oder nicht mehr aktiv"))
-    if not notice["mutable"]:
-        raise HTTPException(status_code=400, detail=tr("Diese Meldung lässt sich nicht stumm schalten"))
     form = await request.form()
-    duration = form.get("duration")
-    if duration not in notices_mod.SNOOZE_PRESETS:
-        raise HTTPException(status_code=400, detail=tr("Ungültige Dauer"))
-    seconds = notices_mod.SNOOZE_PRESETS[duration]
-    until = time.time() + seconds if seconds is not None else None
-    notices_mod.mute_notice(index, notice_id, notice["title"], notice["detail"], notice["meta"], until=until)
-    remaining = _collect_all_notices()
-    return {"success": True, "remaining_count": len(remaining)}
+
+    def apply():
+        purge_preview = _background.load_purge_preview()
+        notice = next(
+            (
+                n for n in notices_mod.build_notices(
+                    index, DATA_DIR / "index.sqlite", TZ, purge_preview["totals"],
+                    _background.storage_reconcile_last, _background.stale_entity_count_cached, _background.last_scheduler_tick,
+                    _background.last_reconcile_tick, _background.reconcile_in_progress(), _background.host_disk_usage_cached,
+                    demo_dir_info=_background.demo_dir_info_cached,
+                    coordinator_busy_events=storage_coordinator.recent_busy_events(),
+                    duplicate_ratio_events=ingestion_service.recent_duplicate_ratio_events(),
+                    purge_rows=purge_preview["rows"],
+                )
+                if n["id"] == notice_id
+            ),
+            None,
+        )
+        if notice is None:
+            raise HTTPException(status_code=404, detail=tr("Meldung nicht gefunden oder nicht mehr aktiv"))
+        if not notice["mutable"]:
+            raise HTTPException(status_code=400, detail=tr("Diese Meldung lässt sich nicht stumm schalten"))
+        duration = form.get("duration")
+        if duration not in notices_mod.SNOOZE_PRESETS:
+            raise HTTPException(status_code=400, detail=tr("Ungültige Dauer"))
+        seconds = notices_mod.SNOOZE_PRESETS[duration]
+        until = time.time() + seconds if seconds is not None else None
+        notices_mod.mute_notice(index, notice_id, notice["title"], notice["detail"], notice["meta"], until=until)
+        remaining = _collect_all_notices()
+        return {"success": True, "remaining_count": len(remaining)}
+
+    return await run_in_threadpool(apply)
 
 
 @app.post("/notices/{notice_id}/unmute")
@@ -1491,87 +1536,95 @@ async def settings_darstellung(request: Request) -> HTMLResponse:
     """Globale Schriftgröße (Einstellungen, Bereich "Darstellung") — wirkt über
     den _font_scale_context-Kontextprozessor auf jede Seite, siehe FONT_SCALE oben."""
     form = await request.form()
-    font_scale = form.get("font_scale")
-    color_scheme = form.get("color_scheme")
-    color_mode = form.get("color_mode")
-    if font_scale is not None and font_scale not in FONT_SCALE_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültige Schriftgröße"))
-    if font_scale is not None:
-        index.set_setting("font_scale", str(font_scale))
-    if color_scheme is not None and color_scheme not in COLOR_SCHEME_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültiges Farbschema"))
-    if color_scheme is not None:
-        index.set_setting("color_scheme", str(color_scheme))
-    if color_mode is not None and color_mode not in COLOR_MODE_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültiger Darstellungsmodus"))
-    if color_mode is not None:
-        index.set_setting("color_mode", str(color_mode))
-    dashboard_animation = form.get("dashboard_animation")
-    if dashboard_animation is not None and dashboard_animation not in DASHBOARD_ANIMATION_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültige Dashboard-Animation"))
-    if dashboard_animation is not None:
-        index.set_setting("dashboard_animation", str(dashboard_animation))
-    startseite = form.get("startseite")
-    if startseite is not None and startseite not in STARTSEITE_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültige Startseite"))
-    if startseite is not None:
-        index.set_setting("startseite", str(startseite))
 
-    # Globale Defaults für das Optionen-Menü der Entität-eigenen Chart-Seite
-    # (entity_detail.html) — jedes Feld postet wie oben einzeln für sich,
-    # _update_entity_chart_default() liest/schreibt das gemeinsame
-    # "entity_chart_defaults"-Setting darum jedes Mal frisch statt es über
-    # mehrere Requests hinweg im Speicher zu halten.
-    bool_fields = {
-        "entity_continuous": "continuous", "entity_raw": "raw",
-        "entity_show_points": "show_points", "entity_show_values": "show_values",
-        "entity_dynamic_y_axis": "dynamic_y_axis", "entity_chart_stats": "chart_stats",
-    }
-    for form_key, option_key in bool_fields.items():
-        value = form.get(form_key)
-        if value is None:
-            continue
-        if value not in _ON_OFF_LABELS:
-            raise HTTPException(status_code=400, detail=tr("Ungültiger Wert"))
-        _update_entity_chart_default(option_key, value == "1")
-    entity_legend_style = form.get("entity_legend_style")
-    if entity_legend_style is not None and entity_legend_style not in _CHART_LEGEND_STYLES:
-        raise HTTPException(status_code=400, detail=tr("Ungültiger Legenden-Stil"))
-    if entity_legend_style is not None:
-        _update_entity_chart_default("legend_style", entity_legend_style)
-    if "entity_legend_metrics" in form:
-        entity_legend_metrics = form.getlist("entity_legend_metrics")
-        if not set(entity_legend_metrics) <= _CHART_LEGEND_METRICS:
-            raise HTTPException(status_code=400, detail=tr("Ungültige Legenden-Kennzahl"))
-        _update_entity_chart_default("legend_metrics", entity_legend_metrics)
+    def apply():
+        font_scale = form.get("font_scale")
+        color_scheme = form.get("color_scheme")
+        color_mode = form.get("color_mode")
+        if font_scale is not None and font_scale not in FONT_SCALE_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültige Schriftgröße"))
+        if font_scale is not None:
+            index.set_setting("font_scale", str(font_scale))
+        if color_scheme is not None and color_scheme not in COLOR_SCHEME_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültiges Farbschema"))
+        if color_scheme is not None:
+            index.set_setting("color_scheme", str(color_scheme))
+        if color_mode is not None and color_mode not in COLOR_MODE_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültiger Darstellungsmodus"))
+        if color_mode is not None:
+            index.set_setting("color_mode", str(color_mode))
+        dashboard_animation = form.get("dashboard_animation")
+        if dashboard_animation is not None and dashboard_animation not in DASHBOARD_ANIMATION_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültige Dashboard-Animation"))
+        if dashboard_animation is not None:
+            index.set_setting("dashboard_animation", str(dashboard_animation))
+        startseite = form.get("startseite")
+        if startseite is not None and startseite not in STARTSEITE_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültige Startseite"))
+        if startseite is not None:
+            index.set_setting("startseite", str(startseite))
 
-    return templates.TemplateResponse(
-        request, "_settings_darstellung_form.html", _settings_darstellung_context(saved=True)
-    )
+        # Globale Defaults für das Optionen-Menü der Entität-eigenen Chart-Seite
+        # (entity_detail.html) — jedes Feld postet wie oben einzeln für sich,
+        # _update_entity_chart_default() liest/schreibt das gemeinsame
+        # "entity_chart_defaults"-Setting darum jedes Mal frisch statt es über
+        # mehrere Requests hinweg im Speicher zu halten.
+        bool_fields = {
+            "entity_continuous": "continuous", "entity_raw": "raw",
+            "entity_show_points": "show_points", "entity_show_values": "show_values",
+            "entity_dynamic_y_axis": "dynamic_y_axis", "entity_chart_stats": "chart_stats",
+        }
+        for form_key, option_key in bool_fields.items():
+            value = form.get(form_key)
+            if value is None:
+                continue
+            if value not in _ON_OFF_LABELS:
+                raise HTTPException(status_code=400, detail=tr("Ungültiger Wert"))
+            _update_entity_chart_default(option_key, value == "1")
+        entity_legend_style = form.get("entity_legend_style")
+        if entity_legend_style is not None and entity_legend_style not in _CHART_LEGEND_STYLES:
+            raise HTTPException(status_code=400, detail=tr("Ungültiger Legenden-Stil"))
+        if entity_legend_style is not None:
+            _update_entity_chart_default("legend_style", entity_legend_style)
+        if "entity_legend_metrics" in form:
+            entity_legend_metrics = form.getlist("entity_legend_metrics")
+            if not set(entity_legend_metrics) <= _CHART_LEGEND_METRICS:
+                raise HTTPException(status_code=400, detail=tr("Ungültige Legenden-Kennzahl"))
+            _update_entity_chart_default("legend_metrics", entity_legend_metrics)
+
+        return templates.TemplateResponse(
+            request, "_settings_darstellung_form.html", _settings_darstellung_context(saved=True)
+        )
+
+    return await run_in_threadpool(apply)
 
 
 @app.post("/settings/logging", response_class=HTMLResponse)
 async def settings_logging(request: Request) -> HTMLResponse:
     """Speichert und aktiviert Protokollstufen ohne App-Neustart."""
     form = await request.form()
-    level = str(form.get("log_level", DEFAULT_LOG_LEVEL))
-    access_mode = str(form.get("access_log_mode", DEFAULT_ACCESS_LOG_MODE))
-    if level not in LOG_LEVEL_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültiges Loglevel"))
-    if access_mode not in ACCESS_LOG_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültiges HTTP-Protokoll"))
-    index.set_setting("log_level", level)
-    index.set_setting("access_log_mode", access_mode)
-    configure_logging(level, access_mode)
-    logger.info(
-        "Protokollierung geändert · event=logging_configuration_changed "
-        "level=%s http_access=%s",
-        level,
-        access_mode,
-    )
-    return templates.TemplateResponse(
-        request, "_settings_logging_form.html", _settings_logging_context(saved=True)
-    )
+
+    def apply():
+        level = str(form.get("log_level", DEFAULT_LOG_LEVEL))
+        access_mode = str(form.get("access_log_mode", DEFAULT_ACCESS_LOG_MODE))
+        if level not in LOG_LEVEL_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültiges Loglevel"))
+        if access_mode not in ACCESS_LOG_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültiges HTTP-Protokoll"))
+        index.set_setting("log_level", level)
+        index.set_setting("access_log_mode", access_mode)
+        configure_logging(level, access_mode)
+        logger.info(
+            "Protokollierung geändert · event=logging_configuration_changed "
+            "level=%s http_access=%s",
+            level,
+            access_mode,
+        )
+        return templates.TemplateResponse(
+            request, "_settings_logging_form.html", _settings_logging_context(saved=True)
+        )
+
+    return await run_in_threadpool(apply)
 
 
 @app.get("/settings/logging/debug", response_class=HTMLResponse)
@@ -1931,36 +1984,40 @@ def _backup_status_response(request: Request) -> HTMLResponse:
 async def backup_schedule_save(request: Request) -> HTMLResponse:
     """Speichert Kalenderzeitplan und berechnet dessen nächsten Termin neu."""
     form = await request.form()
-    schedule = form.get("backup_schedule")
-    keep_count = form.get("backup_keep_count")
-    keep_days = form.get("backup_keep_days")
-    schedule_time = str(form.get("backup_schedule_time", BACKUP_DEFAULT_TIME))
-    weekday_raw = str(form.get("backup_schedule_weekday", BACKUP_DEFAULT_WEEKDAY))
-    if schedule is not None and schedule not in BACKUP_SCHEDULE_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültiger Zeitplan"))
-    if keep_count is not None and keep_count not in BACKUP_KEEP_COUNT_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültige Anzahl"))
-    if keep_days is not None and keep_days not in RETENTION_LABELS:
-        raise HTTPException(status_code=400, detail=tr("Ungültige Aufbewahrung"))
-    try:
-        parse_schedule_time(schedule_time)
-        weekday = int(weekday_raw)
-        if weekday not in range(7):
-            raise ValueError
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=tr("Ungültiger Sicherungszeitpunkt")) from exc
-    if schedule is not None:
-        index.set_setting("backup_schedule", str(schedule))
-    if keep_count is not None:
-        index.set_setting("backup_keep_count", str(keep_count))
-    if keep_days is not None:
-        index.set_setting("backup_keep_days", str(keep_days))
-    index.set_setting("backup_schedule_time", schedule_time)
-    index.set_setting("backup_schedule_weekday", str(weekday))
-    _background.set_next_backup_run(datetime.now(TZ))
-    return templates.TemplateResponse(
-        request, "_settings_backup_schedule_form.html", _backup_context()
-    )
+
+    def apply():
+        schedule = form.get("backup_schedule")
+        keep_count = form.get("backup_keep_count")
+        keep_days = form.get("backup_keep_days")
+        schedule_time = str(form.get("backup_schedule_time", BACKUP_DEFAULT_TIME))
+        weekday_raw = str(form.get("backup_schedule_weekday", BACKUP_DEFAULT_WEEKDAY))
+        if schedule is not None and schedule not in BACKUP_SCHEDULE_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültiger Zeitplan"))
+        if keep_count is not None and keep_count not in BACKUP_KEEP_COUNT_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültige Anzahl"))
+        if keep_days is not None and keep_days not in RETENTION_LABELS:
+            raise HTTPException(status_code=400, detail=tr("Ungültige Aufbewahrung"))
+        try:
+            parse_schedule_time(schedule_time)
+            weekday = int(weekday_raw)
+            if weekday not in range(7):
+                raise ValueError
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=tr("Ungültiger Sicherungszeitpunkt")) from exc
+        if schedule is not None:
+            index.set_setting("backup_schedule", str(schedule))
+        if keep_count is not None:
+            index.set_setting("backup_keep_count", str(keep_count))
+        if keep_days is not None:
+            index.set_setting("backup_keep_days", str(keep_days))
+        index.set_setting("backup_schedule_time", schedule_time)
+        index.set_setting("backup_schedule_weekday", str(weekday))
+        _background.set_next_backup_run(datetime.now(TZ))
+        return templates.TemplateResponse(
+            request, "_settings_backup_schedule_form.html", _backup_context()
+        )
+
+    return await run_in_threadpool(apply)
 
 
 @app.post("/backup/verify/{filename}", response_class=HTMLResponse)
@@ -1996,7 +2053,7 @@ async def backup_import(request: Request, file: UploadFile = File(...)) -> HTMLR
         return templates.TemplateResponse(
             request,
             "_settings_backup_ready.html",
-            _backup_context(message=tr("Import fehlgeschlagen: Bitte eine ZIP-Datei auswählen.")),
+            await run_in_threadpool(_backup_context, message=tr("Import fehlgeschlagen: Bitte eine ZIP-Datei auswählen.")),
         )
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     staging = BACKUPS_DIR / f".backup-upload-{secrets.token_hex(12)}.zip"
@@ -2020,14 +2077,14 @@ async def backup_import(request: Request, file: UploadFile = File(...)) -> HTMLR
         return templates.TemplateResponse(
             request,
             "_settings_backup_ready.html",
-            _backup_context(message=tr("Import fehlgeschlagen: {exc}", exc=exc)),
+            await run_in_threadpool(_backup_context, message=tr("Import fehlgeschlagen: {exc}", exc=exc)),
         )
     except (OSError, ValueError) as exc:
         logger.warning("Backup-Import fehlgeschlagen · %s", exc)
         return templates.TemplateResponse(
             request,
             "_settings_backup_ready.html",
-            _backup_context(message=tr("Import fehlgeschlagen: {exc}", exc=exc)),
+            await run_in_threadpool(_backup_context, message=tr("Import fehlgeschlagen: {exc}", exc=exc)),
         )
     finally:
         staging.unlink(missing_ok=True)
@@ -2042,7 +2099,8 @@ async def backup_import(request: Request, file: UploadFile = File(...)) -> HTMLR
     return templates.TemplateResponse(
         request,
         "_settings_backup_ready.html",
-        _backup_context(
+        await run_in_threadpool(
+            _backup_context,
             message=tr("Backup importiert und erfolgreich geprüft (Formatversion {version}, {name}).", version=version, name=destination.name)
         ),
     )
@@ -2095,7 +2153,7 @@ def backup_rollback_restore(request: Request, name: str) -> HTMLResponse:
 
 @app.post("/backup/rollback/delete/{name}", response_class=HTMLResponse)
 def backup_rollback_delete(request: Request, name: str) -> HTMLResponse:
-    with storage_coordinator.exclusive():
+    with storage_coordinator.exclusive(timeout=UI_EXCLUSIVE_TIMEOUT_SECONDS):
         deleted = backup.delete_restore_rollback(DATA_DIR, name)
     if not deleted:
         raise HTTPException(status_code=404, detail=tr("Rollback nicht gefunden"))
@@ -2145,7 +2203,7 @@ def backup_download(filename: str) -> StreamingResponse:
 @app.post("/backup/delete/{filename}", response_class=HTMLResponse)
 def backup_delete(request: Request, filename: str) -> HTMLResponse:
     """Löscht ein einzelnes manuelles Backup nach UI-Bestätigung."""
-    with storage_coordinator.exclusive():
+    with storage_coordinator.exclusive(timeout=UI_EXCLUSIVE_TIMEOUT_SECONDS):
         deleted = backup.delete_backup(BACKUPS_DIR, filename)
     if not deleted:
         raise HTTPException(status_code=404, detail=tr("Backup nicht gefunden"))
@@ -2157,9 +2215,23 @@ def backup_delete_all(request: Request) -> HTMLResponse:
     """Löscht alle vorhandenen Backup-ZIPs nach UI-Bestätigung (nicht den
     Ausführungsverlauf oder Restore-Rollbacks, die bleiben eigenständig über
     ihre jeweiligen Löschaktionen steuerbar)."""
-    with storage_coordinator.exclusive():
-        count = backup.delete_all_backups(BACKUPS_DIR)
-    message = tr("{count} Backup(s) gelöscht.", count=count) if count else tr("Keine Backups zum Löschen vorhanden.")
+    # Noch nicht auf das externe Ziel übertragene Backups bleiben liegen: Ist das Ziel ausgefallen, gäbe es sie
+    # sonst nirgends mehr (dieselbe Regel wie beim automatischen Aufräumen).
+    protected = _background._unsent_backup_names() if backup_external.load_config(index).enabled else set()
+    with storage_coordinator.exclusive(timeout=UI_EXCLUSIVE_TIMEOUT_SECONDS):
+        count = backup.delete_all_backups(BACKUPS_DIR, protected)
+        kept = len([name for name in protected if (BACKUPS_DIR / name).is_file()])
+    if count and kept:
+        message = tr(
+            "{count} Backup(s) gelöscht, {kept} noch nicht auf das externe Ziel übertragene bleiben liegen.",
+            count=count, kept=kept,
+        )
+    elif count:
+        message = tr("{count} Backup(s) gelöscht.", count=count)
+    elif kept:
+        message = tr("{kept} Backup(s) sind noch nicht auf das externe Ziel übertragen und bleiben liegen.", kept=kept)
+    else:
+        message = tr("Keine Backups zum Löschen vorhanden.")
     return templates.TemplateResponse(request, "_settings_backup_ready.html", _backup_context(message=message))
 
 
@@ -2300,8 +2372,8 @@ def _diagnostics_payload() -> dict:
 
 @app.get("/settings/diagnostics")
 def settings_diagnostics_download() -> Response:
-    with storage_coordinator.exclusive():
-        payload = _diagnostics_payload()
+    # Ohne Sperre: nur Index-Werte und Verzeichnisgrößen, ein parallel aufräumender Import wird toleriert.
+    payload = _diagnostics_payload()
     filename = f"zeitarchiv-diagnose-{datetime.now(TZ).strftime('%Y%m%d-%H%M%S')}.json"
     return Response(
         content=json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -2335,11 +2407,13 @@ def _ingestion_rate_per_second(snapshots: list[dict], window_seconds: float) -> 
 
 
 @app.get("/statistik", response_class=HTMLResponse)
-@_storage_locked(lambda _args: [row["entity_id"] for row in index.list_entities()])
 def statistik_view(request: Request) -> HTMLResponse:
     """Allgemeine Statistik (Konzept Abschnitt 03/10) — Aufschlüsselung
     nach Typ/Auflösung/Aufbewahrung plus Wachstumsverlauf aus denselben
-    Schnappschüssen wie die Sparklines auf der Startseite."""
+    Schnappschüssen wie die Sparklines auf der Startseite.
+
+    Ohne Entitätssperren: gelesen werden nur Index-Werte und Verzeichnisgrößen. Eine Sperre auf alle Entitäten
+    hielte dagegen die Aufnahme jeder alphabetisch davor liegenden Entität an, solange ein Import läuft."""
     overview = index.get_overview()
     by_type = [
         {
@@ -2513,6 +2587,84 @@ def statistik_index_optimize(request: Request) -> HTMLResponse:
     )
 
 
+def _entity_facts(entity) -> dict:
+    """Kennzahlen im Kopf der drei Entitätsseiten (Verlauf, Werte bearbeiten,
+    Konfiguration) — dieselben Felder wie die Spalten der Entitätenliste, damit
+    man sie nicht erst dort nachschlagen muss. Ein gemeinsamer Aufbau, weil der
+    Kopf auf allen drei Seiten gleich ist (_entity_facts.html) und die Werte
+    sonst dreimal leicht verschieden zusammengesetzt würden."""
+    last_ts = entity["last_ts"]
+    return {
+        "type_label": format_type(entity["aggregation_type"]),
+        "state_class": entity["state_class"] or "",
+        "unit": entity["unit"] or "",
+        "row_count": format_int(_visible_row_count(entity)),
+        "size": format_size(entity["size_bytes"]),
+        "first_ts": format_timestamp(entity["first_ts"], TZ),
+        "first_ts_time": format_time(entity["first_ts"], TZ),
+        "last_ts": format_timestamp(last_ts, TZ),
+        "last_ts_time": format_time(last_ts, TZ),
+        # Nur die größte Einheit („vor 1 Std.“, nicht „vor 1 Std. 16 Min.“): so passt
+        # sie hinter die Uhrzeit in dieselbe Zeile, ohne dass die Zelle höher wird
+        # oder mitten im Satz umbricht. Jede Einheit besteht aus Zahl und Wort.
+        "last_ago": tr("vor {dauer}", dauer=" ".join(format_uptime(max(0.0, time.time() - last_ts)).split()[:2])) if last_ts else "",
+        "extra": _entity_facts_extra(entity),
+        "category": _entity_facts_category(entity["entity_id"]),
+    }
+
+
+def _entity_facts_category(entity_id: str) -> dict | None:
+    """Die Kategorie der Entität für den Chip unter dem Typ, oder None ohne."""
+    category_id = index.get_entity_category_id(entity_id)
+    if category_id is None:
+        return None
+    return next((c for c in index.list_entity_categories() if c["id"] == category_id), None)
+
+
+def _entity_facts_extra(entity) -> dict | None:
+    """Die typabhängige letzte Zelle der Kennzahlen-Leiste, oder None, wo es
+    keinen sinnvollen Wert gibt (Schalter).
+
+    Standard: Minimum/Maximum über den gesamten Zeitraum. Der Index kennt sie
+    nicht, ein Vollscan gehört nicht in den Seitenaufbau — liegt kein gültiger
+    Zwischenspeicher vor, bleibt `text` leer und der Browser holt sie über
+    /entities/{id}/value-range nach (static/js/entity-facts.js).
+    Zähler: der aktuelle Zählerstand (Min/Max wären hier nur Anfangs- und
+    Endstand). Zustand: Zahl der bekannten Zustände."""
+    kind = entity["aggregation_type"]
+    decimals = decimals_to_int(entity["decimals"])
+    if kind == "standard":
+        entry = value_range.cached(index, entity)
+        return {
+            "label": tr("Min / Max"), "note": tr("gesamter Zeitraum"), "pending": entry is None,
+            "text": _value_range_text(entry, decimals, entity) if entry else "",
+        }
+    if kind == "counter":
+        # last_value fehlt nach Import/Restore/Abgleich — dann aus den Daten lesen,
+        # statt die Zelle je nach Herkunft der Entität verschwinden zu lassen.
+        last = entity["last_value"]
+        if last is None:
+            last = value_range.last_raw_value(DATA_DIR, index, TZ, entity, datetime.now(TZ))
+        return {"label": tr("Zählerstand"), "note": "", "pending": False,
+                "text": _with_unit(format_value(last, decimals), entity) if last is not None else "—"}
+    if kind == "state":
+        return {"label": tr("Zustände"), "note": tr("verschieden"), "pending": False,
+                "text": format_int(len(index.get_state_map(entity["entity_id"])))}
+    return None
+
+
+def _with_unit(text: str, entity) -> str:
+    """Wert mit Einheit, damit die Zelle für sich lesbar ist (die Einheit steht
+    zusätzlich in der Typ-Zelle, dort aber weit weg vom Wert)."""
+    return f"{text} {entity['unit']}" if entity["unit"] else text
+
+
+def _value_range_text(entry: dict, decimals: int | None, entity) -> str:
+    if entry["min"] is None or entry["max"] is None:
+        return "—"
+    return _with_unit(f"{format_value(entry['min'], decimals)} / {format_value(entry['max'], decimals)}", entity)
+
+
 def _visible_row_count(entity) -> int:
     """Logische Rohwerte: physischer Indexzähler abzüglich Soft-Deletes."""
     deleted_count = int(entity["deleted_count"] or 0)
@@ -2529,6 +2681,9 @@ def _visible_row_count(entity) -> int:
 # set_setting), gilt also global fürs ganze Add-on, nicht pro Browser.
 ENTITIES_OPTIONAL_COLUMNS = [
     ("type", N_("Typ")),
+    # Nur anbietbar, wenn es mindestens eine Kategorie gibt (ROADMAP 1.42),
+    # siehe _entities_column_options().
+    ("category", N_("Kategorie")),
     ("first_ts", N_("Erster Wert")),
     ("last_ts", N_("Letzter Wert")),
     ("resolution", N_("Auflösung")),
@@ -2539,6 +2694,7 @@ ENTITIES_OPTIONAL_COLUMNS = [
     ("value_filter", N_("Wertfilter")),
     ("gap_threshold", N_("Lücken")),
     ("outlier_threshold", N_("Ausreißer")),
+    ("counter_decreases", N_("Zählerrückgänge")),
     ("historic", N_("Historisch")),
 ]
 # Nur Auflösung/Aufbewahrung initial aus — diese beiden Konfigurationsdetails
@@ -2549,8 +2705,37 @@ ENTITIES_DEFAULT_COLUMNS = "type,first_ts,last_ts,unit,rows,size"
 
 def _entities_visible_columns() -> set[str]:
     valid = {key for key, _ in ENTITIES_OPTIONAL_COLUMNS}
-    raw = index.get_setting("entities_columns", ENTITIES_DEFAULT_COLUMNS) or ""
-    return {c for c in raw.split(",") if c} & valid
+    saved = index.get_setting("entities_columns", None)
+    has_categories = bool(index.list_entity_categories())
+    columns = {c for c in (ENTITIES_DEFAULT_COLUMNS if saved is None else saved).split(",") if c} & valid
+    # Die Kategorie-Spalte erscheint von selbst, sobald es Kategorien gibt; wer
+    # die Spalten schon einmal gewählt hat, behält seine Auswahl (siehe
+    # entity_category_routes: die erste angelegte Kategorie nimmt sie auf).
+    # Dafür weicht „Größe“ (am wenigsten gebraucht), damit die Liste nicht breiter wird.
+    if has_categories and saved is None:
+        columns.add("category")
+        columns.discard("size")
+    if not has_categories:
+        columns.discard("category")
+    return columns
+
+
+def _add_category_column() -> None:
+    """Nimmt „Kategorie“ in eine bereits gespeicherte Spaltenauswahl auf, wenn die
+    erste Kategorie entsteht — sonst bliebe die Spalte für alle verborgen, die ihre
+    Spalten früher einmal gewählt haben."""
+    saved = index.get_setting("entities_columns", None)
+    if saved is None:
+        return
+    columns = [c for c in saved.split(",") if c]
+    if "category" not in columns:
+        index.set_setting("entities_columns", ",".join(["category", *columns]))
+
+
+def _entities_column_options() -> list[tuple[str, str]]:
+    """Spaltenauswahl der Liste; „Kategorie“ nur, solange es Kategorien gibt."""
+    has_categories = bool(index.list_entity_categories())
+    return [(key, label) for key, label in ENTITIES_OPTIONAL_COLUMNS if key != "category" or has_categories]
 
 
 def _entities_table_response(
@@ -2564,16 +2749,18 @@ def _entities_table_response(
     page_size: int = 20,
     favorites_only: bool = False,
     visible_columns: set[str] | None = None,
+    category_filter: list[str] | None = None,
 ) -> HTMLResponse:
     if visible_columns is None:
         visible_columns = _entities_visible_columns()
     total = index.count_entities(
         search=search or None, type_filter=type_filter, unit_filter=unit_filter, favorites_only=favorites_only,
+        category_filter=category_filter,
     )
     pagination = _paginate_meta(total, page, page_size)
     page_matched = index.list_entities(
         search=search or None, type_filter=type_filter, unit_filter=unit_filter, sort=sort, direction=direction,
-        favorites_only=favorites_only,
+        favorites_only=favorites_only, category_filter=category_filter,
         limit=pagination["page_size"], offset=(pagination["page"] - 1) * pagination["page_size"],
     )
     # Nur die tatsächlich sichtbaren Spalten formatieren statt immer alle elf
@@ -2582,6 +2769,8 @@ def _entities_table_response(
     # unnötige format_*()-Aufrufe pro ausgeblendeter Spalte (PERFORMANCE.md,
     # ZP-014). entity_id/friendly_name/display_name/has_custom_name/
     # is_favorite werden immer gebraucht (Entität-Spalte, Favoriten-Stern).
+    categories = {c["id"]: c for c in index.list_entity_categories()}
+    category_of = index.category_map_for([row["entity_id"] for row in page_matched]) if "category" in visible_columns else {}
     rows = []
     for row in page_matched:
         entry = {
@@ -2594,6 +2783,8 @@ def _entities_table_response(
             # gebraucht (Zeilentönung + Hinweiszeile), keine Spalte zum Abwählen.
             "pending_purge": int(row["deleted_count"] or 0),
         }
+        if "category" in visible_columns:
+            entry["category"] = categories.get(category_of.get(row["entity_id"]))
         if "type" in visible_columns:
             entry["aggregation_type"] = row["aggregation_type"]
             entry["type_label"] = format_type(row["aggregation_type"])
@@ -2629,6 +2820,14 @@ def _entities_table_response(
             entry["outlier_threshold_label"] = (
                 OUTLIER_THRESHOLD_LABELS.get(row["outlier_threshold"], row["outlier_threshold"])
                 if outlier_detection_applies(row["aggregation_type"])
+                else "—"
+            )
+        if "counter_decreases" in visible_columns:
+            # Nur Zähler kennen die Einstellung (Standard: melden); bei allen anderen
+            # Typen wäre „Melden“ eine Aussage über etwas, das es dort nicht gibt.
+            entry["counter_decreases_label"] = (
+                (tr("Erlaubt") if row["counter_decreases"] == "allow" else tr("Melden"))
+                if row["aggregation_type"] == "counter"
                 else "—"
             )
         if "historic" in visible_columns:
@@ -2688,6 +2887,7 @@ def entities_table(
     page: int = 1,
     page_size: int = 20,
     favorites: bool = False,
+    category: list[str] = Query(["all"]),
     columns: list[str] = Query([]),
     columns_submitted: bool = False,
 ) -> HTMLResponse:
@@ -2700,7 +2900,8 @@ def entities_table(
         valid = {key for key, _ in ENTITIES_OPTIONAL_COLUMNS}
         index.set_setting("entities_columns", ",".join(c for c in columns if c in valid))
     return _entities_table_response(
-        request, search, type, unit, sort, dir, page, page_size, favorites, _entities_visible_columns()
+        request, search, type, unit, sort, dir, page, page_size, favorites, _entities_visible_columns(),
+        category_filter=category,
     )
 
 
@@ -2723,6 +2924,41 @@ def _gap_threshold_auto_adjust_message(
     return (
         tr("{label} automatisch auf {new_label} gesetzt: {cause} — eine kürzere Lücken-Schwelle hätte das sonst laufend fälschlich als Lücke gemeldet. Lässt sich hier jederzeit wieder manuell verkleinern.", label=label, new_label=new_label, cause=cause)
     )
+
+
+def _entity_config_adjusted(entity) -> dict[str, dict[str, str]]:
+    """Felder der Konfiguration, die vom globalen Standard (Einstellungen → Archivierung)
+    abweichen, mit Wert und Beschriftung des Standards (das Abzeichen setzt darauf zurück). Gesperrte Felder fehlen: dort gibt es
+    nichts einzustellen. Für Zustände gilt, was beim Anlegen erzwungen wird (siehe
+    Index.get_or_create_entity), nicht der globale Wert."""
+    defaults = _settings_archivierung_context()
+    kind = entity["aggregation_type"]
+    expected = {name: defaults[f"default_{name}"] for name in (
+        "resolution", "retention", "decimals", "value_filter", "gap_threshold", "outlier_threshold", "compact_target")}
+    if kind == "state":
+        expected.update(resolution="raw", compact_target="off", value_filter="off")
+    labels = {
+        "resolution": RESOLUTION_LABELS, "retention": RETENTION_LABELS, "decimals": DECIMALS_LABELS,
+        "value_filter": VALUE_FILTER_LABELS, "gap_threshold": GAP_THRESHOLD_LABELS,
+        "outlier_threshold": OUTLIER_THRESHOLD_LABELS, "compact_target": COMPACT_TARGET_LABELS,
+    }
+    blocked = {
+        "resolution": RESOLUTION_BLOCKED_REASONS, "compact_target": COMPACT_TARGET_BLOCKED_REASONS,
+        "outlier_threshold": OUTLIER_BLOCKED_REASONS,
+    }
+    titles = {
+        "resolution": N_("Auflösung"), "retention": N_("Aufbewahrung"), "decimals": N_("Nachkommastellen"),
+        "value_filter": N_("Wertänderungsfilter"), "gap_threshold": N_("Lücken-Erkennung"),
+        "outlier_threshold": N_("Ausreißer-Erkennung"), "compact_target": N_("Verdichtungsziel"),
+    }
+    return {
+        name: {
+            "value": value, "label": tr(str(labels[name].get(value, value))),
+            "current": tr(str(labels[name].get(entity[name], entity[name]))), "title": tr(str(titles[name])),
+        }
+        for name, value in expected.items()
+        if entity[name] != value and kind not in blocked.get(name, {})
+    }
 
 
 def _entity_config_context(entity) -> dict:
@@ -2757,16 +2993,13 @@ def _entity_config_context(entity) -> dict:
         # seit der Reiterzeile denselben Kopf, und dort gehört er dazu.
         "is_favorite": bool(entity["is_favorite"]), "historic": bool(entity["historic"]),
         "custom_name_max_length": MAX_CUSTOM_NAME_LENGTH,
+        "categories": index.list_entity_categories(), "category_id": index.get_entity_category_id(entity_id),
+        "adjusted": _entity_config_adjusted(entity),
         "aggregation_type": entity["aggregation_type"],
         "type_label": format_type(entity["aggregation_type"]),
         "state_class": entity["state_class"] or "",
         "unit": entity["unit"] or "—",
-        "row_count": format_int(_visible_row_count(entity)),
-        "first_ts": format_timestamp(entity["first_ts"], TZ),
-        "first_ts_time": format_time(entity["first_ts"], TZ),
-        "last_ts": format_timestamp(entity["last_ts"], TZ),
-        "last_ts_time": format_time(entity["last_ts"], TZ),
-        "size": format_size(entity["size_bytes"]),
+        "facts": _entity_facts(entity),
         "resolution": entity["resolution"],
         "resolution_blocked_reason": RESOLUTION_BLOCKED_REASONS.get(entity["aggregation_type"]),
         # Nur bei Standard und Auflösung != raw relevant — siehe resolution.py.
@@ -2826,6 +3059,19 @@ def entity_outlier_rate(request: Request, entity_id: str) -> HTMLResponse:
     return templates.TemplateResponse(
         request, "_entity_config_form.html", _entity_config_context(_require_entity(entity_id))
     )
+
+
+@app.get("/entities/{entity_id}/value-range")
+@_storage_locked(lambda args: args["entity_id"])
+def entity_value_range(entity_id: str) -> dict:
+    """Minimum/Maximum der Entität über den gesamten Zeitraum, als Text für die
+    Kennzahlen-Leiste. Rechnet bei Bedarf einen Vollscan (siehe value_range.py)
+    — deshalb ein eigener Aufruf, den die Seite erst nach dem Laden stellt."""
+    entity = _require_entity(entity_id)
+    entry = value_range.cached(index, entity) or value_range.compute(
+        DATA_DIR, index, TZ, entity, datetime.now(TZ)
+    )
+    return {"text": _value_range_text(entry, decimals_to_int(entity["decimals"]), entity)}
 
 
 @app.get("/entities/{entity_id}/config", response_class=HTMLResponse)
@@ -3299,7 +3545,7 @@ _ENTITY_CHART_OPTION_DEFAULTS = {
     # Zeitstrahl standardmäßig offen; ohne Wirkung bei allen anderen Typen.
     "state_log": True,
 }
-_ENTITY_CHART_DECIMALS = {"auto", "0", "1", "2", "3"}
+_ENTITY_CHART_DECIMALS = {"auto", "0", "1", "2", "3", "4"}
 _ON_OFF_LABELS = {"1": N_("An"), "0": N_("Aus")}
 _ENTITY_LEGEND_STYLE_LABELS = {"chips": N_("Chips"), "table": N_("Tabelle")}
 _ENTITY_LEGEND_METRIC_LABELS = {"last": N_("Aktuell"), "min": N_("Min"), "max": N_("Max"), "average": N_("Durchschnitt"), "sum": N_("Summe")}
@@ -3432,6 +3678,7 @@ def _chart_editor_context(chart: dict | None, prefill: dict | None = None) -> di
         "compare_mode": chart["compare_settings"].get("mode", "previous") if chart else prefill.get("compare_mode", "previous"),
         "compare_settings": chart["compare_settings"] if chart else {},
         "heatmap_states": chart["heatmap_states"] if chart else prefill.get("heatmap_states", {}),
+        "series_colors": chart["series_colors"] if chart else {},
     }
 
 
@@ -3495,6 +3742,7 @@ class _SaveChartBody(BaseModel):
     period_anchor: str | None = None  # fester Zeitraum, siehe chart_period.py
     compare_settings: dict = {}  # Vergleich, siehe chart_period.py
     heatmap_states: dict[str, str] = {}  # gezeichneter Zustand je Entität der Heatmap
+    series_colors: dict[str, str] = {}  # eigene Serienfarbe, siehe series_colors_clean()
 
 
 def _hidden_for(body: _SaveChartBody) -> list[str]:
@@ -3542,6 +3790,7 @@ def charts_create(body: _SaveChartBody) -> dict:
         horizontal=body.horizontal, donut_aggregation=body.donut_aggregation,
         period_anchor=period_anchor_or_400(body.period_anchor), compare_settings=compare_settings_or_400(body.compare_settings),
         heatmap_states=heatmap_states_clean(body.heatmap_states, body.entity_ids),
+        series_colors=series_colors_clean(body.series_colors, body.entity_ids),
     )
     return {"id": chart_id}
 
@@ -3591,6 +3840,7 @@ def charts_update(chart_id: int, body: _SaveChartBody) -> dict:
         horizontal=body.horizontal, donut_aggregation=body.donut_aggregation,
         period_anchor=period_anchor_or_400(body.period_anchor), compare_settings=compare_settings_or_400(body.compare_settings),
         heatmap_states=heatmap_states_clean(body.heatmap_states, body.entity_ids),
+        series_colors=series_colors_clean(body.series_colors, body.entity_ids),
     )
     return {"id": chart_id}
 
@@ -3632,7 +3882,7 @@ def charts_duplicate(chart_id: int) -> dict:
         stacked=chart["stacked"], normalize=chart["normalize"], average_style=chart["average_style"],
         horizontal=chart["horizontal"], donut_aggregation=chart["donut_aggregation"],
         period_anchor=chart["period_anchor"], compare_settings=chart["compare_settings"],
-        heatmap_states=chart["heatmap_states"],
+        heatmap_states=chart["heatmap_states"], series_colors=chart["series_colors"],
     )
     return {"id": new_id}
 
@@ -3812,16 +4062,20 @@ def dashboard_pin_entity(request: Request, entity_id: str, dashboard_id: int = 1
 async def dashboard_entity_change(
     request: Request, pin_id: int, dashboard_id: int = 1
 ) -> HTMLResponse:
-    _require_dashboard_unlocked(dashboard_id)
     form = await request.form()
-    new_entity_id = str(form.get("new_entity_id", "")).strip()
-    _require_entity(new_entity_id)
-    if not index.set_dashboard_entity_pin_entity(dashboard_id, pin_id, new_entity_id):
-        raise HTTPException(status_code=404, detail=tr("Dashboard-Kachel nicht gefunden"))
-    return templates.TemplateResponse(
-        request, "_dashboard_tiles.html",
-        _dashboard_tiles_context(dashboard_id, auto_open_pin_id=pin_id),
-    )
+
+    def apply():
+        _require_dashboard_unlocked(dashboard_id)
+        new_entity_id = str(form.get("new_entity_id", "")).strip()
+        _require_entity(new_entity_id)
+        if not index.set_dashboard_entity_pin_entity(dashboard_id, pin_id, new_entity_id):
+            raise HTTPException(status_code=404, detail=tr("Dashboard-Kachel nicht gefunden"))
+        return templates.TemplateResponse(
+            request, "_dashboard_tiles.html",
+            _dashboard_tiles_context(dashboard_id, auto_open_pin_id=pin_id),
+        )
+
+    return await run_in_threadpool(apply)
 
 
 @app.post("/dashboard/pin-cleanup", response_class=HTMLResponse)
@@ -4104,6 +4358,9 @@ def dashboards_list(request: Request) -> HTMLResponse:
             # global aus _nav_dashboards_context, "configured" nur hier.
             "energiedashboard_configured": is_energiedashboard_configured(index),
             "energiedashboard_role_count": energiedashboard_role_count(index),
+            # Wie beim Energiedashboard: "enabled" kommt global aus _nav_dashboards_context.
+            "wetter_configured": is_wetter_configured(index),
+            "wetter_role_count": wetter_role_count(index),
             # Für das Startseiten-Symbol an der Energiedashboard-Kachel unten
             # (STARTSEITE_LABELS oben) — Default "uebersicht" spiegelt
             # dieselbe Rückfallregel wie überall sonst, wo diese Einstellung
@@ -4290,6 +4547,9 @@ class _TableColumnBody(BaseModel):
     # Ziehgriff am rechten Spaltenrand) — None/nicht gesetzt heißt automatische
     # Breite (Standard-Tabellenlayout, richtet sich nach dem Inhalt).
     width: int | None = None
+    # Zählt diese Spalte zur Σ-Spalte (style.show_row_sum) mit? Ausgeblendete
+    # Spalten zählen nie mit, unabhängig von diesem Feld.
+    in_sum: bool = True
 
 
 _TABLE_ROW_AGGREGATIONS = ("auto", "avg", "min", "max", "sum")
@@ -4367,8 +4627,16 @@ class _TableStyleBody(BaseModel):
     # bewusst nur die Werte-Spalten, nicht die Beschriftungsspalte (siehe
     # table_editor.html tbl-style-equal-cols).
     equal_value_cols: bool = False
+    # Σ-Spalte: je Zeile die Summe über die Zeitspalten (siehe
+    # TableCompute.computeRowSums()). Beschriftung und Position links/rechts
+    # der Werte-Spalten frei wählbar.
+    show_row_sum: bool = False
+    row_sum_label: str = "Σ"
+    row_sum_position: str = "left"
 
 
+_TABLE_ROW_SUM_POSITIONS = ("left", "right")
+MAX_TABLE_ROW_SUM_LABEL_LENGTH = 12
 _TABLE_BORDER_OPTIONS = ("horizontal", "grid", "none")
 _TABLE_DENSITY_OPTIONS = ("comfortable", "compact")
 _TABLE_ALIGN_OPTIONS = ("left", "center", "right")
@@ -4427,6 +4695,22 @@ def _validate_table_body(body: _SaveTableBody) -> None:
         raise HTTPException(status_code=400, detail=tr("Bitte mindestens eine Spalte anlegen"))
     if not body.rows:
         raise HTTPException(status_code=400, detail=tr("Bitte mindestens eine Zeile anlegen"))
+    # Dieselben Grenzen wie die Abfrage (TableQueryRequest): Sonst ließe sich eine Tabelle speichern, die Vorschau
+    # und Kachel danach nie mehr laden (422) und die Karte nur mit 500 beantwortet.
+    if len(body.columns) > MAX_TABLE_COLUMNS:
+        raise HTTPException(
+            status_code=400,
+            detail=tr("Eine Tabelle darf höchstens {limit} Spalten haben", limit=MAX_TABLE_COLUMNS),
+        )
+    used_entities = {entity_id for r in body.rows for entity_id in r.entity_ids}
+    if len(used_entities) > MAX_MULTI_QUERY_ENTITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=tr(
+                "Eine Tabelle darf höchstens {limit} verschiedene Entitäten enthalten (jetzt {count})",
+                limit=MAX_MULTI_QUERY_ENTITIES, count=len(used_entities),
+            ),
+        )
     for c in body.columns:
         if c.range_key not in dict(_CHART_RANGE_OPTIONS):
             raise HTTPException(status_code=400, detail=tr("Ungültiger Zeitraum in einer Spalte"))
@@ -4462,6 +4746,13 @@ def _validate_table_body(body: _SaveTableBody) -> None:
         raise HTTPException(status_code=400, detail=tr("Ungültige Dichte-Option"))
     if body.style.header_align not in _TABLE_ALIGN_OPTIONS or body.style.value_align not in _TABLE_ALIGN_OPTIONS:
         raise HTTPException(status_code=400, detail=tr("Ungültige Ausrichtungs-Option"))
+    if body.style.row_sum_position not in _TABLE_ROW_SUM_POSITIONS:
+        raise HTTPException(status_code=400, detail=tr("Ungültige Position der Summenspalte"))
+    if len(body.style.row_sum_label) > MAX_TABLE_ROW_SUM_LABEL_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=tr("Die Beschriftung der Summenspalte darf höchstens {MAX_TABLE_ROW_SUM_LABEL_LENGTH} Zeichen lang sein", MAX_TABLE_ROW_SUM_LABEL_LENGTH=MAX_TABLE_ROW_SUM_LABEL_LENGTH),
+        )
 
 
 # Muss VOR "/tables/{table_id}" stehen — dieselbe Begründung wie bei
@@ -4592,6 +4883,7 @@ def entity_detail(
             "type_label": format_type(entity["aggregation_type"]),
             "state_class": entity["state_class"] or "",
             "unit": entity["unit"],
+            "facts": _entity_facts(entity),
             "decimals": decimals_to_int(effective_decimals),
             "display_mode": entity["display_mode"],
             "first_date": first_date,
@@ -4655,9 +4947,7 @@ def entity_cleanup(
             "entity_id": entity_id,
             "friendly_name": entity["friendly_name"],
             "custom_name": entity["custom_name"] or "",
-            # Für die Unterzeile: die drei Entitätsseiten tragen seit der
-            # Reiterzeile denselben Kopf, und dort steht der Typ.
-            "type_label": format_type(entity["aggregation_type"]),
+            "facts": _entity_facts(entity),
             "first_date": first_date,
             "last_date": last_date,
             "gap_detection_enabled": entity["gap_threshold"] != "off",
@@ -4999,9 +5289,12 @@ def entity_rows(
 def _rows_form_common(form) -> tuple[str, str, int, int, int, str]:
     filter_ = str(form.get("filter", "all"))
     range_key = str(form.get("range", "day"))
-    offset = int(form.get("offset", 0))
-    page = int(form.get("page", 1))
-    page_size = int(form.get("page_size", 20))
+    try:
+        offset = int(form.get("offset", 0))
+        page = int(form.get("page", 1))
+        page_size = int(form.get("page_size", 20))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=tr("Ungültiger Zahlenwert in der Anfrage.")) from None
     mode = str(form.get("mode", "cleanup"))
     return filter_, range_key, offset, page, page_size, mode
 
@@ -5009,7 +5302,10 @@ def _rows_form_common(form) -> tuple[str, str, int, int, int, str]:
 @app.post("/entities/{entity_id}/rows/delete", response_class=HTMLResponse)
 async def delete_rows(request: Request, entity_id: str) -> HTMLResponse:
     _require_entity(entity_id)
-    form = await request.form()
+    # Starlette erlaubt standardmäßig nur 1000 Formularfelder. Jede angekreuzte
+    # Zeile ist ein Feld ("ts"), bei 1000 Zeilen pro Seite plus range/filter/...
+    # also zu viel: der Request scheiterte mit 400, ohne dass etwas gelöscht wurde.
+    form = await request.form(max_fields=MAX_FORM_FIELDS)
     timestamps = [float(value) for key, value in form.multi_items() if key == "ts"]
     filter_, range_key, offset, page, page_size, mode = _rows_form_common(form)
 

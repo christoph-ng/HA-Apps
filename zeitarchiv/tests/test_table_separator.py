@@ -1,13 +1,13 @@
 """Regressionstests für rein optische Trennzeilen in gespeicherten Tabellen."""
 
 
-from _paths import APP, page_text
+from _paths import APP, page_text, tile_js
 
 
 
 EDITOR = page_text("table_editor.html")
 COMPUTE = (APP / "static/js/table-compute.js").read_text(encoding="utf-8")
-DASHBOARD = (APP / "static/js/dashboard-tiles.js").read_text(encoding="utf-8")
+DASHBOARD = tile_js()
 MAIN = (APP / "main.py").read_text(encoding="utf-8")
 
 
@@ -16,8 +16,8 @@ def test_editor_offers_separator_and_full_width_preview() -> None:
     assert "row.row_type === 'separator'" in EDITOR
     assert 'class="tbl-separator-line"' in EDITOR
     # Berücksichtigt seither ausgeblendete Spalten (visibleColumnCount statt
-    # der rohen Spaltenanzahl).
-    assert ':colspan="visibleColumnCount + 1"' in EDITOR
+    # der rohen Spaltenanzahl), plus Summenspalte (tableColspan).
+    assert ':colspan="tableColspan"' in EDITOR
 
 
 def test_separator_can_be_positioned_in_existing_tables() -> None:

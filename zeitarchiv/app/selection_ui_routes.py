@@ -24,7 +24,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import selection_catalog, selection_jobs, selection_overview, selection_search, selection_suggest
+from . import selection_catalog, selection_category, selection_jobs, selection_overview, selection_search, selection_suggest
 from .formatting import format_time, format_timestamp
 from .i18n import tr
 from .selection_topics import TOPIC_INFO, rule_anwesenheit, topic_label
@@ -143,6 +143,8 @@ def make_ui_router(get_index: Callable[[], Index], templates: Jinja2Templates, d
         entity_id: list[str] = Form(default=[]),
         unexclude_id: list[str] = Form(default=[]),
         confirmed: str = Form(""),
+        category: str = Form(""),
+        recategorize: str = Form(""),
     ) -> Response:
         is_search = topic == selection_search.SEARCH_TOPIC
         query = selection_search.clean_query(q)
@@ -201,24 +203,38 @@ def make_ui_router(get_index: Callable[[], Index], templates: Jinja2Templates, d
                 "high_rate": sum(1 for eid in ids if candidates[eid]["high_rate"]),
                 "sensitive": sensitive, "back": back,
                 "note": None if is_search else TOPIC_INFO[topic].get("note"),
+                "category": selection_category.options(get_index(), "" if is_search else topic_label(topic)),
             })
-        return pages.create(
+        problem = selection_category.check(get_index(), category)
+        if problem:
+            return error(request, problem, back)
+        created = pages.create(
             request, back, source="assistant", action="add", mode=mode, topic=None if is_search else topic,
             entity_ids=ids, force_ids=force_ids, unexclude_ids=requested_unexclude, entry_id=catalog.get("entry_id"),
         )
+        if created.status_code == 303:  # nur wenn der Auftrag steht
+            selection_category.apply(get_index(), category, ids, overwrite=recategorize == "1")
+        return created
 
     # ---- Auswahl & Verlauf ---------------------------------------------------------------
 
     @router.get("/selection/overview", response_class=HTMLResponse)
-    def overview(request: Request, filter: str = "alle", q: str = "", page: int = 1, job: str = "") -> HTMLResponse:
+    def overview(
+        request: Request, filter: str = "alle", q: str = "", page: int = 1, job: str = "", category: str = "",
+    ) -> HTMLResponse:
         catalog = selection_catalog.load(data_dir)
         jobs = selection_jobs.all_jobs(data_dir)
         data = None
         patterns: list[dict[str, Any]] = []
+        category_list: list[dict[str, Any]] = []
         if catalog is not None:
+            index = get_index()
+            category_list = index.list_entity_categories()
             data = selection_overview.table(
                 catalog["entities"], archived(), filter_key=filter, query=q, page=page,
-                managed_label=(catalog.get("label") or {}).get("name"),
+                managed_label=(catalog.get("label") or {}).get("name"), category=category,
+                category_of=index.category_map_for([row["entity_id"] for row in catalog["entities"]]),
+                categories={c["id"]: c for c in category_list},
             )
             for row in data["rows"]:
                 row["since"] = when(row["added_ts"])
@@ -236,7 +252,7 @@ def make_ui_router(get_index: Callable[[], Index], templates: Jinja2Templates, d
             "job": current, "job_status_text": tr(str(selection_overview.STATUS_TEXT.get(current["status"], "")))
             if current else "", "can_apply": bool(catalog and catalog.get("phase1")),
             "can_change": bool(catalog and catalog.get("phase1") and catalog.get("phase2")),
-            "received": when(catalog["received_ts"]) if catalog else "",
+            "received": when(catalog["received_ts"]) if catalog else "", "categories": category_list,
             "label": (catalog or {}).get("label"), "patterns": patterns,
         })
 

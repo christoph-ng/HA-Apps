@@ -27,6 +27,7 @@
   <script src="{{ asset('vendor/htmx.min.js') }}"></script>
   <script src="{{ asset('vendor/echarts.min.js') }}"></script>
   <script src="{{ asset('js/number-format.js') }}"></script>
+  <script src="{{ asset('js/tooltip-hold.js') }}"></script>
   <script src="{{ asset('js/entity-picker.js') }}"></script>
   <script src="{{ asset('js/confirm-dialog.js') }}"></script>
   <script src="{{ asset('js/table-compute.js') }}"></script>
@@ -35,5 +36,7 @@
   <script src="{{ asset('js/period-navigation.js') }}"></script>
   {% if dashboard_period_nav %}{{ period_assets() }}{% endif %}
   <script src="{{ asset('js/state-entities.js') }}"></script>
+  <script src="{{ asset('js/table-tile-render.js') }}"></script>
+  <script src="{{ asset('js/chart-tile-render.js') }}"></script>
   <script src="{{ asset('js/dashboard-tiles.js') }}"></script>
 {% endblock %}
