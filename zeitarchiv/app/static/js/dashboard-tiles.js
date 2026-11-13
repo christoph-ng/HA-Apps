@@ -31,21 +31,57 @@
     prepareSeries,
     readSpec,
     scaledFont,
-    stateRows,
-    switchOnDuration,
     tileMultiYear,
     viewTypeFor,
-    withOpacity,
   } = window.ChartTileRender;
+  const {buildLegendItems, renderLegendHtml} = window.LegendRender;
 
 
   const instances = new Map();  // chartId -> echarts instance
-  // Einmal für die ganze Seite statt in setup(): das läuft nach jedem
-  // htmx-Austausch des Dashboard-Gitters erneut, und jeder Lauf legte einen
-  // weiteren Listener an — nach n Austauschen n Resize-Durchläufe je Ereignis.
-  // Die Sammlung wird beim Austausch geleert und neu befüllt, der eine
-  // Listener sieht so immer die aktuellen Instanzen.
-  window.addEventListener('resize', () => instances.forEach(c => c.resize()));
+  // Charts folgen der Größe IHRES Containers, nicht der des Fensters: Ein
+  // Spaltenwechsel, die Seitenleiste von Home Assistant oder eine neue
+  // Rahmenbreite ändern die Kachel, ohne dass window.resize feuert. Ein
+  // einziger ResizeObserver für die ganze Seite statt in setup() — das läuft
+  // nach jedem htmx-Austausch des Dashboard-Gitters erneut, und ein Observer
+  // je Lauf hieße n Durchläufe je Größenänderung. Beobachtet werden die
+  // Chart-Elemente (auch die der Zustands-Donuts, die nicht in `instances`
+  // stehen); chartHosts ordnet jedem Element seine ECharts-Instanz zu.
+  // Die Aufrufe werden auf einen Animationsframe gebündelt, und ein Element
+  // ohne Fläche (versteckt, 0×0) oder mit unveränderter Größe zeichnet nicht.
+  const chartHosts = new WeakMap();  // Element -> {chart, w, h}
+  const resizePending = new Set();
+  let resizeQueued = false;
+  const resizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(entries => {
+      entries.forEach(entry => resizePending.add(entry.target));
+      if (resizeQueued) return;
+      resizeQueued = true;
+      requestAnimationFrame(() => {
+        resizeQueued = false;
+        resizePending.forEach(el => {
+          const host = chartHosts.get(el);
+          if (!host || host.chart.isDisposed() || !el.clientWidth || !el.clientHeight) return;
+          if (el.clientWidth === host.w && el.clientHeight === host.h) return;
+          host.w = el.clientWidth;
+          host.h = el.clientHeight;
+          host.chart.resize();
+        });
+        resizePending.clear();
+      });
+    })
+    : null;
+  // Rückfall für Browser ohne ResizeObserver (heute keiner der unterstützten):
+  // wie früher bei jedem Fenster-Resize, nur für die Instanzen in `instances`.
+  if (!resizeObserver) window.addEventListener('resize', () => instances.forEach(c => c.resize()));
+  function observeChart(chart, el) {
+    chartHosts.set(el, {chart, w: el.clientWidth, h: el.clientHeight});
+    if (resizeObserver) resizeObserver.observe(el);
+  }
+  function disposeChart(chart) {
+    const el = chart.getDom();
+    if (resizeObserver && el) resizeObserver.unobserve(el);
+    chart.dispose();
+  }
   // chartId -> {items, legendMetrics, showStats} — die zuletzt geladenen und
   // berechneten Legenden-Kennzahlen einer Chart-Kachel, unabhängig vom
   // aktuellen Sichtbarkeitszustand der Legende zwischengespeichert. Ein
@@ -74,81 +110,18 @@
   // ließe "manuell aktualisieren" wirken, obwohl es das gar nicht mehr
   // bräuchte. Nur während der Tab sichtbar ist (siehe setupAutoRefresh).
   const DASHBOARD_REFRESH_INTERVAL_MS = 60000;
+  // Der Takt oben bleibt; eine Kachel wird aber nur neu geladen, wenn seit ihrer letzten Zeichnung das Intervall ihres
+  // Zeitraums verstrichen ist. Eine Minute ändert eine Wochen-, Monats- oder Jahressumme kaum, die Abfrage kostet den
+  // Server (auf einem Pi oder bei vielen Kacheln) aber jedes Mal die volle Zeit. Kacheln ohne Zeitraum (Tabellen)
+  // bleiben beim Takt von einer Minute.
+  const DASHBOARD_REFRESH_BY_RANGE_MS = {hour: 60000, day: 60000, week: 300000, month: 600000, year: 900000};
+  // Der Takt läuft nie auf die Millisekunde genau; ohne Spielraum griffe ein 10-min-Intervall erst beim Takt danach.
+  const REFRESH_SLACK_MS = 5000;
+  // Zeitpunkt der letzten Zeichnung je Kachel (gesetzt in nextRenderSeq(), das jeder Zeichenpfad aufruft).
+  const lastRenderAt = new WeakMap();
+  // true, solange renderTile() für ein stilles Nachladen zeichnet (siehe dort); liest der setOption-Wrapper unten.
+  let quietDraw = false;
 
-
-  // "Ø"/"Σ" statt Text — dieselben Symbole wie chart_editor.js/entity_detail.js
-  // (LEGEND_METRIC_OPTIONS dort), nur "Ø" stand hier schon vorher so; t("Summe")
-  // war bis jetzt der einzige verbliebene Text-Ausreißer.
-  const LEGEND_METRIC_LABELS = {last: t('Aktuell'), min: t('Min'), max: t('Max'), average: 'Ø', sum: 'Σ'};
-
-  // Chip-Variante (Standard) — dieselben Chips/Kennzahlen wie chart_editor.html
-  // (.chart-legend-item aus app.css), hier zusätzlich klickbar (siehe
-  // toggleTileLegendItem()), anders als die "static" (nicht umschaltbare)
-  // Variante auf entity_detail.html.
-  // Punkt wie bisher, gestrichelt für die Ø-Linie der Langzeit-Kachel (wie
-  // auf der Chart-Seite).
-  function legendSwatch(item) {
-    return item.dash
-      ? `<span class="dash" style="border-color:${item.color};"></span>`
-      : `<span class="dot" style="background:${item.color};"></span>`;
-  }
-
-  // Zustands-Entitäten (ROADMAP 1.29): statt Min/Max über Indizes die
-  // Zustände der Zeile — Farbe, Name und (mit Statistik) Dauer · Anteil.
-  function stateLegendValues(item, showStats) {
-    return `<span class="values state-legend-values">${item.states.map(row =>
-      `<span title="${escapeHtml(row.raw)}"><span class="dot state-dot" style="${row.swatch}"></span> ${escapeHtml(row.label)}`
-      + (showStats ? ` <strong>${escapeHtml(row.text)}</strong>` : '') + '</span>').join('')}</span>`;
-  }
-
-  function renderLegendChips(items, legendMetrics, showStats, hiddenSet) {
-    return items.map(item => {
-      // "+N Jahre" (Langzeit-Kachel): nur ein Hinweis, kein Serien-Umschalter.
-      if (item.more) return `<span class="chart-legend-item is-more">${escapeHtml(item.more)}</span>`;
-      if (item.states) {
-        return `<span class="chart-legend-item static"><span class="name">${escapeHtml(item.name)}</span>`
-             + `${stateLegendValues(item, showStats)}</span>`;
-      }
-      let values = '';
-      if (showStats) {
-        const parts = [];
-        for (const key of ['last', 'min', 'max', 'average', 'sum']) {
-          if (!legendMetrics.includes(key)) continue;
-          if (key === 'sum' && item.sum === null) continue;
-          parts.push(`<span>${LEGEND_METRIC_LABELS[key]} <strong>${escapeHtml(item[key])}</strong></span>`);
-        }
-        if (parts.length) values = `<span class="values">${parts.join('')}</span>`;
-      }
-      const inactive = hiddenSet.has(item.name) ? ' inactive' : '';
-      return `<span class="chart-legend-item${inactive}" data-series="${escapeHtml(item.name)}" role="button" tabindex="0">`
-           + legendSwatch(item)
-           + `<span class="name">${escapeHtml(item.name)}</span>${values}</span>`;
-    }).join('');
-  }
-
-  // Tabellen-Variante ("Legenden-Stil": Tabelle, Optionen-Menü der Chart-Seite)
-  // — dieselbe Spalten-Darstellung wie .chart-legend-table in chart_editor.html
-  // (table.dt compact). Zeilen sind wie die Chips klickbare Serien-Umschalter
-  // (dieselbe .chart-legend-table-row-Klasse/CSS wie dort, siehe app.css).
-  function renderLegendTable(items, legendMetrics, showStats, hiddenSet) {
-    const cols = showStats ? ['last', 'min', 'max', 'average', 'sum'].filter(k => legendMetrics.includes(k)) : [];
-    const headerCells = cols.map(key => `<th>${LEGEND_METRIC_LABELS[key]}</th>`).join('');
-    const rows = items.filter(item => !item.more).map(item => {
-      const cells = cols.map(key => `<td>${escapeHtml(key === 'sum' && item.sum === null ? '—' : item[key])}</td>`).join('');
-      const inactive = hiddenSet.has(item.name) ? ' inactive' : '';
-      if (item.states) {
-        return `<tr class="chart-legend-table-row static"><td class="legend-name-col"><span class="name">${escapeHtml(item.name)}</span>`
-             + `${stateLegendValues(item, showStats)}</td>${cells}</tr>`;
-      }
-      return `<tr class="chart-legend-table-row${inactive}" data-series="${escapeHtml(item.name)}" role="button" tabindex="0">`
-           + `<td class="legend-name-col"><span class="legend-name-cell">`
-           + legendSwatch(item)
-           + `<span class="name">${escapeHtml(item.name)}</span></span></td>${cells}</tr>`;
-    }).join('');
-    return `<div class="tbl-wrap"><table class="dt compact chart-legend-table">`
-         + `<thead><tr><th class="legend-name-col">Name</th>${headerCells}</tr></thead>`
-         + `<tbody>${rows}</tbody></table></div>`;
-  }
 
   // el = die .dtile-body (Chart-Kachel-Link), legend = {items, legendMetrics,
   // showStats, style} — siehe Aufbau in renderTile(). Zeigt/versteckt UND
@@ -164,12 +137,8 @@
     if (!legendEl) return;
     legendEl.classList.toggle('is-visible', visible);
     if (!visible || !legend) { legendEl.innerHTML = ''; return; }
-    const {items, legendMetrics, showStats, style} = legend;
     const chartId = el.closest('.dtile')?.dataset.itemId;
-    const hiddenSet = legendHidden.get(chartId) || new Set();
-    legendEl.innerHTML = style === 'table'
-      ? renderLegendTable(items, legendMetrics, showStats, hiddenSet)
-      : renderLegendChips(items, legendMetrics, showStats, hiddenSet);
+    legendEl.innerHTML = renderLegendHtml(legend, legendHidden.get(chartId) || new Set());
   }
 
   // Klick/Enter/Leertaste auf einen Legenden-Chip ODER eine Tabellenzeile
@@ -199,7 +168,11 @@
       if (!hiddenSet) { hiddenSet = new Set(); legendHidden.set(chartId, hiddenSet); }
       if (hiddenSet.has(seriesName)) hiddenSet.delete(seriesName); else hiddenSet.add(seriesName);
       item.classList.toggle('inactive', hiddenSet.has(seriesName));
-      chart.dispatchAction({type: 'legendToggleSelect', name: seriesName});
+      // Begleitserien (Vorjahr/Vorperiode, gleitender Ø) folgen der Hauptserie.
+      const type = hiddenSet.has(seriesName) ? 'legendUnSelect' : 'legendSelect';
+      const companions = (chart.getOption().series || [])
+        .filter(x => x.legendOwner === seriesName).map(x => x.name);
+      [seriesName, ...companions].forEach(name => chart.dispatchAction({type, name}));
     };
   }
 
@@ -246,11 +219,15 @@
   }
 
   function nextRenderSeq(el) {
+    lastRenderAt.set(el, Date.now());
     el.dataset.renderSeq = String((Number(el.dataset.renderSeq) || 0) + 1);
     return el.dataset.renderSeq;
   }
 
-  async function renderTile(el) {
+  // quiet: stilles Nachladen (Auto-Refresh) ohne Einblend-Animation. setOption(…, true) ersetzt die Serien, und
+  // ECharts ließe die Kachel sonst jede Minute neu einwachsen (Wandtablet: Flackern und Renderlast). Dasselbe tut die
+  // Chart-Seite beim stillen Nachladen (entity_detail.js, quietRender).
+  async function renderTile(el, {quiet = false} = {}) {
     // item-id sitzt auf der äußeren .dtile (auch Drag&Drop-Handle, siehe
     // setupDragAndDrop), die restlichen Daten auf dem inneren Link selbst.
     const chartId = el.closest('.dtile').dataset.itemId;
@@ -285,40 +262,6 @@
     // bekommt sonst beim ersten Rendern die volle (noch legendenlose)
     // Kachelhöhe gemessen und die Legende schiebt ihn erst beim nächsten
     // Resize-Event auf seine endgültige Höhe.
-    const statsItem = (s, points, name, color) => {
-      if (s.aggregation_type === 'state') {
-        return {name, color, states: stateRows(s, data.window_end), last: '—', min: '—', max: '—', average: '—', sum: null};
-      }
-      const values = (points || []).map(p => p.value).filter(Number.isFinite);
-      const minima = (points || []).map(p => Number.isFinite(p.min) ? p.min : p.value).filter(Number.isFinite);
-      const maxima = (points || []).map(p => Number.isFinite(p.max) ? p.max : p.value).filter(Number.isFinite);
-      const isDuration = s.aggregation_type === 'switch' && s.display_mode === 'time';
-      const unit = s.unit ? ` ${s.unit}` : '';
-      const formatted = value => isDuration ? NumberFormat.fmtDuration(value) : `${fmtCompactNumber(value, effectiveDecimals(s))}${unit}`;
-      // Summe bei Zählern UND bei Schaltern sinnvoll (Bucket-Werte sind dort
-      // bereits Einschaltsekunden) — siehe derselbe Kommentar in
-      // chart_editor.html (seriesStats()). Im Zeitstrahl-/Rohwerte-Modus
-      // (raw=true, s. o.) kommt die Summe stattdessen aus switchOnDuration()
-      // unten, da die Punktwerte dann nur noch 0/1-Zustände sind.
-      const isSwitch = s.aggregation_type === 'switch';
-      const hasSum = s.aggregation_type === 'counter' || isSwitch;
-      const sumValue = timeline && isSwitch ? switchOnDuration(points, data.window_end) : values.reduce((sum, v) => sum + v, 0);
-      // Summe bei Schaltern ist immer eine Dauer in Sekunden — unabhängig
-      // vom Anzeigemodus immer als h/m/s formatiert statt über
-      // fmtCompactNumber()s generische 4-signifikante-Stellen-Rundung, die
-      // bei größeren Sekundenwerten sichtbar ungenau wird (siehe
-      // chart_editor.html/entity_detail.html, derselbe Fix).
-      const sumFormatted = isSwitch ? NumberFormat.fmtDuration(sumValue) : formatted(sumValue);
-      return {
-        name,
-        color,
-        last: values.length ? formatted(values[values.length - 1]) : '—',
-        min: minima.length ? formatted(Math.min(...minima)) : '—',
-        max: maxima.length ? formatted(Math.max(...maxima)) : '—',
-        average: values.length ? formatted(values.reduce((sum, v) => sum + v, 0) / values.length) : '—',
-        sum: hasSum ? (values.length ? sumFormatted : '—') : null,
-      };
-    };
     const tileEl = el.closest('.dtile');
     // Langzeit-Kachel: Größenwechsel über 1×1 hinweg zeichnet neu (siehe
     // setupSizePickers()), weil 1×1 nur das angezeigte Jahr und den Ø zeigt.
@@ -330,45 +273,14 @@
       })
       : null;
     el.dataset.longtermActive = multiYear ? 'true' : 'false';
-    let legendItems;
-    if (multiYear) {
-      // Entschieden: nur das angezeigte Jahr und der Ø, die übrigen Jahre als
-      // "+N Jahre" (die Tabellen-Legende zeigt nur die beiden Zeilen).
-      const s = series[0];
-      legendItems = [statsItem(s, s.points, multiYear.series[0].name, multiYear.series[0].color)];
-      if (multiYear.averageSeries) {
-        legendItems.push({
-          ...statsItem(s, multiYear.averageSeries.monthly.filter(v => v != null).map(v => ({value: v})),
-            multiYear.averageSeries.name, multiYear.averageSeries.color),
-          dash: true,
-        });
-      }
-      if (multiYear.hiddenYears > 0) legendItems.push({more: t('+{n} Jahre', {n: multiYear.hiddenYears})});
-    } else if (compare?.yearsCompare) {
-      // Wie die Balkenpaare: je Entität angezeigtes Jahr und Vorjahr, die
-      // Soll-Entität als eigene Zeile — Namen wie die Serien, damit das
-      // Umschalten per Legende greift.
-      const currentYear = data.window_start ? new Date(data.window_start * 1000).getFullYear() : new Date().getFullYear();
-      legendItems = [];
-      series.forEach(s => {
-        if (!s.compare_points) return;
-        const color = colorFor(s.entity_id);
-        const displayName = entityNames[s.entity_id] || s.friendly_name;
-        if (s.entity_id === compare.target) { legendItems.push(statsItem(s, s.points, displayName, color)); return; }
-        legendItems.push(statsItem(s, s.points, `${displayName} (${currentYear})`, color));
-        legendItems.push(statsItem(s, s.compare_points, `${displayName} (${currentYear - 1})`, withOpacity(color, 0.55)));
-      });
-    } else {
-      legendItems = series.map(s => statsItem(
-        s, s.points, entityNames[s.entity_id] || s.friendly_name, colorFor(s.entity_id)
-      ));
-    }
+    const legendItems = buildLegendItems({series, data, spec, multiYear});
     const legendMetrics = JSON.parse(el.dataset.legendMetrics || '["sum"]');
     const showStats = el.dataset.chartStats === 'true';
     const legendStyle = el.dataset.legendStyle || 'chips';
     const legend = {items: legendItems, legendMetrics, showStats, style: legendStyle};
     legendCache.set(chartId, legend);
     const legendVisible = el.dataset.showLegend === 'true'
+      && legendStyle !== 'off'
       && parseInt(tileEl?.dataset.gridCols || '1', 10) >= 2
       && parseInt(tileEl?.dataset.gridRows || '1', 10) >= 2;
     renderLegend(el, legend, legendVisible);
@@ -381,7 +293,7 @@
     // wird nur ohne intakte Instanz, z. B. nach einem "Keine Daten"-
     // Platzhalter, der das Canvas ersetzt hat.
     if (chart && chart.getDom() === chartEl && !chartEl.querySelector('canvas, svg')) {
-      chart.dispose();
+      disposeChart(chart);
       chart = null;
     }
     // Ein htmx-Swap von #dashboard-grid (Pin/Unpin/Reorder) ersetzt chartEl
@@ -393,13 +305,16 @@
     // bestehen, statt neu an den aktuellen Container gebunden zu werden —
     // sichtbar als sich über die Zeit ansammelnde verwaiste Tooltips.
     if (chart && chart.getDom() !== chartEl) {
-      chart.dispose();
+      disposeChart(chart);
       chart = null;
     }
     if (!chart) {
       chartEl.innerHTML = '';
       chart = echarts.init(chartEl);
+      const rawSetOption = chart.setOption.bind(chart);
+      chart.setOption = (option, ...rest) => rawSetOption(quietDraw ? {...option, animation: false} : option, ...rest);
       instances.set(chartId, chart);
+      observeChart(chart, chartEl);
     }
     // Canvas kennt keine CSS-Variablen — anders als im übrigen CSS dieser
     // Seite müssen Farben hier erst über getComputedStyle in konkrete Werte
@@ -407,7 +322,13 @@
     // "var(--x)" gar nicht erst. Bewusst aus dem CSS gelesen statt fest
     // verdrahtet, damit die Kachel im Dark Mode mitzieht wie der Rest der App.
     const style = getComputedStyle(document.body);
-    draw(chart, {spec, data, series, viewType, multiYear, hiddenSet: legendHidden.get(chartId), style});
+    // draw() ist synchron: Das Flag gilt nur für diesen einen Aufruf.
+    quietDraw = quiet;
+    try {
+      draw(chart, {spec, data, series, viewType, multiYear, hiddenSet: legendHidden.get(chartId), style});
+    } finally {
+      quietDraw = false;
+    }
   }
 
 
@@ -706,6 +627,7 @@
     const style = getComputedStyle(document.body);
     const pattern = StateEntities.unavailablePattern();
     const chart = echarts.init(chartEl);
+    observeChart(chart, chartEl);
     chart.setOption({
       animation: false,
       tooltip: {
@@ -746,7 +668,7 @@
     const visualEl = el.querySelector('.dtile-state-visual');
     if (!visualEl) return;
     const instance = echarts.getInstanceByDom(visualEl.querySelector('.dtile-state-donut-chart') || visualEl);
-    if (instance) instance.dispose();
+    if (instance) disposeChart(instance);
     if (el.dataset.stateView === 'donut') { renderStateDonut(visualEl, st); return; }
     const wide = parseInt(el.closest('.dtile')?.dataset.gridCols || '1', 10) >= 2;
     visualEl.innerHTML = wide ? stateDaysHtml(st) : stateStripHtml(st);
@@ -873,12 +795,19 @@
   // Läuft auch im Hintergrund weiter (der Browser drosselt Intervalle
   // inaktiver Tabs ohnehin selbst), die visibilityState-Prüfung im Tick
   // spart zusätzlich die Server-Anfragen selbst, nicht nur deren Timing.
-  function rerenderTiles() {
+  // auto: Nachladen durch den Takt. Dann werden nur Kacheln gezeichnet, deren Intervall verstrichen ist (siehe
+  // DASHBOARD_REFRESH_BY_RANGE_MS), und Charts ohne Animation. Ohne auto (neuer Stichtag) zeichnet alles sofort.
+  function rerenderTiles({auto = false} = {}) {
+    const now = Date.now();
     renderedTiles.forEach(el => {
       if (!el.isConnected) { renderedTiles.delete(el); return; }
+      if (auto) {
+        const interval = DASHBOARD_REFRESH_BY_RANGE_MS[el.dataset.range] || DASHBOARD_REFRESH_INTERVAL_MS;
+        if (now - (lastRenderAt.get(el) || 0) < interval - REFRESH_SLACK_MS) return;
+      }
       if (el.classList.contains('dtile-entity-body')) renderEntityTile(el);
       else if (el.dataset.columns != null) renderTableTile(el);
-      else renderTile(el);
+      else renderTile(el, {quiet: auto});
     });
   }
 
@@ -888,13 +817,13 @@
     if (refreshTimer) clearInterval(refreshTimer);
     refreshTimer = setInterval(() => {
       if (document.visibilityState !== 'visible' || stichtag()) return;
-      rerenderTiles();
+      rerenderTiles({auto: true});
     }, DASHBOARD_REFRESH_INTERVAL_MS);
   }
 
   // Neuer Stichtag: sichtbare Kacheln sofort neu laden. Noch nie gezeichnete
   // lesen ihn, sobald sie in den Sichtbereich kommen.
-  window.addEventListener('dashboard-stichtag', rerenderTiles);
+  window.addEventListener('dashboard-stichtag', () => rerenderTiles());
 
   function setupSizePickers() {
     const grid = document.getElementById('dashboard-grid');
@@ -1694,7 +1623,7 @@
   // erneuten setup() ihre eigene frische Instanz.
   document.body.addEventListener('htmx:afterSettle', (e) => {
     if (e.target && e.target.id === 'dashboard-grid') {
-      instances.forEach(c => c.dispose());
+      instances.forEach(disposeChart);
       instances.clear();
       setup();
       applySectionCollapseState(document);

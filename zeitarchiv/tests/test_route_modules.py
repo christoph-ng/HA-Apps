@@ -138,7 +138,22 @@ def test_main_keeps_external_api_and_report_routes_out_of_the_monolith() -> None
     # Am 25. Oktober 2026 genommen: Die Kontext-Bauer der Kacheln stehen in dashboard_tiles.py,
     # main.py fiel auf 5.487 (der Entitäts-Assistent hatte es auf 5.815 gebracht). Die Schwelle
     # blieb unangetastet und hat jetzt rund 320 Zeilen Luft.
-    assert len(main.splitlines()) < 5_810
+    # Am 9. November 2026 auf 5.850 angehoben: main.py stand mit 5.808 schon knapp unter 5.810 (die
+    # genannte Luft war inzwischen verbraucht). Legendengröße und „Aus“ (ROADMAP 1.52) brauchen rund
+    # 30 Zeilen: Prüfwerte, die globale Einstellung und die Felder beim Speichern eines Charts.
+    # Kein Block, der sich als Einheit herauslösen ließe; der nächste benannte Kandidat bleibt, wie
+    # oben, die Kontext-Bauer der Dashboards.
+    # Am 9. November 2026 auf 5.860 angehoben: Der Endpunkt /entities/{id}/facts (sieben Zeilen) lässt den
+    # Verlauf die Kennzahlen-Leiste beim automatischen Nachladen erneuern. Er hängt an _entity_facts() und
+    # _require_entity(). Der benannte Ausweg ist nicht genommen: _entity_facts() samt Verwandten
+    # (_entity_facts_category/_extra, _with_unit, _value_range_text) und die Routen value-range und facts
+    # sind eine geschlossene Einheit für ein eigenes entity_facts_routes.py nach dem Muster der übrigen
+    # *_routes.py; wer diese Schwelle als Nächstes reißt, schneidet dort.
+    # Am 10. November 2026 genommen: Die Optionen der Übersichtsseite im Bearbeiten-Formular hatten main.py
+    # auf 5.873 gebracht. _entity_facts() samt Verwandten und die Routen value-range und facts stehen jetzt in
+    # entity_facts_routes.py (main.py: 5.775). Die Schwelle blieb unangetastet; der nächste benannte Kandidat
+    # sind die Kontext-Bauer der Dashboards (siehe oben).
+    assert len(main.splitlines()) < 5_860
 
 
 def test_api_router_has_explicit_runtime_dependencies_and_all_api_routes() -> None:

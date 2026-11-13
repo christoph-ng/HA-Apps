@@ -1,3 +1,4 @@
+{% from "_dashboard_period_nav.html" import nav as period_nav with context %}
 {% if not configured %}
 <div class="edash-title-row">
   <h1>{{ _("Energiedashboard") }}</h1>
@@ -344,73 +345,88 @@
      Entität sind, ersetzt „Entität öffnen“ die Zeilen. Eine Quelle und mehrere verhalten sich gleich. #}
   <dialog class="detail-dialog edash-tile-dialog" x-ref="tileDialog" aria-labelledby="tile-dialog-title"
           @click="if ($event.target === $el) $el.close()" @close="closeTile()">
-    <div class="detail-dialog-header">
-      <div>
+    {# Kopf wie beim Kachel-Popup der Dashboards (.tile-popup-head): Name, Hauptaktion, Schließen, Trennlinie darunter. #}
+    <div class="edash-tile-head">
+      <div class="edash-tile-heading">
         <h2 id="tile-dialog-title" x-text="tile.title"></h2>
         <p class="edash-tile-sub" x-text="periodText"></p>
       </div>
-      <form method="dialog"><button class="btn" aria-label="{{ _('Dialog schließen') }}">×</button></form>
+      <a class="btn btn-primary" x-show="tile.data && tile.data.entity_id" x-cloak :href="tile.data ? entityHref(tile.data.entity_id) : '#'">{{ _("Entität öffnen") }}</a>
+      <form method="dialog"><button class="btn" aria-label="{{ _('Dialog schließen') }}">✕</button></form>
     </div>
-    <div class="edash-tile-modes" x-show="tileHasModes()" role="group" aria-label="{{ _('Ansicht') }}">
-      <button type="button" :class="{'is-active': tile.mode === 'bar'}" :aria-pressed="tile.mode === 'bar'" @click="setTileMode('bar')">{{ _("Balken") }}</button>
-      <button type="button" :class="{'is-active': tile.mode === 'line'}" :aria-pressed="tile.mode === 'line'" @click="setTileMode('line')">{{ _("Linie") }}</button>
-      <button type="button" x-show="tileHasShare()" :class="{'is-active': tile.mode === 'share'}" :aria-pressed="tile.mode === 'share'" @click="setTileMode('share')">{{ _("Anteile %") }}</button>
+    <div class="edash-tile-body">
+      <div class="edash-tile-modes" x-show="tileHasModes()" role="group" aria-label="{{ _('Ansicht') }}">
+        <button type="button" :class="{'is-active': tile.mode === 'bar'}" :aria-pressed="tile.mode === 'bar'" @click="setTileMode('bar')">{{ _("Balken") }}</button>
+        <button type="button" :class="{'is-active': tile.mode === 'line'}" :aria-pressed="tile.mode === 'line'" @click="setTileMode('line')">{{ _("Linie") }}</button>
+        <button type="button" x-show="tileHasShare()" :class="{'is-active': tile.mode === 'share'}" :aria-pressed="tile.mode === 'share'" @click="setTileMode('share')">{{ _("Anteile %") }}</button>
+      </div>
+      <p class="edash-tile-note" x-show="tile.loading">{{ _("Lade …") }}</p>
+      <p class="edash-tile-note" x-show="tile.error">{{ _("Das Diagramm konnte nicht geladen werden.") }}</p>
+      <div class="edash-tile-card" x-show="tile.data">
+        <div class="edash-tile-chart" x-ref="tileChartEl" role="img" :aria-label="tile.title"></div>
+      </div>
+      <ul class="edash-tile-rows" x-show="tile.data">
+        <template x-for="row in tileRows()" :key="row.key">
+          <li>
+            <span class="edash-tile-swatch" :style="`background:${row.color}`"></span>
+            <a x-show="row.entity_id" :href="entityHref(row.entity_id)" x-text="row.name"></a>
+            <span x-show="!row.entity_id" x-text="row.name"></span>
+            <span class="edash-tile-value" x-text="row.valueText"></span>
+          </li>
+        </template>
+      </ul>
+      <p class="edash-tile-note" x-show="tile.data && tileRows().some((r) => r.entity_id)">{{ _("Eine Zeile anklicken öffnet die Entität.") }}</p>
     </div>
-    <p class="edash-tile-note" x-show="tile.loading">{{ _("Lade …") }}</p>
-    <p class="edash-tile-note" x-show="tile.error">{{ _("Das Diagramm konnte nicht geladen werden.") }}</p>
-    <div class="edash-tile-chart" x-ref="tileChartEl" x-show="tile.data" role="img" :aria-label="tile.title"></div>
-    <ul class="edash-tile-rows" x-show="tile.data">
-      <template x-for="row in tileRows()" :key="row.key">
-        <li>
-          <span class="edash-tile-swatch" :style="`background:${row.color}`"></span>
-          <a x-show="row.entity_id" :href="entityHref(row.entity_id)" x-text="row.name"></a>
-          <span x-show="!row.entity_id" x-text="row.name"></span>
-          <span class="edash-tile-value" x-text="row.valueText"></span>
-        </li>
-      </template>
-    </ul>
-    <p class="edash-tile-open" x-show="tile.data && tile.data.entity_id">
-      <a class="btn" :href="tile.data ? entityHref(tile.data.entity_id) : '#'">{{ _("Entität öffnen") }}</a>
-    </p>
-    <p class="edash-tile-note" x-show="tile.data && tileRows().some((r) => r.entity_id)">{{ _("Eine Zeile anklicken öffnet die Entität.") }}</p>
   </dialog>
 
   {# Reiterzeile des App-Standards (.entity-tabs), wie beim Wetterdashboard: Schaltflächen statt Links, weil die
      Reiter nur umschalten und die Seite nicht wechseln. „Übersicht“ ist der bisherige Energiefluss, unverändert. #}
+  {# Der Name des Reiters „Vergleich“ steht nur hier (und im Link der Übersicht); der Schlüssel des Reiters bleibt „cmp“. #}
+  {% set compare_tab = _("Vergleich") %}
+  {# Zeitraum-Steuerung in der Reiterzeile, die beim Scrollen unter der Kopfleiste stehen bleibt: im Reiter „Übersicht“ Pills, ‹ Datum › und
+     Bericht-Knopf, im Reiter „Vergleich“ nur ‹ Datum ›. Dort sind sie über alle Karten des Reiters gültig; im Kopf einer Karte würde
+     sticky mit der Karte enden. #}
+  <div class="dash-tabs-bar">
   <nav class="entity-tabs wt-tabs" role="tablist" aria-label="{{ _('Ansichten des Energiedashboards') }}" style="margin-top:14px;" @keydown="tabKey($event)">
     <button type="button" role="tab" id="ed-tab-over" aria-controls="ed-panel-over" class="entity-tab" :class="{'is-active': tab === 'over'}" :aria-selected="(tab === 'over').toString()" :tabindex="tab === 'over' ? 0 : -1" @click="showTab('over')">{{ _("Übersicht") }}</button>
+    <button type="button" role="tab" id="ed-tab-cmp" aria-controls="ed-panel-cmp" class="entity-tab" :class="{'is-active': tab === 'cmp'}" :aria-selected="(tab === 'cmp').toString()" :tabindex="tab === 'cmp' ? 0 : -1" @click="showTab('cmp')">{{ compare_tab }}</button>
     <button type="button" role="tab" id="ed-tab-long" aria-controls="ed-panel-long" class="entity-tab" :class="{'is-active': tab === 'long'}" :aria-selected="(tab === 'long').toString()" :tabindex="tab === 'long' ? 0 : -1" @click="showTab('long')">{{ _("Langzeit") }}</button>
   </nav>
+  <div class="dash-tabs-bar-end" x-show="tab === 'over'" x-cloak>
+  <div class="edash-period-controls">
+    <div class="edash-period-pills">
+      <template x-for="r in ranges" :key="r.key">
+        <button type="button" :class="{'is-active': range === r.key}" @click="setRange(r.key)" x-text="r.label"></button>
+      </template>
+    </div>
+    <div class="edash-period-nav">
+      <button type="button" @click="goBack()" title="{{ _('Vorherige Periode') }}">&#8249;</button>
+      <span class="cal-wrap" x-data='calendarPicker(null, {{ app_root | tojson }}, {{ calendar_first_date | tojson }}, {{ calendar_last_date | tojson }}, d => jumpTo(d))'>
+        <button type="button" class="edash-period-nav-label edash-period-nav-pick" @click="toggle()" title="{{ _('Zu einem bestimmten Tag springen') }}" x-text="periodText"></button>
+        {% include "_calendar_popover.html" %}
+      </span>
+      <button type="button" @click="goForward()" :disabled="!canGoForward" title="{{ _('Nächste Periode') }}">&#8250;</button>
+    </div>
+    {# Energiebericht (ROADMAP.md 1.7): nur bei Monat/Jahr sinnvoll (siehe
+       REPORT_RANGE_KEYS in energiedashboard_routes.py) — Stunde/Tag sind
+       zu kurze Zeiträume für einen druckbaren Rückblick. Dieselbe Seite
+       statt neuem Tab (kein target="_blank") — der Bericht selbst trägt
+       einen eigenen "Zurück"-Link (siehe _energiedashboard_report.html). #}
+    <a class="edash-report-btn" x-show="range === 'month' || range === 'year'" x-cloak
+       :href="'energiedashboard/report?range=' + range + '&offset=' + offset"
+       title="{{ _('Energiebericht (drucken / als PDF speichern)') }}">
+      <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h8l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M15 3v4h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8.5 13h7M8.5 16.5h7M8.5 9.5h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </a>
+  </div>
+  </div>
+  <div class="dash-tabs-bar-end" x-show="tab === 'cmp'" x-cloak>{{ period_nav(true, true) }}</div>
+  <div id="ed-years-slot" class="dash-tabs-bar-end" x-show="tab === 'long'" x-cloak title="{{ _('gilt für alle Karten dieses Reiters') }}"></div>
+  </div>
 
   <section x-show="tab === 'over'" role="tabpanel" id="ed-panel-over" aria-labelledby="ed-tab-over">
   <div class="edash-card edash-span3 edash-flow-card">
     <div class="edash-card-head">
       <div class="edash-card-title">{{ _("Energiefluss") }}</div>
-      <div class="edash-period-controls">
-        <div class="edash-period-pills">
-          <template x-for="r in ranges" :key="r.key">
-            <button type="button" :class="{'is-active': range === r.key}" @click="setRange(r.key)" x-text="r.label"></button>
-          </template>
-        </div>
-        <div class="edash-period-nav">
-          <button type="button" @click="goBack()" title="{{ _('Vorherige Periode') }}">&#8249;</button>
-          <span class="cal-wrap" x-data='calendarPicker(null, {{ app_root | tojson }}, {{ calendar_first_date | tojson }}, {{ calendar_last_date | tojson }}, d => jumpTo(d))'>
-            <button type="button" class="edash-period-nav-label edash-period-nav-pick" @click="toggle()" title="{{ _('Zu einem bestimmten Tag springen') }}" x-text="periodText"></button>
-            {% include "_calendar_popover.html" %}
-          </span>
-          <button type="button" @click="goForward()" :disabled="!canGoForward" title="{{ _('Nächste Periode') }}">&#8250;</button>
-        </div>
-        {# Energiebericht (ROADMAP.md 1.7): nur bei Monat/Jahr sinnvoll (siehe
-           REPORT_RANGE_KEYS in energiedashboard_routes.py) — Stunde/Tag sind
-           zu kurze Zeiträume für einen druckbaren Rückblick. Dieselbe Seite
-           statt neuem Tab (kein target="_blank") — der Bericht selbst trägt
-           einen eigenen "Zurück"-Link (siehe _energiedashboard_report.html). #}
-        <a class="edash-report-btn" x-show="range === 'month' || range === 'year'" x-cloak
-           :href="'energiedashboard/report?range=' + range + '&offset=' + offset"
-           title="{{ _('Energiebericht (drucken / als PDF speichern)') }}">
-          <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h8l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M15 3v4h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8.5 13h7M8.5 16.5h7M8.5 9.5h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-        </a>
-      </div>
     </div>
 
     {# Hero-Leiste: bündelt die Periodenkennzahlen, die sonst nur als Ring
@@ -558,6 +574,10 @@
     </div>
     {% endif %}
   </div>
+
+  {# Die Zeiträume im Vergleich (gegen das Vorjahr, mit Verbrauchern) stehen im eigenen Reiter und folgen dem Tag des Energieflusses. #}
+  <p class="edash-cmp-link">{{ _("Gegenüber dem Vorjahr und mit weiteren Zeiträumen:") }}
+    <button type="button" class="btn" @click="showTab('cmp')">{{ _("Im Reiter „{name}“ ansehen ›", name=compare_tab) }}</button></p>
 
   <div class="edash-grid" style="margin-top:14px;">
     {% if config.show_verbraucheranteile or config.show_versorgungsanteile %}
@@ -723,7 +743,11 @@
   </div>
   </section>
 
-  <section x-show="tab === 'long'" x-cloak role="tabpanel" id="ed-panel-long" aria-labelledby="ed-tab-long">
+  <section x-show="tab === 'cmp'" x-cloak role="tabpanel" id="ed-panel-cmp" aria-labelledby="ed-tab-cmp" data-hints="collapsed">
+    {% include "_energie_vergleich.html" %}
+  </section>
+
+  <section x-show="tab === 'long'" x-cloak role="tabpanel" id="ed-panel-long" aria-labelledby="ed-tab-long" data-hints="collapsed">
     {% include "_energie_langzeit.html" %}
   </section>
 </div>

@@ -19,7 +19,7 @@ from collections.abc import Callable, Collection, Iterable
 from typing import Any
 
 from .i18n import N_, tr
-from .selection_suggest import _TOTAL_CLASSES, is_derived_counter, result, suggestion
+from .selection_suggest import _TOTAL_CLASSES, collapse_duplicates, is_derived_counter, result, suggestion
 
 #: Anzeigename und Kurzbeschreibung je Thema; ``sensitive`` zeigt einen Hinweis.
 TOPIC_INFO: dict[str, dict[str, Any]] = {
@@ -58,7 +58,7 @@ WEATHER_PLATFORMS = frozenset({
     "met", "openweathermap", "dwd_weather", "dwd_weather_warnings", "pirateweather", "accuweather",
     "weatherflow", "weatherflow_cloud", "ecowitt", "meteo_france", "meteoalarm", "buienradar", "smhi",
     "tomorrowio", "open_meteo", "brightsky", "aemet", "ipma", "nws", "environment_canada", "metoffice",
-    "netatmo", "weatherkit", "knmi", "bom", "zamg", "awattar_weather",
+    "netatmo", "weatherkit", "knmi", "bom", "zamg", "awattar_weather", "google_weather",
 })
 #: Integrationen für Router, Netzwerk und Internetanschluss.
 NETWORK_PLATFORMS = frozenset({
@@ -75,14 +75,50 @@ _SYSTEM_NAME = re.compile(
     r"(cpu|prozessor|processor|arbeitsspeicher|memory|\bram\b|swap|festplatte|disk|speicherplatz|auslastung|load\b|uptime|laufzeit)",
     re.IGNORECASE,
 )
+#: Soll-, Grenz- und Abgleichwerte: keine Messwerte, auch wenn sie als Temperatur oder Feuchte geführt werden.
+_SETPOINT = re.compile(
+    r"(zielwert|soll(wert|temp)|setpoint|target|\bmin(imum)?\b|\bmax(imum)?\b|offset|kalibrier|calibrat|schwelle|threshold)",
+    re.IGNORECASE,
+)
+#: Einzelwerte von VMs, Containern, Platten und Speichern: nur der Host selbst zählt als Hauptwert.
+_GUEST = re.compile(r"^(lxc|qemu|storage|disk|vm|ct)_|_(drive|volume|datavol)", re.IGNORECASE)
+_CORE_NAME = re.compile(
+    r"(cpu|prozessor|processor|arbeitsspeicher|memory|speicherauslastung|\bram\b|swap|auslagerung|speicherplatz|festplatte|disk)",
+    re.IGNORECASE,
+)
+_FREE_NAME = re.compile(r"(frei|free|available)", re.IGNORECASE)
 _BATTERY_NAME = re.compile(r"(batterie|battery|akku\b)", re.IGNORECASE)
 _SPEED_PLATFORMS = frozenset({"speedtestdotnet", "fastdotcom"})
 _NETWORK_NAME = re.compile(r"(wlan|wifi|wi-fi|lan\b|router|internet|dsl|download|upload|ping|latenz|latency)", re.IGNORECASE)
 
 
+#: „indoor_outdoor_meter“ (SwitchBot u. a.) ist ein Modellname, kein Hinweis auf draußen.
+_INDOOR_OUTDOOR = re.compile(r"indoor[\s_/-]*outdoor", re.IGNORECASE)
+#: Abgeleitete Wetterwerte: keine Messung der Station, das Wetterdashboard braucht sie nicht.
+_WEATHER_DERIVED = re.compile(
+    r"(gef[üu]hlt|feels|apparent|taupunkt|dew.?point|heat.?index|hitzeindex|wind.?chill|schnee|snow|k[üu]rzlich|recent)",
+    re.IGNORECASE,
+)
+#: Fahrzeug-Integrationen: Türen, Fenster und Hauben eines Autos gehören nicht zum Haus.
+VEHICLE_PLATFORMS = frozenset({
+    "audiconnect", "cupra", "myskoda", "skodaconnect", "volkswagen_we_connect_id", "weconnect", "seatconnect",
+    "bmw_connected_drive", "mercedesme", "tesla_custom", "teslemetry", "tesla_fleet", "tessie", "hyundai_kia_connect",
+    "kia_uvo", "renault", "volvooncall", "volvo", "toyota", "polestar", "ford", "fordpass", "nissan_leaf", "mini_connected",
+    "cupra_eu_data_act", "vag_connect", "carconnectivity", "audi_connect",
+})
+#: Hausgeräte: „Tür“ meint die Gerätetür (Waschmaschine, Backofen), nicht die Haustür.
+APPLIANCE_PLATFORMS = frozenset({
+    "home_connect", "homeconnect", "homeconnect_ws", "home_connect_alt", "miele", "bsh", "smartthings_appliance", "lg_thinq",
+})
+#: Integrationen, deren Melder keine Anwesenheit von Personen anzeigen (Kameraerkennung, 3D-Drucker).
+NOT_PRESENCE_PLATFORMS = frozenset({"frigate", "moonraker", "octoprint", "bambu_lab", "prusalink"})
+_EMA_NAME = re.compile(r"(\bema\b|exponential)", re.IGNORECASE)
+
+
 def _hint_text(row: dict[str, Any]) -> str:
     object_id = row["entity_id"].split(".", 1)[1].replace("_", " ")
-    return " ".join(str(part) for part in (row.get("name"), object_id, row.get("area"), row.get("device")) if part)
+    text = " ".join(str(part) for part in (row.get("name"), object_id, row.get("area"), row.get("device")) if part)
+    return _INDOOR_OUTDOOR.sub(" ", text)
 
 
 def is_outdoor(row: dict[str, Any]) -> bool:
@@ -110,6 +146,8 @@ def rule_wetter(row: dict[str, Any]) -> tuple[str, str] | str | None:
     if domain != "sensor":
         return None
     weather_source = platform in WEATHER_PLATFORMS
+    if _WEATHER_DERIVED.search(_hint_text(row)) and dc in {"temperature", "humidity", "precipitation", "precipitation_intensity"}:
+        return tr("Abgeleiteter Wert (gefühlt, Taupunkt, Schnee …), keine Messung"), MORE
     if dc in {"precipitation", "precipitation_intensity"}:
         if _counter(row) and is_derived_counter(row):
             return DERIVED
@@ -148,8 +186,18 @@ def rule_klima(row: dict[str, Any]) -> tuple[str, str] | str | None:
             return None  # gehört zum Thema „System & Server“
         if _DEVICE_TEMP.search(_hint_text(row)):
             return tr("Gerätetemperatur, kaum für das Raumklima"), MORE
+        if _EMA_NAME.search(_hint_text(row)):
+            return tr("Geglätteter Wert eines Thermostats, kein Messwert"), MORE
+        if _SETPOINT.search(_hint_text(row)):
+            return tr("Zielwert, Grenzwert oder Abgleich, kein Messwert"), MORE
+        if not row.get("area"):
+            return tr("Raumtemperatur, aber keinem Bereich zugeordnet"), MORE
         return tr("Raumtemperatur"), RECOMMENDED
     if dc == "humidity":
+        if _SETPOINT.search(_hint_text(row)):
+            return tr("Zielwert, Grenzwert oder Abgleich, kein Messwert"), MORE
+        if not row.get("area"):
+            return tr("Luftfeuchtigkeit, aber keinem Bereich zugeordnet"), MORE
         return tr("Luftfeuchtigkeit"), RECOMMENDED
     return None
 
@@ -176,12 +224,29 @@ def rule_luftqualitaet(row: dict[str, Any]) -> tuple[str, str] | str | None:
 def rule_batterien(row: dict[str, Any]) -> tuple[str, str] | str | None:
     domain, dc = row["domain"], row.get("device_class")
     if dc == "battery" and domain == "sensor":
+        if (row.get("unit") or "").lower() in {"v", "mv"}:
+            return tr("Batteriespannung in Volt, kein Ladestand"), MORE
         return tr("Batteriestand eines Geräts"), RECOMMENDED
     if dc == "battery" and domain == "binary_sensor":
         return tr("Batterie schwach (ja/nein)"), RECOMMENDED
     if domain == "sensor" and row.get("unit") == "%" and _BATTERY_NAME.search(_hint_text(row)):
         return tr("Name deutet auf eine Batterie"), MORE
     return None
+
+
+def _system_main_value(row: dict[str, Any]) -> bool:
+    """Hauptwert des Hosts: Auslastung in % oder Temperatur, nicht je VM, Container, Platte oder App."""
+    object_id = row["entity_id"].split(".", 1)[1]
+    if _GUEST.search(object_id):
+        return False
+    if row.get("platform") == "hassio" and not object_id.startswith("home_assistant"):
+        return False  # Apps des Supervisors
+    if _FREE_NAME.search(_hint_text(row)) and row.get("unit") == "%":
+        return False  # „frei“ ist nur die Umkehrung von „belegt“
+    dc = row.get("device_class")
+    if dc == "temperature":
+        return True
+    return row.get("unit") == "%" and bool(_CORE_NAME.search(_hint_text(row)))
 
 
 def rule_system(row: dict[str, Any]) -> tuple[str, str] | str | None:
@@ -194,10 +259,12 @@ def rule_system(row: dict[str, Any]) -> tuple[str, str] | str | None:
             return tr("Zeitpunkt des Starts oder Neustarts"), MORE
         if dc in {"date", "enum"}:
             return None
-        if dc == "temperature":
-            return tr("Prozessor- oder Gerätetemperatur"), RECOMMENDED
-        if row.get("unit") == "%" or named:
+        if _system_main_value(row):
+            if dc == "temperature":
+                return tr("Prozessor- oder Gerätetemperatur"), RECOMMENDED
             return tr("Auslastung oder Belegung"), RECOMMENDED
+        if row.get("unit") == "%" or named or dc == "temperature":
+            return tr("Einzelwert einer VM, eines Containers, einer Platte oder App ({platform})", platform=platform), MORE
         return tr("Weiterer Wert der Systemüberwachung ({platform})", platform=platform), MORE
     if named and row.get("unit") == "%":
         return tr("Name deutet auf Systemauslastung"), MORE
@@ -212,7 +279,13 @@ _OPENING_REASONS = {
 
 def rule_tueren_fenster(row: dict[str, Any]) -> tuple[str, str] | str | None:
     domain, dc = row["domain"], row.get("device_class")
+    if domain == "binary_sensor" and dc == "opening":
+        return tr(_OPENING_REASONS[dc]), MORE  # zu unscharf: Tür, Fenster, Schublade oder Klappe
     if domain == "binary_sensor" and dc in _OPENING_REASONS:
+        if row.get("platform") in VEHICLE_PLATFORMS:
+            return tr("Tür oder Fenster eines Fahrzeugs"), MORE
+        if row.get("platform") in APPLIANCE_PLATFORMS:
+            return tr("Tür eines Hausgeräts"), MORE
         return tr(_OPENING_REASONS[dc]), RECOMMENDED
     if domain == "lock":
         return tr("Türschloss"), MORE
@@ -274,6 +347,8 @@ def rule_anwesenheit(row: dict[str, Any]) -> tuple[str, str] | str | None:
     if domain == "device_tracker":
         return tr("Geräte-Tracker (Handy, Router)"), MORE
     if domain == "binary_sensor" and dc in {"occupancy", "presence"}:
+        if row.get("platform") in NOT_PRESENCE_PLATFORMS:
+            return tr("Erkennung einer Kamera oder eines Geräts, keine Person im Haus"), MORE
         return tr("Präsenzmelder"), RECOMMENDED
     if domain == "binary_sensor" and dc == "motion":
         return tr("Bewegungsmelder, schaltet oft"), MORE
@@ -298,6 +373,12 @@ _HIGH_RATE = {"wind_speed", "irradiance", "volume_flow_rate", "data_rate", "illu
 def suggest_topic(topic: str, entities: Iterable[dict[str, Any]], archived: Collection[str] = ()) -> dict[str, Any]:
     """Wendet die Regel eines Themas auf den Katalog an (Form wie ``suggest_energy``)."""
     rule = RULES[topic]
+    entities = list(entities)
+    # Pro Gerät ein Eintrag: hat es einen Batteriestand in %, wird „Batterie schwach“ nur ein weiterer Treffer.
+    percent_devices = {
+        row["device"] for row in entities
+        if topic == "batterien" and row.get("device") and row["domain"] == "sensor" and row.get("device_class") == "battery"
+    }
     recommended: list[dict[str, Any]] = []
     more: list[dict[str, Any]] = []
     derived = 0
@@ -311,10 +392,13 @@ def suggest_topic(topic: str, entities: Iterable[dict[str, Any]], archived: Coll
             derived += 1
             continue
         reason, bucket = verdict
+        if bucket == RECOMMENDED and row["domain"] == "binary_sensor" and row.get("device") in percent_devices:
+            reason, bucket = tr("Batterie schwach (ja/nein), der Stand steht schon als Prozentwert da"), MORE
         if bucket == RECOMMENDED and row.get("entity_category") == "diagnostic" and topic not in _DIAGNOSTIC_OK:
             bucket = MORE
         high_rate = row.get("device_class") in _HIGH_RATE or (row["domain"] == "binary_sensor" and row.get("device_class") == "motion")
         (recommended if bucket == RECOMMENDED else more).append(suggestion(row, reason, archived, high_rate=high_rate))
+    collapse_duplicates(recommended, more)
     return result(topic, recommended, more, derived)
 
 

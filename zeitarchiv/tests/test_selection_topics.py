@@ -80,8 +80,8 @@ def test_daily_rain_counters_are_derived() -> None:
 
 def test_room_climate_excludes_outdoor_and_device_temperatures() -> None:
     rec, more, _ = _rows("klima", [
-        _row("sensor.wohnzimmer_temp", "Wohnzimmer", device_class="temperature"),
-        _row("sensor.bad_feuchte", "Bad", device_class="humidity"),
+        _row("sensor.wohnzimmer_temp", "Wohnzimmer", device_class="temperature", area="Wohnzimmer"),
+        _row("sensor.bad_feuchte", "Bad", device_class="humidity", area="Bad"),
         _row("sensor.co2", "Büro CO2", device_class="carbon_dioxide"),
         _row("climate.heizung", "Heizung", text=True),
         _row("sensor.cpu_temp", "CPU Temperatur", device_class="temperature"),
@@ -96,7 +96,7 @@ def test_room_climate_excludes_outdoor_and_device_temperatures() -> None:
 
 def test_diagnostic_entities_are_never_recommended_and_config_is_skipped() -> None:
     rec, more, _ = _rows("klima", [
-        _row("sensor.diag", "Wohnzimmer", device_class="temperature", entity_category="diagnostic"),
+        _row("sensor.diag", "Wohnzimmer", device_class="temperature", entity_category="diagnostic", area="Wohnzimmer"),
         _row("sensor.conf", "Wohnzimmer", device_class="temperature", entity_category="config"),
         _row("sensor.hidden", "Wohnzimmer", device_class="temperature", hidden=True),
     ])
@@ -172,16 +172,18 @@ def test_recommended_new_rows_are_prechecked_locked_ones_and_more_are_not(topic)
     result = selection_suggest.suggest(topic, catalog, archived={"weather.b"})
     for group in result["recommended"]:
         for row in group["rows"]:
-            assert row["checked"] is (row["status"] == "new")
+            # Ohne Vorauswahl bleiben die sensiblen Themen und Batterien; Energie hakt nur Rollen aus dem Energie-Dashboard.
+            wanted = row["status"] == "new" and topic not in selection_suggest.NO_PRECHECK
+            assert row["checked"] is (wanted and (topic != "energie" or row["reason"].startswith("Im Energie-Dashboard")))
     for group in result["more"]:
         assert all(row["checked"] is False for row in group["rows"])
 
 
 def test_rows_are_grouped_by_device() -> None:
     _, _, result = _rows("klima", [
-        _row("sensor.a", device_class="temperature", device="Thermo"),
-        _row("sensor.b", device_class="humidity", device="Thermo"),
-        _row("sensor.c", device_class="temperature", device="Andere"),
+        _row("sensor.a", device_class="temperature", device="Thermo", area="Bad"),
+        _row("sensor.b", device_class="humidity", device="Thermo", area="Bad"),
+        _row("sensor.c", device_class="temperature", device="Andere", area="Flur"),
     ])
     groups = {group["name"]: [row["entity_id"] for row in group["rows"]] for group in result["recommended"]}
     assert groups == {"Thermo": ["sensor.a", "sensor.b"], "Andere": ["sensor.c"]}
@@ -212,6 +214,54 @@ def test_batteries_stay_recommended_although_they_are_diagnostic_entities() -> N
     assert set(more) == {"sensor.ladung"}
 
 
+def test_battery_low_flag_is_only_more_when_the_device_has_a_percentage() -> None:
+    rec, more, _ = _rows("batterien", [
+        _row("sensor.tuer_batterie", "Tür", device_class="battery", unit="%", device="Türkontakt"),
+        _row("binary_sensor.tuer_batterie_schwach", "Tür schwach", device_class="battery", device="Türkontakt"),
+        _row("binary_sensor.melder_batterie_schwach", "Melder schwach", device_class="battery", device="Melder"),
+    ])
+    assert set(rec) == {"sensor.tuer_batterie", "binary_sensor.melder_batterie_schwach"}
+    assert set(more) == {"binary_sensor.tuer_batterie_schwach"}
+
+
+def test_room_climate_needs_an_area_and_skips_setpoints() -> None:
+    rec, more, _ = _rows("klima", [
+        _row("sensor.bad_temp", "Bad", device_class="temperature", area="Bad"),
+        _row("sensor.ohne_bereich", "Irgendwo", device_class="temperature"),
+        _row("sensor.feuchte_ohne_bereich", "Irgendwo", device_class="humidity"),
+        _row("sensor.bad_soll", "Bad Zielwert", device_class="temperature", area="Bad"),
+        _row("sensor.bad_offset", "Bad Temperatur Offset", device_class="temperature", area="Bad"),
+        _row("climate.heizung", "Heizung", text=True),
+    ])
+    assert set(rec) == {"sensor.bad_temp", "climate.heizung"}
+    assert set(more) == {"sensor.ohne_bereich", "sensor.feuchte_ohne_bereich", "sensor.bad_soll", "sensor.bad_offset"}
+
+
+def test_system_recommends_only_host_main_values() -> None:
+    rec, more, _ = _rows("system", [
+        _row("sensor.node_pve_cpu_auslastung", "CPU Auslastung", platform="proxmoxve", unit="%"),
+        _row("sensor.node_pve_prozentsatz_genutzter_arbeitsspeicher", "Arbeitsspeicher belegt", platform="proxmoxve", unit="%"),
+        _row("sensor.node_pve_prozentsatz_freier_arbeitsspeicher", "Arbeitsspeicher frei", platform="proxmoxve", unit="%"),
+        _row("sensor.node_pve_gesamtarbeitsspeicher", "Arbeitsspeicher gesamt", platform="proxmoxve", unit="GiB"),
+        _row("sensor.lxc_traccar_105_cpu_auslastung", "CPU Auslastung", platform="proxmoxve", unit="%"),
+        _row("sensor.qemu_win_vm_104_cpu_auslastung", "CPU Auslastung", platform="proxmoxve", unit="%"),
+        _row("sensor.disk_pve_ssd_temperatur", "Temperatur", platform="proxmoxve", device_class="temperature"),
+        _row("sensor.qnap01_temperature_drive_0_1", "Temperature Drive", platform="qnap", device_class="temperature"),
+        _row("sensor.qnap01_cpu_temperature", "CPU Temperature", platform="qnap", device_class="temperature"),
+        _row("sensor.home_assistant_core_cpu_prozent", "Core CPU", platform="hassio", unit="%"),
+        _row("sensor.grafana_cpu_percent", "Grafana CPU", platform="hassio", unit="%"),
+    ])
+    assert set(rec) == {
+        "sensor.node_pve_cpu_auslastung", "sensor.node_pve_prozentsatz_genutzter_arbeitsspeicher",
+        "sensor.qnap01_cpu_temperature", "sensor.home_assistant_core_cpu_prozent",
+    }
+    assert {
+        "sensor.node_pve_prozentsatz_freier_arbeitsspeicher", "sensor.node_pve_gesamtarbeitsspeicher",
+        "sensor.lxc_traccar_105_cpu_auslastung", "sensor.qemu_win_vm_104_cpu_auslastung",
+        "sensor.disk_pve_ssd_temperatur", "sensor.qnap01_temperature_drive_0_1", "sensor.grafana_cpu_percent",
+    } <= set(more)
+
+
 def test_system_topic_uses_the_monitoring_platforms_and_keeps_device_temperatures_out_of_the_room_climate() -> None:
     rows = [
         _row("sensor.processor_use", "Prozessorauslastung", platform="systemmonitor", unit="%"),
@@ -233,11 +283,12 @@ def test_doors_and_windows_are_recommended_and_locks_are_more() -> None:
         _row("binary_sensor.bad_fenster", "Bad", device_class="window"),
         _row("binary_sensor.garage", "Garage", device_class="garage_door"),
         _row("lock.haustuer", "Haustür Schloss", text=True),
+        _row("binary_sensor.klappe", "Klappe", device_class="opening"),
         _row("binary_sensor.bewegung", "Flur", device_class="motion"),
     ])
     assert rec["binary_sensor.haustuer"]["reason"] == "Türkontakt"
     assert set(rec) == {"binary_sensor.haustuer", "binary_sensor.bad_fenster", "binary_sensor.garage"}
-    assert set(more) == {"lock.haustuer"}
+    assert set(more) == {"lock.haustuer", "binary_sensor.klappe"}
 
 
 def test_wetter_recommends_a_rain_switch_but_not_a_leak_sensor() -> None:
@@ -249,3 +300,112 @@ def test_wetter_recommends_a_rain_switch_but_not_a_leak_sensor() -> None:
     rec, more, _result = _rows("wetter", catalog)
     assert {"binary_sensor.regensensor", "binary_sensor.rain"} <= set(rec)
     assert "binary_sensor.waschkeller_wasser" not in rec and "binary_sensor.waschkeller_wasser" not in more
+
+
+# ---- Weniger Rauschen (Maßnahme 1) ------------------------------------------------------------
+
+def test_indoor_outdoor_meter_is_not_an_outdoor_sensor() -> None:
+    meter = _row("sensor.bad_indoor_outdoor_meter_temperatur", "Bad Indoor/Outdoor Meter Temperatur",
+                 device_class="temperature", area="Bad", platform="switchbot")
+    garden = _row("sensor.garten_temperatur", "Garten Temperatur", device_class="temperature", area="Garten")
+    wetter_rec, _more, _ = _rows("wetter", [meter, garden])
+    assert "sensor.garten_temperatur" in wetter_rec and "sensor.bad_indoor_outdoor_meter_temperatur" not in wetter_rec
+    klima_rec, _more, _ = _rows("klima", [meter])
+    assert "sensor.bad_indoor_outdoor_meter_temperatur" in klima_rec  # gehört jetzt zum Raumklima
+
+
+def test_derived_weather_values_are_only_more_hits() -> None:
+    rows = [
+        _row("sensor.station_temperatur", "Station Außentemperatur", device_class="temperature", platform="ecowitt"),
+        _row("sensor.station_gefuehlt", "Station gefühlte Temperatur", device_class="temperature", platform="ecowitt"),
+        _row("sensor.station_taupunkt", "Station Taupunkt", device_class="temperature", platform="ecowitt"),
+    ]
+    rec, more, _ = _rows("wetter", rows)
+    assert set(rec) == {"sensor.station_temperatur"} and set(more) == {"sensor.station_gefuehlt", "sensor.station_taupunkt"}
+
+
+def test_vehicle_and_appliance_doors_are_only_more_hits() -> None:
+    rows = [
+        _row("binary_sensor.haustuer", "Haustür", device_class="door"),
+        _row("binary_sensor.auto_tuer", "Auto Tür", device_class="door", platform="audiconnect"),
+        _row("binary_sensor.waschmaschine_tuer", "Waschmaschine Tür", device_class="door", platform="home_connect"),
+    ]
+    rec, more, _ = _rows("tueren_fenster", rows)
+    assert set(rec) == {"binary_sensor.haustuer"}
+    assert set(more) == {"binary_sensor.auto_tuer", "binary_sensor.waschmaschine_tuer"}
+
+
+def test_camera_detections_and_printers_are_not_presence() -> None:
+    rows = [
+        _row("binary_sensor.wohnzimmer_praesenz", "Wohnzimmer Präsenz", device_class="occupancy"),
+        _row("binary_sensor.hof_katze", "Hof Katze", device_class="occupancy", platform="frigate"),
+        _row("binary_sensor.drucker_filament", "Drucker Filament", device_class="occupancy", platform="moonraker"),
+    ]
+    rec, more, _ = _rows("anwesenheit", rows)
+    assert set(rec) == {"binary_sensor.wohnzimmer_praesenz"} and len(more) == 2
+
+
+def test_smoothed_thermostat_values_and_battery_voltage_are_only_more_hits() -> None:
+    ema = _row("sensor.thermo_temperatur_ema", "Thermostat Temperatur EMA", device_class="temperature", area="Bad")
+    room = _row("sensor.bad_temperatur", "Bad Temperatur", device_class="temperature", area="Bad")
+    rec, more, _ = _rows("klima", [ema, room])
+    assert set(rec) == {"sensor.bad_temperatur"} and "sensor.thermo_temperatur_ema" in more
+    volt = _row("sensor.batt_v", "Sensor Batterie", device_class="battery", unit="V")
+    percent = _row("sensor.batt_p", "Sensor Batterie Stand", device_class="battery", unit="%")
+    rec, more, _ = _rows("batterien", [volt, percent])
+    assert set(rec) == {"sensor.batt_p"} and set(more) == {"sensor.batt_v"}
+
+
+# ---- Doppelte (Maßnahme 2) -------------------------------------------------------------------
+
+def _door(entity_id, platform, device="Kontakt Haustür", **fields):
+    return _row(entity_id, device, device_class="door", platform=platform, device=device, **fields)
+
+
+def test_same_device_from_two_integrations_keeps_one_recommended_and_marks_the_other() -> None:
+    rows = [_door("binary_sensor.a_haustuer", "eltako"), _door("binary_sensor.b_haustuer", "enocean_eltako")]
+    rec, more, _ = _rows("tueren_fenster", rows)
+    assert set(rec) == {"binary_sensor.a_haustuer"}  # alphabetisch erste Integration
+    assert more["binary_sensor.b_haustuer"]["reason"] == "Doppelt: dieselbe Entität kommt auch über eltako"
+
+
+def test_the_already_archived_duplicate_is_the_one_that_stays() -> None:
+    rows = [_door("binary_sensor.a_haustuer", "eltako"), _door("binary_sensor.b_haustuer", "enocean_eltako")]
+    rec, more, _ = _rows("tueren_fenster", rows, archived={"binary_sensor.b_haustuer"})
+    assert set(rec) == {"binary_sensor.b_haustuer"} and set(more) == {"binary_sensor.a_haustuer"}
+
+
+def test_several_rows_per_integration_are_not_a_duplicate_pair() -> None:
+    rows = [
+        _door("binary_sensor.a1", "eltako"), _door("binary_sensor.a2", "eltako"),
+        _door("binary_sensor.b1", "enocean_eltako"),
+    ]
+    rec, _more, _ = _rows("tueren_fenster", rows)
+    assert set(rec) == {"binary_sensor.a1", "binary_sensor.a2", "binary_sensor.b1"}
+
+
+def test_rows_without_a_device_are_never_collapsed() -> None:
+    rows = [_row("binary_sensor.x", "X", device_class="door", platform="a"), _row("binary_sensor.y", "Y", device_class="door", platform="b")]
+    rec, _more, _ = _rows("tueren_fenster", rows)
+    assert len(rec) == 2
+
+
+# ---- Vorauswahl (Maßnahme 3) -----------------------------------------------------------------
+
+@pytest.mark.parametrize("topic", ["tueren_fenster", "anwesenheit", "batterien"])
+def test_sensitive_and_battery_topics_preselect_nothing(topic) -> None:
+    rows = {
+        "tueren_fenster": [_row("binary_sensor.haustuer", "Haustür", device_class="door")],
+        "anwesenheit": [_row("person.anna", "Anna")],
+        "batterien": [_row("sensor.batt", "Batt", device_class="battery", unit="%")],
+    }[topic]
+    result = selection_suggest.suggest(topic, rows, set())
+    row = result["recommended"][0]["rows"][0]
+    assert row["status"] == "new" and row["checked"] is False
+    assert result["precheck"] is False and result["counts"]["checked"] == 0 and result["counts"]["recommended_new"] == 1
+
+
+def test_other_topics_still_preselect_new_recommended_rows() -> None:
+    rows = [_row("sensor.bad_temperatur", "Bad Temperatur", device_class="temperature", area="Bad")]
+    result = selection_suggest.suggest("klima", rows, set())
+    assert result["recommended"][0]["rows"][0]["checked"] is True and result["counts"]["checked"] == 1

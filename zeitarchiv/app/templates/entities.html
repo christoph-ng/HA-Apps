@@ -7,7 +7,8 @@
 {% endblock %}
 {% block content %}
   
-  <div class="page">
+  <div class="page page-wide"{% if dashboard_grid_columns == 4 %} data-columns="4"{% endif %}>
+    {% if overview_stats | default('always') == 'always' %}
     <div class="stat-row">
       <a class="stat" href="entities">
         <div class="label">{{ _("Entitäten") }}</div>
@@ -42,16 +43,23 @@
       </a>
       {% endif %}
     </div>
+    {% endif %}
+    {% include "_overview_tiles.html" %}
 
     <div class="dashboard-section">
+      <div class="dash-sticky-bar{% if dashboard_period_nav %} is-sticky{% endif %}">
       <div class="dashboard-head">
         <h2>{{ dashboard_name }}</h2>
         {% if dashboard_period_nav %}{{ period_nav() }}{% endif %}
       </div>
       {% if dashboard_period_nav %}{{ period_banner() }}{% endif %}
+      </div>
+      {% include "_four_columns_hint.html" %}
       {% include "_dashboard_tiles.html" %}
     </div>
   </div>
+
+  {% include "_tile_popup.html" %}
 
   <script src="{{ asset('vendor/htmx.min.js') }}"></script>
   <script src="{{ asset('vendor/echarts.min.js') }}"></script>
@@ -67,5 +75,7 @@
   <script src="{{ asset('js/state-entities.js') }}"></script>
   <script src="{{ asset('js/table-tile-render.js') }}"></script>
   <script src="{{ asset('js/chart-tile-render.js') }}"></script>
+  <script src="{{ asset('js/legend-render.js') }}"></script>
   <script src="{{ asset('js/dashboard-tiles.js') }}"></script>
+  <script src="{{ asset('js/tile-popup.js') }}"></script>
 {% endblock %}

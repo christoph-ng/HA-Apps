@@ -1,5 +1,5 @@
 """Demo-Daten für das Wetterdashboard (ROADMAP 1.43): Luftdruck, Böe, Strahlung, Niederschlag,
-zweites Thermometer und Heizenergie in drei Zählern."""
+zweites Thermometer, Heizenergie in drei Zählern sowie Helligkeit Süd und Dämmerung."""
 
 from __future__ import annotations
 
@@ -9,8 +9,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app import wetter_daylight as dl
 from app.demo_generation import (
     DEMO_ENTITIES,
+    SUED_LUX_MAX,
+    SUED_LUX_STEP,
+    ROOM_ENTITY_IDS,
     WETTER_ENTITY_IDS,
     WeatherContext,
     build_appliance_schedules,
@@ -30,6 +34,10 @@ WETTER_IDS = {
     "sensor.demo_waermepumpe_energie": ("total_increasing", "kWh"),
     "sensor.demo_heizstab_energie": ("total_increasing", "kWh"),
     "sensor.demo_konvektoren_energie": ("total_increasing", "kWh"),
+    "sensor.demo_helligkeit_sued": ("measurement", "lx"),
+    "sensor.demo_helligkeit_daemmerung": ("measurement", "lx"),
+    "sensor.demo_windrichtung": ("measurement", "°"),
+    "sensor.demo_sonnenhoehe": ("measurement", "°"),
 }
 
 
@@ -60,7 +68,9 @@ def test_weather_entities_are_registered_with_the_right_type_and_unit() -> None:
     assert demo_category_index("sensor.demo_niederschlag") == 5
     assert demo_category_index("sensor.demo_waermepumpe_energie") == 4
     # Neue Entitäten stehen am Ende, damit die Zufallsfolge der früheren unverändert bleibt.
-    assert [e.entity_id for e in DEMO_ENTITIES[-len(WETTER_IDS):]] == list(WETTER_IDS) == list(WETTER_ENTITY_IDS)
+    rooms = len(ROOM_ENTITY_IDS)
+    assert [e.entity_id for e in DEMO_ENTITIES[-rooms:]] == list(ROOM_ENTITY_IDS)
+    assert [e.entity_id for e in DEMO_ENTITIES[-(len(WETTER_IDS) + rooms):-rooms]] == list(WETTER_IDS) == list(WETTER_ENTITY_IDS)
 
 
 def test_english_ids_are_unique_and_translated() -> None:
@@ -68,11 +78,16 @@ def test_english_ids_are_unique_and_translated() -> None:
     assert len(ids) == len(set(ids))
     assert localized_id("sensor.demo_boe", "en") == "sensor.demo_gust"
     assert localized_id("sensor.demo_waermepumpe_energie", "en") == "sensor.demo_heat_pump_energy"
+    assert localized_id("sensor.demo_helligkeit_sued", "en") == "sensor.demo_illuminance_south"
+    assert localized_id("sensor.demo_helligkeit_daemmerung", "en") == "sensor.demo_illuminance_dusk_dawn"
 
 
 def test_same_seed_gives_the_same_weather(winter) -> None:
     again = _simulate(5, datetime(2024, 1, 1, tzinfo=TZ), 30)
-    for key in ("luftdruck", "boe", "strahlung", "niederschlag", "outdoor_temp_nord", "waermepumpe_energie"):
+    for key in (
+        "luftdruck", "boe", "strahlung", "niederschlag", "outdoor_temp_nord", "waermepumpe_energie",
+        "helligkeit_sued", "helligkeit_daemmerung", "windrichtung", "sonnenhoehe",
+    ):
         assert again[key] == winter[key], key
 
 
@@ -136,3 +151,52 @@ def test_north_thermometer_is_cooler_than_outdoor_on_average(summer) -> None:
     outdoor = [value for _ts, value in summer["outdoor_temp"]]
     north = [value for _ts, value in summer["outdoor_temp_nord"]]
     assert sum(north) / len(north) < sum(outdoor) / len(outdoor) - 0.5
+
+
+def test_south_illuminance_follows_the_radiation_and_saturates(summer, winter) -> None:
+    for household in (summer, winter):
+        for (_t1, radiation), (_t2, lux) in zip(household["strahlung"], household["helligkeit_sued"]):
+            assert radiation > 0 or lux == 0.0
+            assert radiation < 20 or lux > 0.0  # unter etwa 300 lx meldet die gestufte Anzeige 0
+            assert 0.0 <= lux <= SUED_LUX_MAX
+            assert lux in (SUED_LUX_MAX, round(lux / SUED_LUX_STEP) * SUED_LUX_STEP)  # gestuft wie der echte Sensor
+    assert max(value for _ts, value in summer["helligkeit_sued"]) > 0.9 * SUED_LUX_MAX  # klare Sommertage: fast Sättigung
+    assert max(value for _ts, value in winter["helligkeit_sued"]) < max(value for _ts, value in summer["helligkeit_sued"])
+
+
+def test_dawn_illuminance_is_a_stepped_ramp_between_night_and_day(summer) -> None:
+    values = [value for _ts, value in summer["helligkeit_daemmerung"]]
+    assert min(values) == 0.0 and max(values) > 800.0
+    assert all(0.0 <= value <= 1000.0 and value % 4 == 0 for value in values)
+    # Eine Rampe, kein Sprung: zwischen zwei Fünf-Minuten-Werten ändert sich der Wert nie um mehr als die halbe Skala.
+    assert max(abs(b - a) for a, b in zip(values, values[1:])) < 500.0
+
+
+def _day_length_hours(household: dict, day: datetime) -> float:
+    start, end = day.timestamp(), (day + timedelta(days=1)).timestamp()
+    points = [(ts, value) for ts, value in household["helligkeit_daemmerung"] if start <= ts < end]
+    result = dl.summarize_fine(dl.hold_points(points, start, end, 5.0), 5.0, 400.0, end, live=False)
+    return result["length"] / 3600.0
+
+
+def test_dawn_curve_gives_a_longer_day_in_summer_than_in_winter(summer, winter) -> None:
+    long_day = _day_length_hours(summer, datetime(2024, 7, 10, tzinfo=TZ))
+    short_day = _day_length_hours(winter, datetime(2024, 1, 10, tzinfo=TZ))
+    assert 14.0 < long_day < 17.0 and 7.0 < short_day < 10.5
+
+
+def test_wind_direction_stays_within_the_compass_and_sun_elevation_follows_the_season(summer, winter) -> None:
+    for household in (summer, winter):
+        assert all(0.0 <= value < 360.0 and value == int(value) for _ts, value in household["windrichtung"])
+    noon = lambda household: max(value for _ts, value in household["sonnenhoehe"])  # noqa: E731
+    assert noon(summer) > 55.0 > 25.0 > noon(winter) > 10.0  # Mitteleuropa: etwa 62° im Sommer, 19° im Winter
+    assert min(value for _ts, value in summer["sonnenhoehe"]) < -10.0  # nachts unter dem Horizont
+
+
+def test_south_illuminance_has_all_sky_classes_over_a_summer_month(summer) -> None:
+    peaks = {}
+    for ts, lux in summer["helligkeit_sued"]:
+        day = datetime.fromtimestamp(ts, TZ).date()
+        peaks[day] = max(peaks.get(day, 0.0), lux)
+    classes = {"trueb" if p < 15000 else "bewoelkt" if p < 25000 else "heiter" if p < 70000 else "sonnig" for p in peaks.values()}
+    assert len(classes) >= 3, classes  # nicht fast nur sonnige Tage, damit Tagesbild und Heizen+Sonne etwas zeigen

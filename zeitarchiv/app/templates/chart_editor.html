@@ -5,21 +5,36 @@
 {% endblock %}
 {% block content %}
   
-  <div class="page" x-data="chartEditor()">
-    <h1>{{ _("Charts") }}</h1>
-    <p class="sub" data-dynamic-back data-app-root="{{ app_root }}">{{ _("Eigene Charts über eine oder mehrere Entitäten hinweg zusammenstellen und dauerhaft ablegen. &middot;") }} <a href="{{ app_root }}/charts">{{ _("&larr; zurück zu Charts") }}</a></p>
+  <div class="page page-wide" x-data="chartEditor()" :data-legend-size="legendSize || null">
+    <h1 class="popup-hide">{{ _("Charts") }}</h1>
+    <p class="sub" data-dynamic-back data-app-root="{{ app_root }}">{{ _("Eigene Charts über eine oder mehrere Entitäten hinweg zusammenstellen und dauerhaft ablegen. &middot;") }} <a href="{{ app_root }}/charts">{{ _("&larr; zurück zu Charts") }}</a>{% if back_dashboard %} &middot; <a href="{{ app_root }}{{ back_dashboard.path }}" data-back-dashboard>{{ back_dashboard.label }}</a>{% endif %}</p>
 
     <div class="settings-panel">
         <div class="chart-title-row">
-          <h2 x-text="editing ? (chartId ? t('Chart bearbeiten') : t('Neuer Chart')) : (name || t('Neuer Chart'))"></h2>
-          <div style="display:flex;gap:8px;">
-            <button type="button" class="btn" x-show="hasData" data-tooltip="{{ _('Aktuell angezeigte Chart-Daten als CSV herunterladen') }}" @click="exportCsv()">{{ _("CSV") }}</button>
+          <h2 class="popup-hide" x-text="editing ? (chartId ? t('Chart bearbeiten') : t('Neuer Chart')) : (name || t('Neuer Chart'))"></h2>
+          <div style="display:flex;gap:8px;align-items:center;">
             {% if chart_id %}
-            <button type="button" class="btn" x-show="!editing" @click="editing = true">{{ _("Anpassen") }}</button>
+            <span class="refresh-wrap" x-show="hasData" x-cloak @click.outside="refreshMenuOpen = false">
+              <button type="button" class="refresh-chip" :class="{paused: refreshPause()}" aria-haspopup="menu" :aria-expanded="refreshMenuOpen"
+                      :title="refreshChipTitle()" @click="refreshMenuOpen = !refreshMenuOpen; refreshAge = Math.round((Date.now() - _lastRefresh) / 1000)">
+                <span class="refresh-dot"></span><span x-text="refreshChipText()"></span>
+              </button>
+              <div class="menu-popover menu-popover-narrow refresh-menu" x-show="refreshMenuOpen" x-cloak role="menu">
+                <div class="refresh-info" x-text="refreshInfo()"></div>
+                <button type="button" class="menu-row" role="menuitem" @click="refreshNow()">{{ _("Jetzt aktualisieren") }}</button>
+                <button type="button" class="menu-row" role="menuitem" @click="refreshOn = !refreshOn">
+                  <span>{{ _("Automatisch aktualisieren") }}</span><span class="refresh-state" x-text="refreshOn ? t('An') : t('Aus')"></span>
+                </button>
+              </div>
+            </span>
+            {% endif %}
+            <button type="button" class="btn popup-hide" x-show="hasData" data-tooltip="{{ _('Aktuell angezeigte Chart-Daten als CSV herunterladen') }}" @click="exportCsv()">{{ _("CSV") }}</button>
+            {% if chart_id %}
+            <button type="button" class="btn popup-hide" x-show="!editing" @click="editing = true">{{ _("Anpassen") }}</button>
             {% endif %}
           </div>
         </div>
-        {% if chart_id %}{% include "_dashboard_usage.html" %}{% endif %}
+        {% if chart_id %}<div class="popup-hide">{% include "_dashboard_usage.html" %}</div>{% endif %}
         <p class="sub" x-show="editing">{{ _("Beliebig viele Entitäten überlagern &mdash; unterschiedliche Einheiten bekommen jeweils eine eigene Y-Achse. Zeigt beim Ansehen immer die aktuellen Daten, kein eingefrorener Schnappschuss.") }}</p>
 
         <!-- Suchfeld mit aufklappender Trefferliste (entityMultiPicker in
@@ -154,6 +169,16 @@
                   <span class="id" x-text="id"></span>
                 </span>
                 <input type="text" :placeholder="labelFor(id)" x-model="entityNames[id]" @input="render()">
+                <select class="entity-name-stack" x-show="stacked && canStack && isBarId(id)" x-cloak
+                        :value="stackValue(id)" @change="setStack(id, $event.target.value)"
+                        title="{{ _('Stapel') }}" aria-label="{{ _('Stapel') }}">
+                  <option value="implicit" x-show="stackValue(id) === 'implicit'" :selected="stackValue(id) === 'implicit'" hidden>{{ _("Ein Stapel") }}</option>
+                  <option value="none" :selected="stackValue(id) === 'none'">{{ _("Kein Stapel") }}</option>
+                  <template x-for="g in stackGroupList()" :key="g.id">
+                    <option :value="g.id" x-text="g.name || t('Stapel')" :selected="stackValue(id) === g.id"></option>
+                  </template>
+                  <option value="new">{{ _("Neuer Stapel …") }}</option>
+                </select>
                 <span class="entity-name-right">
                   <button type="button" class="entity-name-hide" :class="{active: hiddenEntityIds.includes(id)}"
                           :title="hiddenEntityIds.includes(id) ? t('Serie einblenden') : t('Serie ausblenden')"
@@ -172,6 +197,40 @@
               </div>
             </template>
           </div>
+          <!-- Stapel: Container zu den Balken. Die Liste oben bleibt die einzige Reihenfolge
+               (und damit Farbreihenfolge); hier wird nur zugeordnet. Zuordnen geht per Ziehen
+               des Griffs auf einen Stapel oder über das Feld „Stapel“ in der Zeile (Touch). -->
+          <div class="stack-block" :class="{inactive: !stacked}" x-show="canStack" x-cloak>
+            <p class="sub" style="margin:0 0 8px;" x-show="stacked && singleBucket && !hasStackMembers" x-text="t('In der Auflösung „Voll“ bekommt jeder Stapel eine eigene Kategorie. Lege dazu Stapel an.')"></p>
+            <p class="sub" style="margin:0 0 8px;" x-text="stacked ? t('Balken im selben Stapel liegen aufeinander, die übrigen stehen einzeln daneben. Zum Zuordnen den Griff einer Zeile auf einen Stapel ziehen oder das Feld „Stapel“ nutzen.') : t('Stapel sind inaktiv, solange „Gestapelt“ aus ist. Sie bleiben gespeichert.')"></p>
+            <p class="color-hint" style="margin:0;" x-show="stackGroupList().length">{{ _("Die Reihenfolge im Stapel ist die der Liste, von links (unten) nach rechts (oben).") }}</p>
+            <template x-for="g in stackGroupList()" :key="g.id">
+              <div class="stack-card" :class="{over: stackOver === g.id}"
+                   @dragover="stackDragOver($event, g.id)" @dragleave="stackOver === g.id && (stackOver = null)" @drop="stackDrop($event, g.id)">
+                <div class="stack-card-head">
+                  <input type="text" :value="g.name" :placeholder="t('Stapel')" maxlength="60" aria-label="{{ _('Name des Stapels') }}"
+                         @input="renameStack(g.id, $event.target.value)">
+                  <span class="stack-count" x-text="stackMembersOf(g.id).length"></span>
+                  <button type="button" class="stack-dissolve" @click="dissolveStack(g.id)">{{ _("auflösen") }}</button>
+                </div>
+                <div class="stack-members">
+                  <template x-for="mid in stackMembersOf(g.id)" :key="mid">
+                    <span class="stack-chip">
+                      <span class="stack-chip-dot" :style="'--dot:' + colorFor(mid)"></span>
+                      <span x-text="labelFor(mid)"></span>
+                      <button type="button" class="stack-chip-move" title="{{ _('Im Stapel nach unten') }}" aria-label="{{ _('Im Stapel nach unten') }}"
+                              :disabled="stackMembersOf(g.id).indexOf(mid) === 0" @click="moveInStack(mid, -1)">←</button>
+                      <button type="button" class="stack-chip-move" title="{{ _('Im Stapel nach oben') }}" aria-label="{{ _('Im Stapel nach oben') }}"
+                              :disabled="stackMembersOf(g.id).indexOf(mid) === stackMembersOf(g.id).length - 1" @click="moveInStack(mid, 1)">→</button>
+                      <button type="button" title="{{ _('Aus dem Stapel nehmen') }}" aria-label="{{ _('Aus dem Stapel nehmen') }}" @click="setStack(mid, 'none')">✕</button>
+                    </span>
+                  </template>
+                  <span class="stack-empty" x-show="!stackMembersOf(g.id).length">{{ _("Entitäten hierher ziehen") }}</span>
+                </div>
+              </div>
+            </template>
+            <button type="button" class="btn btn-sm" @click="addStack()">{{ _("+ Stapel hinzufügen") }}</button>
+          </div>
         </div>
 
         <!-- Zeitraum & Daten: welcher Ausschnitt und wie er geholt wird
@@ -180,7 +239,7 @@
              Ausschnitt gezeigt wird) — alles Weitere (wie er gezeichnet wird:
              Auflösung, Punkte, Y-Achse, Statistik in Legende) sitzt im
              Optionen-Menü, damit hier nur eine einzige, kompakte Zeile bleibt. -->
-        <div class="toolbar" x-show="editing">
+        <div class="toolbar" x-show="editing || popup">
           <div class="seg">
             {% for key, label in range_options %}
             <button :class="{active: range === '{{ key }}'}" @click="setRange('{{ key }}')">{{ label }}</button>
@@ -211,7 +270,7 @@
                Entitäts-Chart (.toolbar-right in app.css). -->
           <div class="toolbar-right">
             <div class="menu-wrap" @click.outside="compareMenuOpen = false">
-              <button type="button" class="chip menu-btn" :class="{active: compare}" :disabled="raw || resolutionPreset === 'full' || (stacked && canStack) || donut" @click="compareMenuOpen = !compareMenuOpen">
+              <button type="button" class="chip menu-btn" :class="{active: compare}" :disabled="raw || resolutionPreset === 'full' || donut" @click="compareMenuOpen = !compareMenuOpen">
                 <span x-text="compareButtonLabel"></span> <span class="chevron">▾</span>
               </button>
               <div class="menu-popover menu-popover-narrow" x-show="compareMenuOpen" x-cloak
@@ -392,10 +451,9 @@
                      deaktivierter Schalter noch anzeigen müsste. -->
                 <label class="menu-row" x-show="canStack && !donut">
                   <span class="menu-row-label">{{ _("Gestapelt") }}
-                    <span class="menu-note" x-show="compare">{{ _("nicht bei aktivem Vergleich") }}</span>
                   </span>
                   <span class="menu-toggle">
-                    <input type="checkbox" :checked="stacked" :disabled="compare" @change="toggleStacked()">
+                    <input type="checkbox" :checked="stacked" @change="toggleStacked()">
                     <span class="track"><span class="thumb"></span></span>
                   </span>
                 </label>
@@ -417,6 +475,7 @@
                     <button :class="{active: normalize}" @click="normalize = true; render()">{{ _("Anteile (%)") }}</button>
                   </div>
                 </div>
+                <p class="color-hint menu-row-hint" x-show="stackPercentBlocked" x-cloak>{{ _("Anteile (%) wirken erst, wenn alle Balken in einem Stapel liegen. Solange Balken ohne Stapel dabei sind, bleiben die Werte absolut.") }}</p>
                 <!-- "Horizontal" ergibt nur im Ranking-Vergleich Sinn (Auflösung
                      "Voll" — jede Entität bekommt dort ihre eigene Kategorie,
                      siehe render()/singleBucket, erst dann können lange
@@ -445,7 +504,7 @@
                      Bedingung bliebe "Ausrichtung" dann fälschlich
                      ausgeblendet, obwohl der Chart längst im Ranking-
                      Vergleich steht, für den sie gedacht ist. -->
-                <div class="menu-row menu-row-stack" x-show="!donut && !timeline && !(stacked && canStack)">
+                <div class="menu-row menu-row-stack" x-show="!donut && !timeline && (!stackActive || singleBucket || hasStackMembers)">
                   <span class="menu-row-label">{{ _("Ausrichtung") }}
                     <span class="menu-note" x-show="compare">{{ _("Horizontal nicht bei aktivem Vergleich") }}</span>
                   </span>
@@ -500,10 +559,10 @@
                      bei Auflösung "Tag" weiter oben. -->
                 <label class="menu-row" x-show="!donut && !timeline">
                   <span class="menu-row-label">{{ _("Durchschnittslinie") }}
-                    <span class="menu-note" x-show="stacked && canStack">{{ _("nicht im gestapelten Modus") }}</span>
+                    <span class="menu-note" x-show="stackActive">{{ _("nicht im gestapelten Modus") }}</span>
                   </span>
                   <span class="menu-toggle">
-                    <input type="checkbox" :checked="averageLine" :disabled="stacked && canStack" @change="averageLine = !averageLine; render()">
+                    <input type="checkbox" :checked="averageLine" :disabled="stackActive" @change="averageLine = !averageLine; render()">
                     <span class="track"><span class="thumb"></span></span>
                   </span>
                 </label>
@@ -517,21 +576,21 @@
                      "Fläche" oben). Bei gemischten Linien-/Balken-Charts
                      bleibt die Zeile sichtbar und wirkt weiterhin nur auf die
                      Linien-Serien. -->
-                <div class="menu-row menu-row-stack" x-show="averageLine && !(stacked && canStack) && hasLineSeries && !donut">
+                <div class="menu-row menu-row-stack" x-show="averageLine && !stackActive && hasLineSeries && !donut">
                   <span class="menu-row-label">{{ _("Linienstil") }}</span>
                   <div class="seg">
                     <button :class="{active: averageStyle === 'flat'}" @click="averageStyle = 'flat'; render()">{{ _("Flach") }}</button>
                     <button :class="{active: averageStyle === 'rolling'}" @click="averageStyle = 'rolling'; render()">{{ _("Gleitend") }}</button>
                   </div>
                 </div>
-                <label class="menu-row" x-show="!hasState">
+                <label class="menu-row" :class="{'is-disabled': legendStyle === 'off'}" x-show="!hasState">
                   <span class="menu-row-label">{{ _("Statistik in Legende") }}</span>
                   <span class="menu-toggle">
                     <input type="checkbox" :checked="chartStats" @change="chartStats = !chartStats; render()">
                     <span class="track"><span class="thumb"></span></span>
                   </span>
                 </label>
-                <div class="menu-row legend-metrics-row" x-show="chartStats && !hasState">
+                <div class="menu-row legend-metrics-row" :class="{'is-disabled': legendStyle === 'off'}" x-show="chartStats && !hasState">
                   <template x-for="metric in legendMetricOptions" :key="metric.value">
                     {# Siehe entity_detail.html: .filter-chip ist der app-weite
                        Standard für Chip-Mehrfachauswahl. #}
@@ -541,11 +600,19 @@
                     </label>
                   </template>
                 </div>
-                <div class="menu-row" x-show="statsShown">
+                <div class="menu-row">
                   <span class="menu-row-label">{{ _("Legenden-Stil") }}</span>
                   <div class="seg">
-                    <button :class="{active: legendStyle === 'chips'}" @click="legendStyle = 'chips'">{{ _("Chips") }}</button>
-                    <button :class="{active: legendStyle === 'table'}" @click="legendStyle = 'table'">{{ _("Tabelle") }}</button>
+                    <button :class="{active: legendStyle === 'chips'}" @click="setLegendStyle('chips')">{{ _("Chips") }}</button>
+                    <button :class="{active: legendStyle === 'table'}" @click="setLegendStyle('table')">{{ _("Tabelle") }}</button>
+                    <button :class="{active: legendStyle === 'off'}" @click="setLegendStyle('off')">{{ _("Aus") }}</button>
+                  </div>
+                </div>
+                <div class="menu-row" :class="{'is-disabled': legendStyle === 'off'}">
+                  <span class="menu-row-label">{{ _("Legendengröße") }}</span>
+                  <div class="seg">
+                    <button :class="{active: legendSizeShown === 'normal'}" @click="legendSize = 'normal'">{{ _("Normal") }}</button>
+                    <button :class="{active: legendSizeShown === 'small'}" @click="legendSize = 'small'">{{ _("Klein") }}</button>
                   </div>
                 </div>
               </div>
@@ -675,8 +742,11 @@
              keine sinnvollen Einträge (zwei eigenständige Jahresserien statt
              einer gedämpften Vergleichs-Nebenserie), deshalb zusätzlich
              ausgeblendet statt nur per hasData. -->
-        <div class="chart-legend" x-show="hasData && !yearsCompareActive && !multiYearActive && (legendStyle === 'chips' || !statsShown)">
-          <template x-for="stat in seriesStats" :key="stat.entityId">
+        <div class="chart-legend" x-show="hasData && legendStyle !== 'off' && !yearsCompareActive && !multiYearActive && (legendStyle === 'chips' || !statsShown)">
+          <template x-for="entry in legendEntries" :key="entry.key">
+           <span :class="entry.group ? 'chart-legend-group' : 'chart-legend-plain'">
+            <span class="chart-legend-group-name" x-show="entry.group" x-text="entry.name"></span>
+            <template x-for="stat in entry.members" :key="stat.entityId">
             <button type="button" class="chart-legend-item" :class="{inactive: legendHiddenIds.includes(stat.entityId)}"
                     @click="toggleLegendItem(stat.entityId, stat.name)"
                     @mouseenter="highlightDonutSlice(stat.name)" @mouseleave="unhighlightDonutSlice(stat.name)">
@@ -714,6 +784,9 @@
                 </span>
               </div>
             </button>
+            </template>
+            <span class="chart-legend-group-sum" x-show="entry.group && chartStats && legendMetrics.includes('sum') && entry.sum !== null">Σ <strong x-text="entry.sum"></strong></span>
+           </span>
           </template>
         </div>
         <!-- Eigene Legende für den Soll-Balkenvergleich (yearsCompareActive)
@@ -722,7 +795,7 @@
              macht (siehe yearsSeriesStats). .static: kein Serien-Umschalter
              in diesem ersten Schritt (siehe Kommentar bei yearsSeriesStats),
              deshalb ohne @click/toggleLegendItem(). -->
-        <div class="chart-legend" x-show="hasData && yearsCompareActive && (legendStyle === 'chips' || !chartStats)">
+        <div class="chart-legend" x-show="hasData && legendStyle !== 'off' && yearsCompareActive && (legendStyle === 'chips' || !chartStats)">
           <template x-for="stat in yearsSeriesStats" :key="stat.key">
             <span class="chart-legend-item static">
               <span class="dot" :style="{background: stat.color}"></span>
@@ -786,9 +859,18 @@
                 <th x-show="legendMetrics.includes('sum')">Σ</th>
               </tr>
             </thead>
+            <template x-for="entry in legendEntries" :key="entry.key">
             <tbody>
-              <template x-for="stat in seriesStats" :key="stat.entityId">
-                <tr class="chart-legend-table-row" :class="{inactive: legendHiddenIds.includes(stat.entityId)}"
+              <tr class="chart-legend-group-row" x-show="entry.group">
+                <td class="legend-name-col"><span class="legend-name-cell"><span x-text="entry.name"></span> <span class="legend-stack">{{ _("Stapel") }}</span></span></td>
+                <td x-show="legendMetrics.includes('last')" :class="{'chart-legend-group-dash': entry.last === null}" x-text="entry.last ?? '–'"></td>
+                <td x-show="legendMetrics.includes('min')" class="chart-legend-group-dash">–</td>
+                <td x-show="legendMetrics.includes('max')" class="chart-legend-group-dash">–</td>
+                <td x-show="legendMetrics.includes('average')" class="chart-legend-group-dash">–</td>
+                <td x-show="legendMetrics.includes('sum')" :class="{'chart-legend-group-dash': entry.sum === null}" x-text="entry.sum ?? '–'"></td>
+              </tr>
+              <template x-for="stat in entry.members" :key="stat.entityId">
+                <tr class="chart-legend-table-row" :class="{inactive: legendHiddenIds.includes(stat.entityId), 'chart-legend-group-member': entry.group}"
                     @click="toggleLegendItem(stat.entityId, stat.name)"
                     @mouseenter="highlightDonutSlice(stat.name)" @mouseleave="unhighlightDonutSlice(stat.name)">
                   <td class="legend-name-col">
@@ -833,6 +915,7 @@
                 </tr>
               </template>
             </tbody>
+            </template>
           </table>
         </div>
 
@@ -872,7 +955,7 @@
              Chips oder Tabelle (Legenden-Stil), ein Eintrag je Jahr plus Ø,
              nicht klickbar wie beim Soll-Balkenvergleich darüber. Darunter
              zusätzlich die Tabelle Jahr × Monat. -->
-        <div class="chart-legend" x-show="hasData && multiYearActive && (legendStyle === 'chips' || !chartStats)">
+        <div class="chart-legend" x-show="hasData && legendStyle !== 'off' && multiYearActive && (legendStyle === 'chips' || !chartStats)">
           <template x-for="stat in multiYearSeriesStats" :key="stat.key">
             <span class="chart-legend-item static">
               <span :class="stat.isAverage ? 'dash' : 'dot'" :style="stat.isAverage ? {borderColor: stat.color} : {background: stat.color}"></span>
@@ -1008,18 +1091,23 @@
     const PERIOD_ANCHOR = {{ period_anchor | tojson }};
     const CONTINUOUS = {{ continuous | tojson }};
     const SELECTED_ENTITY_IDS = {{ selected_entity_ids | tojson }};
+    // Höchstzahl Entitäten je Chart: dieselbe Grenze wie die Abfrage /api/query-multi (limits.py).
+    const MAX_ENTITIES = {{ max_entities | tojson }};
     const ENTITY_NAMES = {{ entity_names | tojson }};
     const HIDDEN_ENTITY_IDS = {{ hidden_entity_ids | tojson }};
     // Gezeichneter Zustand je Zustands-Entität der Heatmap (Rohtext).
     const HEATMAP_STATES = {{ heatmap_states | default({}) | tojson }};
     // Eigene Serienfarben {entity_id: "palette:N" | "#rrggbb"}.
     const SERIES_COLORS = {{ series_colors | default({}) | tojson }};
+    // Mehrere Stapel {groups: [{id, name}], members: {entity_id: id}}.
+    const STACK_GROUPS = {{ stack_groups | default({}) | tojson }};
     const ENTITY_OPTIONS = {{ entity_options | tojson }};
     const RESOLUTION_PRESET = {{ resolution_preset | tojson }};
     const DYNAMIC_Y_AXIS = {{ dynamic_y_axis | tojson }};
     const CHART_STATS = {{ chart_stats | tojson }};
     const LEGEND_METRICS = {{ legend_metrics | tojson }};
     const LEGEND_STYLE = {{ legend_style | tojson }};
+    const LEGEND_SIZE = {{ legend_size | default('') | tojson }};
     const CHART_TYPE = {{ chart_type | tojson }};
     // "auto" = jede Serie behält ihre eigene entities.decimals-Einstellung,
     // sonst gilt dieser Wert einheitlich für ALLE Serien dieses Charts (siehe

@@ -139,6 +139,8 @@
   --energy-battery-in:#F06292; --energy-battery-out:#4DB6AC;
   --font-display:'IBM Plex Sans',sans-serif; --font-mono:'IBM Plex Mono',monospace;
   --shadow:0 1px 2px rgba(19,28,23,.06), 0 1px 1px rgba(19,28,23,.04);
+  /* Weicher zweiter Schatten der Dashboard-Kacheln: sie wirken leicht abgehoben ("schwebend"). */
+  --tile-lift:0 6px 16px -6px rgba(19,28,23,.16), 0 2px 6px rgba(19,28,23,.05);
   --bg-shade:rgba(19,28,23,.055);
   /* Eck-Verlauf der Übersichtskacheln (/dashboards, /tables, /charts) statt
      reiner Kartenfläche. Als EIN Token, obwohl die drei Seiten ihre
@@ -333,7 +335,8 @@ body::before{
    <canvas> oder eine Maus-Koordinate. Skaliert bewusst nur Schriftgrößen,
    nicht Abstände/Breiten (bleiben in px). */
 body{background:var(--bg);color:var(--ink);font-family:var(--font-display);margin:0;padding:32px 24px 64px;font-size:calc(15px * var(--font-scale, 1));line-height:1.5;-webkit-font-smoothing:antialiased;}
-.page{max-width:1120px;margin:0 auto;min-width:0;}
+:root{--page-max:1120px;--page-narrow:1120px;}
+.page{max-width:var(--page-max);margin:0 auto;min-width:0;}
 button{font-family:inherit;}
 code,.mono{font-family:var(--font-mono);}
 /* Tastatur-Fokusring in der Akzentfarbe statt des browsereigenen (meist
@@ -363,6 +366,8 @@ h1.raw{font-family:var(--font-mono);font-size:calc(20px * var(--font-scale, 1));
    niemand mehr gleichzeitig arbeitet. */
 .h1-row{display:flex;align-items:center;gap:10px;}
 .h1-row h1{margin:0;}
+/* Chip für das automatische Nachladen sitzt am rechten Rand der Titelzeile (Entitätsseite). */
+.h1-row .refresh-wrap{margin-left:auto;}
 .h1-row .fav-star{
   background:none;border:none;cursor:pointer;font-size:calc(22px * var(--font-scale, 1));line-height:1;padding:2px;
   color:var(--ink-faint);opacity:.5;
@@ -407,7 +412,7 @@ h2{font-size:calc(16.8px * var(--font-scale, 1));font-weight:700;margin:28px 0 1
    mehr hier, sondern eine Ebene höher auf .page-sticky-header (s. o.) —
    beide zusammen sollen oben kleben bleiben, nicht nur die Topnav allein. */
 .topnav{margin:-32px -24px 28px;padding:0 24px;background:var(--surface);border-bottom:1px solid var(--border);}
-.topnav-bar{max-width:1120px;margin:0 auto;height:56px;display:flex;align-items:center;gap:28px;}
+.topnav-bar{max-width:var(--page-max);margin:0 auto;height:56px;display:flex;align-items:center;gap:28px;}
 .topnav-brand{display:flex;align-items:center;gap:8px;text-decoration:none;color:inherit;flex-shrink:0;}
 /* 30px statt 26px — das Logo wirkte neben der 15px-Wortmarke zu zurückhaltend.
    border-radius zieht proportional mit: das SVG selbst rundet mit rx="14" auf
@@ -632,8 +637,9 @@ h2{font-size:calc(16.8px * var(--font-scale, 1));font-weight:700;margin:28px 0 1
 /* Mobiles Menü: Hamburger öffnet ein Slide-in-Drawer von rechts statt des
    Hover-Dropdowns oben, da "System" auf Touch keinen Hover-Zustand hat. */
 .topnav-drawer-backdrop.is-open{display:block;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:30;}
-.topnav-drawer{position:fixed;top:0;right:0;bottom:0;width:min(300px,84vw);background:var(--surface);box-shadow:var(--shadow);z-index:31;transform:translateX(100%);transition:transform .18s ease;overflow-y:auto;}
-.topnav-drawer.is-open{transform:translateX(0);}
+.topnav-drawer{position:fixed;top:0;right:0;bottom:0;width:min(300px,84vw);background:var(--surface);box-shadow:var(--shadow);z-index:31;transform:translateX(100%);visibility:hidden;transition:transform .18s ease,visibility 0s .18s;overflow-y:auto;}
+/* visibility:hidden nimmt den geschlossenen Drawer aus der Tab-Reihenfolge; die Verzögerung lässt die Schließanimation noch sichtbar auslaufen. */
+.topnav-drawer.is-open{transform:translateX(0);visibility:visible;transition:transform .18s ease,visibility 0s;}
 .topnav-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);}
 .topnav-drawer-head span{font-weight:600;font-size:calc(14.5px * var(--font-scale, 1));color:var(--ink);}
 .topnav-drawer-close{background:none;border:0;color:var(--ink-muted);cursor:pointer;padding:4px;}
@@ -1097,21 +1103,27 @@ a.menu-row{text-decoration:none;}
    Legende") Min/Max/Ø/Summe-Anzeige derselben Entität, eine Zeile statt
    getrennter Legende + Statistik-Kacheln darunter. Von chart_editor.html
    UND der Entität-eigenen Chart-Seite (entity_detail.html) genutzt. */
-.chart-legend{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;}
+/* Legendengröße (ROADMAP 1.52): --legend-scale kommt aus data-legend-size — an <html> die globale
+   Einstellung, an einer Chart-Seite oder Kachel die des Charts (überschreibt sie). "Klein" skaliert
+   Schrift, Abstände und Punkte der Legende, nichts anderes. */
+[data-legend-size="normal"]{--legend-scale:1;}
+[data-legend-size="small"]{--legend-scale:.85;}
+.menu-row.is-disabled{opacity:.4;pointer-events:none;}
+.chart-legend{display:flex;flex-wrap:wrap;gap:calc(8px * var(--legend-scale, 1));margin-top:14px;}
 .chart-legend-item{
-  display:flex;flex-wrap:wrap;align-items:baseline;gap:9px;max-width:100%;
-  padding:6px 13px;border-radius:20px;border:1px solid var(--border);
+  display:flex;flex-wrap:wrap;align-items:baseline;gap:calc(9px * var(--legend-scale, 1));max-width:100%;
+  padding:calc(6px * var(--legend-scale, 1)) calc(13px * var(--legend-scale, 1));border-radius:20px;border:1px solid var(--border);
   background:var(--surface-alt);cursor:pointer;font:inherit;color:inherit;
   transition:opacity .15s ease,border-color .15s ease;
 }
 /* Vergleichsperiode (Vorjahr/Vorperiode) je Entität — flex-basis:100% erzwingt
    eine eigene Zeile unterhalb von .dot/.name/.values, ohne deren Zeile zu
    berühren (dafür braucht .chart-legend-item oben zusätzlich flex-wrap). */
-.chart-legend-item .compare-row{flex-basis:100%;display:flex;align-items:baseline;gap:9px;}
+.chart-legend-item .compare-row{flex-basis:100%;display:flex;align-items:baseline;gap:calc(9px * var(--legend-scale, 1));}
 .chart-legend-item .compare-row .dot{opacity:.55;}
 .chart-legend-item .compare-row .compare-label{
   color:var(--ink-faint);white-space:nowrap;overflow:hidden;
-  text-overflow:ellipsis;max-width:180px;font-size:calc(11px * var(--font-scale, 1));
+  text-overflow:ellipsis;max-width:180px;font-size:calc(11px * var(--font-scale, 1) * var(--legend-scale, 1));
 }
 .chart-legend-item .compare-row .values{color:var(--ink-faint);}
 /* Summe „bis zum gleichen Tag“ der Vergleichsperiode — als Zusatz neben der Gesamtsumme, damit sie
@@ -1126,14 +1138,29 @@ a.menu-row{text-decoration:none;}
    Kacheln (dashboard-tiles.js) — echte <button>-Chips (chart_editor.html)
    bekommen ihren Fokusring bereits vom Browser. */
 .chart-legend-item[tabindex]:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;}
-.chart-legend-item .dot{width:9px;height:9px;border-radius:999px;flex:none;}
+.chart-legend-item .dot{width:calc(9px * var(--legend-scale, 1));height:calc(9px * var(--legend-scale, 1));border-radius:999px;flex:none;}
+.legend-stack{font-family:var(--font-mono);font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);white-space:nowrap;}
+.legend-stack::before{content:"· ";}
+/* Stapel in der Legende: Chips in einer gemeinsamen Kapsel mit Name und Summe, in der Tabelle eine Kopfzeile
+   über den Mitgliedern (legend-render.js, chart_editor.html). */
+.chart-legend-group{display:inline-flex;flex-wrap:wrap;align-items:center;gap:calc(8px * var(--legend-scale, 1));max-width:100%;
+  padding:calc(4px * var(--legend-scale, 1)) calc(8px * var(--legend-scale, 1)) calc(4px * var(--legend-scale, 1)) calc(12px * var(--legend-scale, 1));
+  border-radius:24px;border:1px solid var(--border);background:var(--surface);}
+.chart-legend-group-name{font-size:calc(12px * var(--font-scale, 1));font-weight:500;color:var(--ink-muted);white-space:nowrap;}
+.chart-legend-group-sum{font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);padding-right:4px;white-space:nowrap;}
+.chart-legend-group-sum strong{color:var(--ink);font-weight:500;}
+.chart-legend-group-row td{background:var(--surface-alt);font-weight:500;}
+.chart-legend-group-row .legend-name-cell{gap:8px;}
+.chart-legend-group-row .chart-legend-group-dash{color:var(--ink-faint);font-weight:400;}
+.chart-legend-group-member .legend-name-cell{padding-left:18px;}
+.chart-legend-table .chart-legend-group-member td.legend-name-col{font-weight:500;}
 .chart-legend-item .name{
   font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;
-  text-overflow:ellipsis;max-width:180px;font-size:calc(12.5px * var(--font-scale, 1));
+  text-overflow:ellipsis;max-width:180px;font-size:calc(12.5px * var(--font-scale, 1) * var(--legend-scale, 1));
 }
 .chart-legend-item .values{
-  display:flex;gap:9px;flex:none;font-family:var(--font-mono);color:var(--ink-muted);
-  white-space:nowrap;font-size:calc(11px * var(--font-scale, 1));
+  display:flex;flex-wrap:wrap;gap:2px calc(9px * var(--legend-scale, 1));flex:0 1 auto;min-width:0;font-family:var(--font-mono);color:var(--ink-muted);
+  white-space:nowrap;font-size:calc(11px * var(--font-scale, 1) * var(--legend-scale, 1));
 }
 /* Nicht klickbar — für Legenden ohne Serien-Umschalter-Funktion (Entität-
    eigene Chart-Seite: nur eine Serie; Dashboard-Kachel-Legende: reine
@@ -1152,11 +1179,16 @@ a.menu-row{text-decoration:none;}
    Breite und bricht dort um (zwei Zeilen statt vier), damit die Werte neben
    ihm noch ins Bild passen. Die Tabelle scrollt seitlich. */
 @media (max-width:640px){
-  .chart-legend-table .legend-name-col{width:14rem;min-width:14rem;max-width:14rem;}
+  .chart-legend-table .legend-name-col{width:calc(14rem * var(--legend-scale, 1));min-width:calc(14rem * var(--legend-scale, 1));max-width:calc(14rem * var(--legend-scale, 1));}
 }
 .chart-legend-table td.legend-name-col{font-weight:600;color:var(--ink);}
 .chart-legend-table .legend-name-cell{display:inline-flex;align-items:center;gap:8px;}
-.chart-legend-table .legend-name-cell .dot{width:9px;height:9px;border-radius:999px;flex:none;}
+.chart-legend-table .legend-name-cell .dot{width:calc(9px * var(--legend-scale, 1));height:calc(9px * var(--legend-scale, 1));border-radius:999px;flex:none;}
+/* Eigene Schrift und Zellenabstände der Legenden-Tabelle: table.dt (13,5 px, th 12,5 px, compact 4/2 px und 14 px)
+   gilt für alle Tabellen und bleibt unberührt. Bei "Normal" ergibt das exakt die bisherigen Werte. */
+table.dt.chart-legend-table{font-size:calc(13.5px * var(--font-scale, 1) * var(--legend-scale, 1));}
+table.dt.compact.chart-legend-table th{padding:calc(4px * var(--legend-scale, 1)) calc(14px * var(--legend-scale, 1));font-size:calc(12.5px * var(--font-scale, 1) * var(--legend-scale, 1));}
+table.dt.compact.chart-legend-table td{padding:calc(2px * var(--legend-scale, 1)) calc(14px * var(--legend-scale, 1));}
 /* Zeilen sind wie die Chips klickbare Serien-Umschalter (chart_editor.html:
    toggleLegendItem(); dashboard-tiles.js: dieselbe Aktion über
    toggleTileLegendItem()). */
@@ -1170,7 +1202,7 @@ a.menu-row{text-decoration:none;}
    Wurzelelement (die <tr>) erzeugt. */
 .chart-legend-table .legend-compare-label,
 .chart-legend-table td .legend-compare-value{
-  display:block;color:var(--ink-faint);font-size:calc(10.5px * var(--font-scale, 1));
+  display:block;color:var(--ink-faint);font-size:calc(10.5px * var(--font-scale, 1) * var(--legend-scale, 1));
 }
 
 /* Datentabellen */
@@ -1293,7 +1325,10 @@ td.mono{font-family:var(--font-mono);}
    fiel 650 auf 700 hoch und 800 mangels fetterem Schnitt auf 700 zurück — die
    als "fett" markierte Trennzeile war von der normalen nicht zu unterscheiden. */
 .tbl-separator-content{display:flex;align-items:center;gap:8px;width:100%;}
-.tbl-separator-line{display:block;flex:1;height:1px;background:var(--border);}
+.tbl-separator-line{display:block;flex:1;height:2px;background:var(--border-strong);}
+/* Leerzeile: Trennlinie ohne sichtbare Linie, behält ihre Höhe. */
+.tbl-separator-content.is-blank{min-height:1.2em;}
+.tbl-separator-content.is-blank .tbl-separator-line{background:transparent;}
 .tbl-separator-label{
   color:var(--ink-muted);font-size:calc(11px * var(--font-scale, 1));font-weight:600;
   letter-spacing:.035em;text-transform:uppercase;white-space:nowrap;
@@ -1567,6 +1602,12 @@ tr.tbl-bold.tbl-separator-row .tbl-separator-label{font-weight:700;color:var(--i
 }
 .dash-period-banner strong{font-weight:600;}
 .dash-period-banner-sep{opacity:.6;}
+/* Hinweis „4 Kacheln pro Zeile“: wird nur bei breiter Darstellung gerendert (Server), sichtbar ab 1500px. */
+.dash-hint-four{display:none;align-items:center;gap:10px;margin:10px 0 12px;padding:8px 12px;background:var(--accent-line-soft, var(--surface));border:1px solid var(--accent-line);border-radius:8px;font-size:calc(13px * var(--font-scale, 1));}
+.dash-hint-four-text{flex:1;}
+.dash-hint-four-sub{display:block;color:var(--ink-faint);font-size:calc(12px * var(--font-scale, 1));}
+.dash-hint-four-close{font:inherit;font-size:calc(18px * var(--font-scale, 1));line-height:1;background:none;border:none;color:var(--ink-faint);cursor:pointer;padding:0 4px;}
+@media (min-width:1500px){.dash-hint-four{display:flex;}}
 .dash-period-banner-back{
   font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer;
   text-decoration:underline;text-underline-offset:2px;
@@ -1575,6 +1616,28 @@ tr.tbl-bold.tbl-separator-row .tbl-separator-label{font-weight:700;color:var(--i
 .dash-period-banner-back:hover{color:var(--ink);}
 @media (max-width:480px){.dash-period-banner-paused{display:none;}}
 @media (max-width:480px){.dash-period-nav{width:100%;margin-left:0;justify-content:center;}}
+/* Titel + Zeitraum-Leiste (+ Rückblick-Hinweis) bleiben beim Scrollen unter der Kopfleiste (.topnav, 57px) stehen,
+   in der Optik der Jahre-Leiste (.wt-scope). Nur mit eingeschalteter Zeitraum-Navigation (is-sticky). */
+.dash-sticky-bar.is-sticky{position:sticky;top:57px;z-index:10;padding:8px 12px;margin-bottom:14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);}
+/* Weniger Abstand zur Topnav (deren 28 px Unterrand gilt für alle Seiten, hier nur die Titelleiste der Dashboards). */
+.dash-sticky-bar.is-sticky{margin-top:-12px;}
+.dash-sticky-bar.is-sticky h1,.dash-sticky-bar.is-sticky h2{margin:0;}
+.dash-sticky-bar.is-sticky h1{font-size:calc(20px * var(--font-scale, 1));}
+.dash-sticky-bar.is-sticky .dashboard-head{margin-bottom:0;}
+.dash-sticky-bar.is-sticky .dash-period-banner{margin:8px 0 0;}
+/* Auf dem Smartphone bricht die Leiste auf drei Zeilen (etwa 160px von 800): dort scrollt sie mit, wie bisher. */
+@media (max-width:640px){.dash-sticky-bar.is-sticky{position:static;}}
+/* Wetter- und Energiedashboard: die Reiterzeile trägt rechts die Zeitraum-Steuerung (ein Streifen statt Reiterzeile plus eigener Leiste)
+   und bleibt beim Scrollen unter der Kopfleiste stehen. Die Linie unter den Reitern kommt vom Rahmen des Streifens; Smartphone:
+   die Steuerung bricht in eine zweite Zeile, deshalb dort kein Kleben. */
+.dash-tabs-bar{position:sticky;top:57px;z-index:10;min-height:calc(48px * var(--font-scale, 1));display:flex;align-items:center;gap:4px 16px;margin:14px 0;padding:0 14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);}
+.dash-tabs-bar .entity-tabs{flex:1 1 auto;min-width:0;margin:0 !important;border-bottom:0;}
+.dash-tabs-bar-end{margin-left:auto;flex:none;padding:6px 0;}
+@media (max-width:640px){
+  .dash-tabs-bar{position:static;flex-wrap:wrap;}
+  .dash-tabs-bar .entity-tabs{flex:1 1 100%;}
+  .dash-tabs-bar-end{margin-left:0;width:100%;}
+}
 
 /* Kalender-Widget dafür, identisch zu den Kopien in chart_editor.css,
    entity_detail.css, cleanup.css und table_editor.css (siehe
@@ -1943,6 +2006,10 @@ button[data-tooltip]{cursor:pointer;}
   font-weight:500;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;
 }
 .entity-fact-cat{display:block;margin-top:4px;}
+/* Geändertes Feld der Kennzahlen-Leiste nach dem Nachladen des Verlaufs: kurz hervorheben, dann ausblenden. */
+.entity-fact.fact-flash{animation:fact-flash 1.6s ease-out;}
+@keyframes fact-flash{from{background:var(--accent-bar-soft);}to{background:transparent;}}
+@media (prefers-reduced-motion:reduce){.entity-fact.fact-flash{animation:none;}}
 .entity-fact dd small{
   display:block;font-size:calc(11.5px * var(--font-scale, 1));font-weight:400;color:var(--ink-faint);
 }
@@ -2391,7 +2458,7 @@ footer{margin-top:20px;font-family:var(--font-mono);font-size:calc(11px * var(--
 /* Die Reiterzeile selbst kommt aus app.css (.entity-tabs); hier nur, was eine Schaltfläche statt eines Links braucht. */
 button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
 /* Karten wie im Energiedashboard (.edash-card): 12 px Rundung, 16×18 Innenabstand, leichter Schatten, Titel 14 px. */
-.wt-card{padding:16px 18px;border-radius:12px;box-shadow:var(--shadow);}
+.wt-card{padding:16px 18px;border-radius:12px;box-shadow:var(--shadow),var(--tile-lift);}
 .wt-card ~ .wt-card{margin-top:16px;}
 .wt-h2{font-size:calc(14px * var(--font-scale, 1));font-weight:600;margin:0;flex:1 1 220px;}
 .wt-card-head{justify-content:space-between;}
@@ -2401,6 +2468,12 @@ button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
 .wt-card-sep{border-top:1px solid var(--border);margin:18px 0 12px;}
 .wt-h3{margin:0;font-size:calc(14px * var(--font-scale, 1));font-weight:600;}
 .wt-controls-end{margin-left:auto;}
+/* Jahre-Auswahl des Reiters Langzeit (Energie, Wetter): rechts in der Reiterzeile (.dash-tabs-bar-end), wie der Zeitraum der anderen Reiter. */
+.wt-scope-years{display:flex;align-items:center;gap:10px;}
+.wt-scope-lab{font-size:calc(13px * var(--font-scale, 1));color:var(--ink-muted);}
+.wt-scope-lab b{color:var(--ink);font-weight:600;font-size:calc(14px * var(--font-scale, 1));}
+/* Zusatz hinter dem Titel „Rekorde“ der Langzeit-Reiter: ab wann gezählt wird. */
+.wt-rec-scope{margin-left:6px;font-size:calc(13px * var(--font-scale, 1));font-weight:400;color:var(--ink-muted);}
 .wt-stand{margin:0 0 10px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);}
 .wt-table td.wt-loading{text-align:left;color:var(--ink-faint);padding:18px 12px;}
 /* Steuerung über der Tabelle */
@@ -2432,6 +2505,7 @@ button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
 .wt-table tbody th .wt-qual{font-size:calc(11px * var(--font-scale, 1));color:var(--ink-faint);}
 .wt-table .wt-sep{border-left:1px solid var(--border);}
 .wt-table tr.wt-grp th{font-size:calc(11.5px * var(--font-scale, 1));font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--accent-line);text-align:left;padding-top:12px;border-bottom:1px solid var(--border-strong);white-space:nowrap;}
+.wt-table tr.wt-sub th{font-size:calc(12px * var(--font-scale, 1));font-weight:600;color:var(--ink-muted);text-align:left;padding-top:8px;padding-bottom:2px;border-bottom:0;white-space:nowrap;}
 .wt-table td .wt-v{font-weight:600;color:var(--ink);}
 .wt-table td.wt-vj .wt-v{font-weight:400;color:var(--ink-muted);}
 .wt-table td[data-tooltip-fixed]{cursor:help;}
@@ -2446,6 +2520,18 @@ button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
 .wt-table td .wt-dl.wt-dl-bad{color:var(--danger);}
 
 .wt-chart{width:100%;height:300px;}
+.wt-rooms{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px;}
+.wt-room-chip,.wt-room-all{font:inherit;font-size:calc(12.5px * var(--font-scale, 1));padding:3px 11px;border:1px solid var(--border-strong);border-radius:99px;background:transparent;color:var(--ink-muted);cursor:pointer;}
+.wt-room-chip[aria-pressed="true"]{background:var(--surface-alt);color:var(--ink);border-color:var(--accent-line);}
+.wt-room-all{border-style:dashed;}
+.wt-room-item{display:contents;}
+.wt-room-floor{flex:0 0 100%;font-size:calc(11px * var(--font-scale, 1));font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-faint);margin-top:2px;}
+.wt-table tr.wt-floor th{font-size:calc(12px * var(--font-scale, 1));font-weight:600;color:var(--ink);text-align:left;padding:8px 10px;background:var(--surface-alt);border-bottom:1px solid var(--border-strong);white-space:nowrap;}
+.wt-table tr.is-toggle th{cursor:pointer;}
+.wt-table tr.is-toggle th:focus-visible{outline:2px solid var(--accent-line);outline-offset:-2px;}
+.wt-floor-chev{display:inline-block;color:var(--ink-muted);transition:transform .15s;}
+.wt-floor.is-closed .wt-floor-chev,.wt-room.is-closed .wt-floor-chev{transform:rotate(-90deg);}
+.wt-room-chip:focus-visible,.wt-room-all:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;}
 .wt-seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;}
 .wt-seg button{background:var(--surface);border:0;padding:5px 12px;font:inherit;font-size:calc(13px * var(--font-scale, 1));color:var(--ink-muted);cursor:pointer;}
 .wt-seg button + button{border-left:1px solid var(--border);}
@@ -2506,6 +2592,9 @@ button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
 .wt-kt-bar i{display:block;height:100%;background:var(--chart-1);border-radius:3px;}
 .wt-kt-val{text-align:right;white-space:nowrap;color:var(--ink-muted);}
 .wt-kt-val b{color:var(--ink);font-weight:600;}
+.wt-kt-none{cursor:default;}
+.wt-kt-none:hover{background:none;}
+.wt-kt-none .wt-kt-val{color:var(--ink-faint);font-style:italic;}
 @media (max-width:760px){.wt-kt{grid-template-columns:minmax(0,1fr);}}
 .wt-yearbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:16px 0;}
 .wt-yearbar-label{font-size:calc(13px * var(--font-scale, 1));font-weight:600;color:var(--ink);}
@@ -2531,6 +2620,21 @@ button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
 
 /* Kacheln (Wetterdashboard, Rekorde im Energiedashboard): Kopfbalken in der Rollenfarbe, Beschriftung in Großbuchstaben, Wert in Monospace. */
 .wt-kpis{display:grid;grid-template-columns:repeat(var(--wt-cols, 3),minmax(0,1fr));gap:10px;margin:8px 0 14px;}
+/* Rekorde im Energiedashboard: große Kennzahlen wie im Wetterdashboard, eine Kachel je Rolle in deren Farbe */
+.el-rec{display:grid;grid-template-columns:repeat(var(--el-rec-cols, 4),minmax(0,1fr));gap:10px;margin:8px 0 6px;}
+.el-rec-big{--c:var(--chart-8);display:block;min-width:0;padding:10px 12px;border-radius:12px;color:inherit;text-decoration:none;
+  border:1px solid color-mix(in srgb, var(--c) 28%, transparent);
+  background:linear-gradient(180deg, color-mix(in srgb, var(--c) 11%, var(--surface)), color-mix(in srgb, var(--c) 4%, var(--surface)));}
+a.el-rec-big[href]:hover{background:color-mix(in srgb, var(--c) 16%, var(--surface));}
+a.el-rec-big[href]:focus-visible{outline:2px solid var(--c);outline-offset:-2px;}
+.el-rec-head{display:flex;align-items:center;gap:8px;}
+.el-rec-badge{width:24px;height:24px;border-radius:50%;background:var(--c);display:grid;place-items:center;flex:none;}
+.el-rec-badge svg{width:14px;height:14px;stroke:var(--accent-contrast);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
+.el-rec-k{font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);}
+.el-rec-bv{display:block;margin-top:4px;font-size:calc(30px * var(--font-scale, 1));font-weight:700;line-height:1.15;letter-spacing:-.01em;font-variant-numeric:tabular-nums;white-space:nowrap;color:color-mix(in srgb, var(--c) 82%, var(--ink));}
+.el-rec-bv small{font-size:calc(14px * var(--font-scale, 1));font-weight:500;letter-spacing:0;color:var(--ink-muted);margin-left:3px;}
+.el-rec-chip{display:inline-block;margin-top:4px;padding:1px 9px;border-radius:99px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);background:color-mix(in srgb, var(--c) 12%, transparent);}
+@media (max-width:820px){.el-rec{grid-template-columns:repeat(2,minmax(0,1fr));}.el-rec-bv{font-size:calc(26px * var(--font-scale, 1));}}
 .wt-record-link{font-size:calc(12px * var(--font-scale, 1));color:var(--accent-line);margin-top:2px;}
 /* Kacheln: Aufbau wie die Kennzahl-Kacheln des Energiedashboards (Kopfbalken in der Rollenfarbe,
    Beschriftung in Großbuchstaben, Wert in Monospace); ganze Kachel verlinkt auf die Entität. */
@@ -2544,7 +2648,7 @@ button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
 .wt-tile[data-role="humidity"]{--wt-accent:var(--chart-6);}
 .wt-tile[data-role="pressure"]{--wt-accent:var(--chart-4);}
 .wt-tile[data-role="wind"],.wt-tile[data-role="gust"]{--wt-accent:var(--chart-8);}
-.wt-tile[data-role="radiation"]{--wt-accent:var(--chart-7);}
+.wt-tile[data-role="radiation"],.wt-tile[data-role="illuminance"]{--wt-accent:var(--chart-7);}
 .wt-tiles[style*="--wt-cols:1"] .wt-tile{max-width:280px;}
 .wt-tile.wt-tile-wide{grid-column:1 / -1;}
 .wt-tile.is-loading{border-top-color:var(--border-strong);color:var(--ink-faint);animation:wt-pulse 1.2s ease-in-out infinite alternate;}
@@ -2557,3 +2661,103 @@ button.entity-tab{background:none;border:0;cursor:pointer;font-family:inherit;}
 @media (max-width:640px){
   .wt-kpis{--wt-cols:2 !important;}
 }
+
+/* Einstellungen → Darstellung → Kacheln der Übersicht (overview_tiles.py): sortierbare Liste mit Schalter. */
+.ov-set-row{flex-wrap:wrap;}
+.ov-set-count{font-weight:400;color:var(--ink-faint);font-size:calc(12px * var(--font-scale, 1));margin-left:6px;}
+.ov-set-list{list-style:none;margin:0;padding:0;border:1px solid var(--border);border-radius:10px;overflow:hidden;
+  flex:1 1 100%;min-width:0;}
+.ov-set-list li{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--surface);
+  font-size:calc(13.5px * var(--font-scale, 1));}
+.ov-set-list li:last-child{border-bottom:0;}
+.ov-set-list li.is-off{color:var(--ink-faint);background:var(--surface-alt);}
+.ov-set-list .sw{width:10px;height:10px;border-radius:3px;flex:none;}
+.ov-set-list .nm{flex:1;min-width:0;overflow-wrap:break-word;}
+.ov-set-list .tag{font-size:calc(11.5px * var(--font-scale, 1));color:var(--ink-faint);margin-left:4px;white-space:nowrap;}
+.ov-set-move{border:1px solid var(--border);background:var(--surface);color:var(--ink-muted);border-radius:6px;width:26px;height:26px;
+  padding:0;cursor:pointer;line-height:1;}
+.ov-set-move:hover:not(:disabled){border-color:var(--accent-line);color:var(--accent-line);}
+.ov-set-move:disabled{opacity:.3;cursor:default;}
+.ov-set-toggle{position:relative;flex:none;width:30px;height:17px;border:0;border-radius:999px;background:var(--border-strong);cursor:pointer;padding:0;}
+.ov-set-toggle::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:999px;background:var(--surface);transition:left .15s;}
+.ov-set-toggle.is-on{background:var(--accent-line);}
+.ov-set-toggle.is-on::after{left:15px;}
+.ov-set-toggle:disabled{opacity:.4;cursor:default;}
+
+/* Breite Darstellung (experimentell, Einstellungen → Darstellung): Rahmen von Kopfzeile, Seiten mit
+   .page-wide und Backup-Leiste wachsen auf --page-max (1920px), darüber stehen sie mittig. Alle
+   anderen Seiten (Formulare, Einstellungen, Energie- und Wetterdashboard) behalten --page-narrow und
+   stehen mittig (margin:0 auto von .page bzw. .rw-bar-in). Nur ab 1200px, darunter alles wie bisher. */
+@media (min-width:1200px){
+  :root[data-page-layout="wide"]{--page-max:1920px;}
+  :root[data-page-layout="wide"] .page:not(.page-wide),
+  :root[data-page-layout="wide"] .rw-bar-in{max-width:var(--page-narrow);}
+}
+
+/* Chip für das automatische Nachladen (neben "CSV"): im Normalfall leise, bei Pause gelb. */
+.refresh-wrap{position:relative;display:inline-block;}
+.refresh-chip{
+  display:inline-flex;align-items:center;gap:7px;border:1px solid transparent;border-radius:999px;cursor:pointer;
+  padding:5px 11px;font:inherit;font-size:calc(12.5px * var(--font-scale, 1));font-variant-numeric:tabular-nums;
+  background:var(--accent-bar-soft);color:var(--accent-bar);
+}
+.refresh-chip.paused{background:var(--warning-soft);color:var(--warning);}
+.refresh-dot{width:8px;height:8px;border-radius:50%;background:currentColor;}
+.refresh-chip:not(.paused) .refresh-dot{animation:refresh-pulse 2s ease-in-out infinite;}
+@keyframes refresh-pulse{50%{opacity:.35;}}
+@media (prefers-reduced-motion:reduce){.refresh-chip .refresh-dot{animation:none !important;}}
+.refresh-menu{left:auto;right:0;width:250px;}
+/* Schmale Bildschirme: der Chip sitzt nicht mehr am rechten Rand, das Menü hängt dann am Seitenrand statt am Chip. */
+@media (max-width:640px){
+  .refresh-menu{position:fixed;top:auto;left:16px;right:16px;width:auto;}
+}
+.refresh-info{padding:6px 10px 8px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);font-variant-numeric:tabular-nums;}
+.refresh-state{color:var(--ink-muted);font-size:calc(12px * var(--font-scale, 1));}
+.chart-legend-plain{display:contents;}
+
+/* Seite im Kachel-Popup des Dashboards (iframe, ?popup=1, Roadmap 1.55): nur
+   lesend, ohne Seitenkopf, Rücklinks und Reiter — Titel und „Bearbeiten“ stehen im
+   Rahmen des Popups (tile-popup.js). */
+html[data-popup] .popup-hide,html[data-popup] [data-dynamic-back]{display:none !important;}
+html[data-popup] body{background:var(--surface);padding-top:0;}
+html[data-popup] .page{margin-top:0;padding-top:10px;}
+html[data-popup] .chart-title-row-end > .period-label{display:none !important;}
+
+/* Verlaufs-Popup einer Kachel (tile-popup.js, Roadmap 1.55): Dialog mit der
+   bestehenden Seite der Kachel als iframe. Auf dem Smartphone ein Blatt von unten
+   über die volle Breite. */
+.tile-popup{width:min(1100px,calc(100vw - 32px));height:min(820px,calc(100vh - 32px));max-height:none;padding:0;overflow:hidden;
+  border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--ink);box-shadow:0 12px 40px rgba(0,0,0,.28);}
+.tile-popup[open]{display:flex;flex-direction:column;}
+.tile-popup::backdrop{background:rgba(14,21,18,.48);}
+.tile-popup-head{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);flex:none;}
+.tile-popup-title{margin:0;flex:1;min-width:0;font-size:calc(16px * var(--font-scale, 1));font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tile-popup-edit{text-decoration:none;padding:7px 18px;}
+.tile-popup-close{padding:0;width:30px;height:30px;border-radius:50%;line-height:1;flex:none;}
+.tile-popup-frame{flex:1;width:100%;border:0;min-height:0;background:var(--surface);}
+.tile-popup-foot{flex:none;display:flex;justify-content:space-between;gap:12px;padding:8px 16px;border-top:1px solid var(--border);
+  font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);}
+.tile-popup-foot a{color:var(--accent-line);}
+@media (max-width:640px){
+  .tile-popup{width:100vw;max-width:100vw;height:calc(100dvh - 24px);margin:auto 0 0;border-radius:18px 18px 0 0;}
+  .tile-popup-head{flex-wrap:wrap;padding:10px 14px;}
+  .tile-popup-title{flex:1 1 0;}
+  .tile-popup-edit{order:3;flex:1 1 100%;text-align:center;}
+  .tile-popup-foot span{display:none;}
+}
+/* Im Kachel-Popup nur die Kernaussage, einzeilig: ohne die Links (sie führen aus der Ansicht heraus)
+   und ohne den Hinweis zur automatischen Bereinigung. */
+html[data-popup] .entity-purge-banner{padding:6px 10px;gap:8px;font-size:calc(13px * var(--font-scale, 1));}
+html[data-popup] .entity-purge-banner .pending-dot{margin-top:5px;}
+html[data-popup] .entity-purge-banner a,html[data-popup] .entity-purge-banner .purge-auto-note{display:none;}
+/* Titelzeile der Seite im Popup (Name, Aktuell-Chip, CSV, Anpassen) entfällt: Name und Chip stehen im Kopf des Popups. */
+html[data-popup] .chart-title-row:not(.chart-title-row-end),html[data-popup] .refresh-wrap{display:none !important;}
+.tile-popup-refresh-wrap[hidden],.tile-popup-refresh-menu[hidden]{display:none;}
+.tile-popup-refresh-menu{z-index:5;}
+html[data-popup] .settings-panel > .toolbar{margin-top:0;}
+/* Energie- und Wetterdashboard: derselbe Abstand unter der Topnav wie die Titelleiste der Dashboards (16 statt 28 px). */
+#energiedashboard-root,#wetter-root{margin-top:-12px;}
+/* Reiter „Entitäten“ (Liste, Auswahl & Verlauf, Kategorien): Titel, Beschreibung und Reiterzeile beginnen auf allen drei
+   Seiten am selben linken Rand (page-wide), damit sie beim Wechseln nicht springen. Der Inhalt von „Auswahl & Verlauf“
+   und „Kategorien“ behält seine Breite (--page-narrow) und steht mittig; die Liste ist eine Tabelle und nutzt die ganze Breite. */
+.page-head-wide > :not(h1):not(.sub):not(.entity-tabs){max-width:var(--page-narrow);margin-left:auto;margin-right:auto;}

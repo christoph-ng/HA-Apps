@@ -1,0 +1,23 @@
+{# Verlaufs-Popup der Kacheln (tile-popup.js): nur lesend, „Bearbeiten“ führt auf die bisherige Seite. #}
+<dialog id="tile-popup" class="tile-popup" aria-labelledby="tile-popup-title">
+  <div class="tile-popup-head">
+    <h2 class="tile-popup-title" id="tile-popup-title"></h2>
+    <a class="btn btn-primary tile-popup-edit" href="#">{{ _("Bearbeiten") }}</a>
+    {# Chip „Aktuell“ der Seite im iframe, hier im Kopf statt in einer eigenen Zeile (tile-popup.js). #}
+    <span class="refresh-wrap tile-popup-refresh-wrap" hidden>
+      <button type="button" class="refresh-chip tile-popup-refresh" aria-haspopup="menu" aria-expanded="false">
+        <span class="refresh-dot"></span><span class="tile-popup-refresh-text"></span>
+      </button>
+      <div class="menu-popover menu-popover-narrow refresh-menu tile-popup-refresh-menu" role="menu" hidden>
+        <div class="refresh-info"></div>
+        <button type="button" class="menu-row" role="menuitem" data-refresh="now">{{ _("Jetzt aktualisieren") }}</button>
+        <button type="button" class="menu-row" role="menuitem" data-refresh="auto">
+          <span>{{ _("Automatisch aktualisieren") }}</span><span class="refresh-state"></span>
+        </button>
+      </div>
+    </span>
+    <button type="button" class="btn tile-popup-close" aria-label="{{ _('Schließen') }}">✕</button>
+  </div>
+  <iframe class="tile-popup-frame" title="{{ _('Verlauf') }}" src="about:blank"></iframe>
+  <div class="tile-popup-foot"><span>{{ _("Zeitraum nur für dieses Popup, das Dashboard bleibt unverändert.") }}</span><a class="tile-popup-page" href="#">{{ _("Als Seite öffnen") }} ↗</a></div>
+</dialog>

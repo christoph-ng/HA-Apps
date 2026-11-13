@@ -208,6 +208,48 @@
   // als entityOptions[].last_value (dort günstiger, aber für viele
   // Kapazitäts-Sensoren leer) und deshalb in capacityLabel() zuerst geprüft.
   resolvedCapacities: {{ resolved_capacities | tojson }},
+  // „Aus Home Assistant übernehmen“: holt die Zuordnungen aus den Rollen des Energie-Dashboards von Home Assistant und
+  // trägt sie in den noch ungespeicherten Stand ein (Felder nur, wenn leer; Listen werden angehängt; Entitäten mit
+  // vorhandener Rolle bleiben außen). Nur sichere Vorschläge; nichts wird gespeichert.
+  haBusy: false, haNote: "",
+  async takeFromHa() {
+    this.haBusy = true; this.haNote = "";
+    try {
+      const res = await fetch("energiedashboard/setup/vorschlaege");
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      if (!data.has_catalog) { this.haNote = t("Noch kein Katalog der Integration empfangen. Ohne ihn kennt Zeitarchiv die Rollen aus Home Assistant nicht."); this.haBusy = false; return; }
+      const used = new Set([this.netzbezug, this.einspeisung, ...this.erzeuger.map(r => r.entity_id), ...this.verbraucher.map(r => r.entity_id),
+        ...this.speicher.flatMap(sp => [sp.laden_entity_id, sp.entladen_entity_id, sp.soc_entity_id, sp.capacity_entity_id])].filter(Boolean));
+      let done = 0, check = 0;
+      for (const p of data.proposals) {
+        if (p.confidence !== "ok") { check += 1; continue; }
+        const [target, rest] = p.assign.split(":");
+        const ids = rest.split(",");
+        if (ids.some(id => id && used.has(id))) continue;
+        const key = target + Date.now() + Math.random();
+        if (target === "netzbezug" || target === "einspeisung") {
+          if (this[target]) continue;
+          this[target] = ids[0];
+        } else if (target === "erzeuger") {
+          this.erzeuger.push({entity_id: ids[0], name: this.nameFor(ids[0]), kwp: "", _key: key});
+        } else if (target === "verbraucher") {
+          this.verbraucher.push({entity_id: ids[0], name: this.nameFor(ids[0]), gruppe: "", parent: "", _key: key});
+        } else if (target === "speicher") {
+          this.speicher.push({name: this.nameFor(ids[0] || ids[1]), entladen_entity_id: ids[0] || "", laden_entity_id: ids[1] || "",
+            soc_entity_id: "", capacity_kwh: "", capacity_entity_id: "", _key: key});
+        } else continue;
+        ids.filter(Boolean).forEach(id => used.add(id));
+        done += 1;
+      }
+      this.haNote = done
+        ? t("{done} Zuordnungen übernommen, {check} unsichere ausgelassen. Es wurde nichts gespeichert: prüfen, ändern und dann speichern.", {done, check})
+        : t("Nichts zu ergänzen: alle Rollen aus Home Assistant sind schon zugeordnet oder es gibt keine passenden archivierten Zähler.");
+    } catch (e) {
+      this.haNote = t("Vorschläge konnten nicht geladen werden.");
+    }
+    this.haBusy = false;
+  },
   nameFor(id) {
     const o = this.entityOptions.find(o => o.entity_id === id);
     return o ? o.label : id;
@@ -373,6 +415,11 @@
     <h1>{{ _("Energiedashboard") }}</h1>
   </div>
   <p class="sub">{{ _("Wie euer Strom fließt — von der Erzeugung bis zum Verbraucher.") }}</p>
+  <div class="edash-ha-import">
+    <button type="button" class="btn" @click="takeFromHa()" :disabled="haBusy">{{ _("Aus Home Assistant übernehmen") }}</button>
+    <p class="hint hint-status" x-show="haNote" x-text="haNote" x-cloak></p>
+  </div>
+  {% if prefill_count %}<p class="hint hint-status">{{ _("{count} Zuordnungen aus dem Auswahl-Assistenten vorbelegt. Es wurde nichts gespeichert: prüfen und dann speichern.", count=prefill_count) }}</p>{% endif %}
   <form hx-post="energiedashboard/setup" hx-target="#energiedashboard-root" hx-swap="innerHTML">
 
     <section class="settings-section edash-section-allgemein">
@@ -1099,13 +1146,13 @@
       </dialog>
     </section>
 
-    {# Reiter „Langzeit“: welche Bereiche sichtbar sind und die Schwellen der Kenntage. Ein leeres Schwellenfeld heißt „Vorgabe“
+    {# Reiter „Vergleich“ und Reiter „Langzeit“: welche Bereiche sichtbar sind und die Schwellen der Kenntage. Ein leeres Schwellenfeld heißt „Vorgabe“
        (steht als Platzhalter); gespeichert werden nur geänderte Werte (siehe energie_langzeit.KENNTAGE_DEFAULTS). Abgewählt
        ist, was nicht angehakt ist (`langzeit_ausblenden`); der Block „Energie“ bleibt immer. #}
     <section class="settings-section edash-section-neutral">
-      <h2 class="settings-section-title">{{ _("Langzeit") }} {{ hint_button(_('Langzeit-Anzeige')) }}</h2>
-      <p class="settings-section-description">{{ _("Welche Bereiche der Reiter „Langzeit“ zeigt, und die Schwellen der Kenntage.") }}</p>
-      {% call hint_body() %}{{ _("Bereiche ohne passende Einrichtung (zum Beispiel Speicher ohne Speicher-Rolle) erscheinen ohnehin nicht. Energie in der Tabelle bleibt immer sichtbar.") }}{% endcall %}
+      <h2 class="settings-section-title">{{ _("Vergleich und Langzeit") }} {{ hint_button(_('Vergleich und Langzeit')) }}</h2>
+      <p class="settings-section-description">{{ _("Welche Bereiche der Reiter „Vergleich“ und „Langzeit“ erscheinen, und die Schwellen der Kenntage.") }}</p>
+      {% call hint_body() %}{{ _("Bereiche ohne passende Einrichtung (zum Beispiel Speicher ohne Speicher-Rolle oder Verbraucher ohne eingerichtete Verbraucher) erscheinen ohnehin nicht. Energie in der Tabelle bleibt immer sichtbar.") }}{% endcall %}
       {% set hidden = config.langzeit_ausblenden or [] %}
       <div class="field" style="margin-bottom:0;">
         <label>{{ _("Tabelle „Zeiträume im Vergleich“") }}</label>
@@ -1114,23 +1161,28 @@
           <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="quoten" {% if 'quoten' not in hidden %}checked{% endif %}><span>{{ _("Quoten") }}</span></label>
           <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="speicher" {% if 'speicher' not in hidden %}checked{% endif %}><span>{{ _("Speicher") }}</span></label>
           <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="pv" {% if 'pv' not in hidden %}checked{% endif %}><span>{{ _("PV-Anlage, wetterbereinigt") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="erzeuger" {% if 'erzeuger' not in hidden %}checked{% endif %}><span>{{ _("Erzeuger einzeln") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="verbraucher" {% if 'verbraucher' not in hidden %}checked{% endif %}><span>{{ _("Verbraucher und Aufteilung des Verbrauchs") }}</span></label>
         </div>
       </div>
       <div class="field" style="margin-bottom:0;margin-top:14px;">
-        <label>{{ _("Karten") }}</label>
+        <label>{{ _("Karten im Reiter „Langzeit“") }}</label>
         <div class="edash-toggle-list">
-          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="monatsvergleich" {% if 'monatsvergleich' not in hidden %}checked{% endif %}><span>{{ _("Monatsvergleich") }}</span></label>
-          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="matrix" {% if 'matrix' not in hidden %}checked{% endif %}><span>{{ _("Jahre × Monate") }}</span></label>
-          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="veraenderungen" {% if 'veraenderungen' not in hidden %}checked{% endif %}><span>{{ _("Was hat sich verändert?") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="monatsvergleich" {% if 'monatsvergleich' not in hidden %}checked{% endif %}><span>{{ _("Monatswerte als Linien") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="matrix" {% if 'matrix' not in hidden %}checked{% endif %}><span>{{ _("Monatswerte als Tabelle") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="jahresbilanz" {% if 'jahresbilanz' not in hidden %}checked{% endif %}><span>{{ _("Jahresbilanz") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="aufteilung" {% if 'aufteilung' not in hidden %}checked{% endif %}><span>{{ _("Aufteilung des Verbrauchs je Jahr") }}</span></label>
           <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="rekorde" {% if 'rekorde' not in hidden %}checked{% endif %}><span>{{ _("Rekorde") }}</span></label>
           <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="kenntage" {% if 'kenntage' not in hidden %}checked{% endif %}><span>{{ _("Kenntage je Jahr") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="tagfuertag" {% if 'tagfuertag' not in hidden %}checked{% endif %}><span>{{ _("Jahre im Vergleich, Tag für Tag") }}</span></label>
+          <label class="filter-chip"><input type="checkbox" name="langzeit_zeigen" value="wetter" {% if 'wetter' not in hidden %}checked{% endif %}><span>{{ _("Ertrag und Wetter") }}</span></label>
         </div>
       </div>
       <div class="field" style="margin:18px 0 6px;">
         <label>{{ _("Schwellen der Kenntage") }} {{ hint_button(_('Kenntage-Schwellen')) }}</label>
       </div>
       <p class="settings-section-description">{{ _("Ein leeres Feld verwendet die Vorgabe.") }}</p>
-      {% call hint_body() %}{{ _("Fast autark zählt Tage, an denen der Netzbezug höchstens (100 − Wert) % des Verbrauchs ausmacht. Sonnentage brauchen bei jedem Erzeuger die Anlagenleistung (kWp). Trübe Tage vergleichen mit dem Tagesmittel des Jahres. Die beiden Speicher-Schwellen sind Prozent der Speicherkapazität und gelten für die Entladung je Tag; ohne bekannte Kapazität erscheinen die beiden Felder nicht.") }}{% endcall %}
+      {% call hint_body() %}{{ _("Fast autark zählt Tage, an denen der Netzbezug höchstens (100 − Wert) % des Verbrauchs ausmacht. Sonnentage brauchen bei jedem Erzeuger die Anlagenleistung (kWp). Trübe Tage vergleichen mit dem Tagesmittel des Jahres. Die beiden Speicher-Schwellen sind Prozent der Speicherkapazität und gelten für die Entladung je Tag; ohne bekannte Kapazität erscheinen die beiden Felder nicht. „Tage ohne Netzbezug“ zählt Tage mit höchstens 0,1 kWh Netzbezug und hat keine Schwelle zum Einstellen.") }}{% endcall %}
       {% set kt = config.kenntage or {} %}
       <div class="edash-field-grid">
         <div class="field">
@@ -1152,6 +1204,10 @@
         <div class="field">
           <label>{{ _("Speicher kaum genutzt unter") }}</label>
           {{ number_field('kt_schwach', kt.get('speicher_schwach'), '10', '', _('% der Kapazität')) }}
+        </div>
+        <div class="field">
+          <label>{{ _("Hohe Einspeisung über") }}</label>
+          {{ number_field('kt_einsp', kt.get('einspeisung'), '20', '', _('kWh am Tag')) }}
         </div>
       </div>
     </section>

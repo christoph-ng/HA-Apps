@@ -6,8 +6,8 @@
 {% endblock %}
 {% block content %}
 
-  <div class="page">
-    <div id="wetter-root">
+  <div class="page page-wide">
+    <div id="wetter-root"{% if assign_query %} hx-get="wetterdashboard/setup?{{ assign_query }}" hx-trigger="load" hx-swap="innerHTML"{% endif %}>
       {% include "_wetter_view.html" %}
     </div>
   </div>
@@ -22,5 +22,8 @@
   {{ period_assets() }}
   <script src="{{ asset('js/wetter-layout.js') }}"></script>
   <script src="{{ asset('js/wetter-heating.js') }}"></script>
+  <script src="{{ asset('js/wetter-rooms.js') }}"></script>
+  <script src="{{ asset('js/element-table-render.js') }}"></script>
+  <script src="{{ asset('js/element-chart-render.js') }}"></script>
   <script src="{{ asset('js/wetter.js') }}"></script>
 {% endblock %}

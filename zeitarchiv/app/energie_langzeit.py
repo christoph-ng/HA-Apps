@@ -36,20 +36,33 @@ from .storage import query as query_mod
 from .storage import rollup as rollup_mod
 from .storage.index import Index
 
-COLUMN_KEYS = ("monat", "vormonat", "jahr")
+#: Spalten der Tabelle „Zeiträume im Vergleich“ (dieselben Schlüssel wie im Wetterdashboard) und die vorgewählten.
+COLUMN_KEYS = ("heute", "gestern", "monat", "vormonat", "jahr")
+DEFAULT_COLUMNS = ("monat", "vormonat", "jahr")
+#: Zeiträume der Verbraucher-Tabelle: dieselben Spalten wie in „Zeiträume im Vergleich“ (COLUMN_KEYS). Die einzelnen
+#: Jahre davor rechnet der Browser aus den Monatswerten.
+CONSUMER_PERIODS = COLUMN_KEYS
 #: Spalte -> (Zeitraum für query_mod._window, Versatz)
 COLUMN_WINDOWS = {
+    "heute": ("day", 0),
+    "gestern": ("day", -1),
     "vormonat": ("month", -1),
     "monat": ("month", 0),
     "jahr": ("year", 0),
 }
 #: Zeilen: Schlüssel, Gruppe, Beschriftung, Art (energy = kWh, pct = Prozent mit Differenz in Prozentpunkten, spec =
 #: kWh je kWp) und ob mehr davon günstig ("up"), ungünstig ("down") oder neutral (None) ist.
-#: Ausblendbare Bereiche des Reiters „Langzeit“ (Setup, `langzeit_ausblenden`): Blöcke der Vergleichstabelle und Karten.
-#: Der Block „energie“ bleibt immer, sonst wäre die Tabelle leer.
-TABLE_BLOCKS = ("energie", "quoten", "speicher", "pv")
-CARD_BLOCKS = ("monatsvergleich", "matrix", "veraenderungen", "rekorde", "kenntage")
-BLOCK_BY_GROUP = {"Energie": "energie", "Quoten": "quoten", "Speicher": "speicher", "PV-Anlage, wetterbereinigt": "pv"}
+#: Ausblendbare Bereiche (Setup, `langzeit_ausblenden`): Blöcke der Vergleichstabelle (Reiter „Vergleich“) und weitere Bereiche
+#: der Reiter „Vergleich“ und „Langzeit“. „verbraucher“ blendet die Gruppe „Verbraucher“ der Tabelle und „Aufteilung des
+#: Verbrauchs“ aus, „aufteilung“ ist die Karte „Aufteilung des Verbrauchs je Jahr“ im Reiter „Langzeit“, „matrix“ und „monatsvergleich“
+#: sind die beiden Darstellungen (Tabelle, Linien) der Karte mit den Monatswerten.
+#: „erzeuger“ ist die Gruppe mit den einzelnen Erzeugern (und deren spezifischem Ertrag in „pv“); sie erscheint nur bei zwei oder mehr
+#: Erzeugern. Der Block „energie“ bleibt immer, sonst wäre die Tabelle leer.
+TABLE_BLOCKS = ("energie", "quoten", "speicher", "pv", "erzeuger")
+CARD_BLOCKS = ("jahresbilanz", "aufteilung", "monatsvergleich", "matrix", "rekorde", "kenntage", "tagfuertag", "verbraucher", "wetter")
+BLOCK_BY_GROUP = {
+    "Energie": "energie", "Erzeuger": "erzeuger", "Quoten": "quoten", "Speicher": "speicher", "PV-Anlage, wetterbereinigt": "pv",
+}
 
 
 def hidden_blocks(config: dict) -> set[str]:
@@ -88,29 +101,45 @@ BALANCE_ROLES = ("erzeugung", "netzbezug", "einspeisung", "entladung", "ladung")
 #: mindestens GAP_MIN und GAP_FACTOR mal der Median aller Monate. Zählerrückgänge werden immer markiert.
 GAP_FACTOR = 3
 GAP_MIN = 10
-#: Rekorde erscheinen erst, wenn das Archiv der Rollen mindestens so viele Tage umfasst.
-RECORD_MIN_DAYS = 365
 #: Verbrauch, ab dem ein Tag für „fast autark“ zählt (bei weniger ist der Anteil Zufall).
 CONSUMPTION_MIN = 0.5
 #: Schwellen der Kenntage (Setup des Energiedashboards, leer = Vorgabe): Autarkie ab … %, Sonnentage ab … kWh je kWp,
 #: trübe Tage unter … % des Tagesmittels, Speicher stark genutzt ab … kWh Entladung, kaum genutzt unter … kWh.
 #: 100 % Autarkie kommt ohne großen Speicher praktisch nie vor, deshalb Vorgabe 90.
-KENNTAGE_DEFAULTS = {"autark": 90.0, "sonnig": 4.0, "truebe": 10.0, "speicher_stark": 80.0, "speicher_schwach": 10.0}
+#: Dazu „Einspeisung über … kWh am Tag“ (hohe Einspeisung). „Ohne Netzbezug“ hat keine Schwelle im Setup: NO_GRID_MAX.
+KENNTAGE_DEFAULTS = {
+    "autark": 90.0, "sonnig": 4.0, "truebe": 10.0, "speicher_stark": 80.0, "speicher_schwach": 10.0, "einspeisung": 20.0,
+}
 KENNTAGE_LIMITS = {
     "autark": (50.0, 100.0), "sonnig": (1.0, 8.0), "truebe": (1.0, 50.0),
-    "speicher_stark": (10.0, 300.0), "speicher_schwach": (1.0, 50.0),
+    "speicher_stark": (10.0, 300.0), "speicher_schwach": (1.0, 50.0), "einspeisung": (1.0, 200.0),
 }
+#: Höchster Netzbezug in kWh, den ein Tag „ohne Netzbezug“ haben darf (Zählerrauschen und Standby-Reste).
+NO_GRID_MAX = 0.1
 #: Kenntage in Anzeigereihenfolge: Schlüssel, Gruppe, Rollen, deren Wert der Tag braucht. Die Felder bilden Paare.
 KENNTAGE: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("fast_autark", "eigenversorgung", ("netzbezug",)),
+    ("ohne_netz", "eigenversorgung", ("netzbezug",)),
     ("ueberschuss", "eigenversorgung", ("einspeisung",)),
+    ("einspeisung_hoch", "eigenversorgung", ("einspeisung",)),
     ("sonnig", "erzeugung", ("erzeugung",)),
     ("truebe", "erzeugung", ("erzeugung",)),
     ("speicher_stark", "speicher", ("entladung",)),
     ("speicher_schwach", "speicher", ("entladung",)),
 )
+#: Größen der Karte „Jahre im Vergleich, Tag für Tag“ (Tageswerte aus usable_days).
+DAY_FIELDS = ("erzeugung", "verbrauch", "netzbezug")
+#: Die Farbskala der Tagesfelder endet beim 99. Perzentil, damit ein einzelner Ausreißertag nicht alle anderen blass macht.
+DAY_SCALE_PERCENTILE = 0.99
 #: Lebensdauer des Tage-Zwischenspeichers (der Kalender liest dieselben Tage noch einmal).
 DAYS_CACHE_SECONDS = 300
+
+#: Ertrag je Sonnenstunde: Ein Monat zählt ab so vielen Tagen mit Erzeugung und Sonnenstunden, und die Sonnenstunden dieser Tage
+#: müssen für einen Quotienten reichen (im Winter sind es wenige, ein paar Minuten Sonne ergäben Ausreißer).
+YIELD_MIN_DAYS = 10
+YIELD_MIN_SUN_HOURS = 20.0
+#: Verbrauch gegen Außentemperatur: unter so vielen Tagen mit beiden Werten bleibt das Diagramm leer.
+TEMPERATURE_MIN_DAYS = 30
 #: Verbraucher der Veränderungsliste (nach Betrag der Änderung).
 CHANGES_LIMIT = 8
 #: Rekordzeilen: Schlüssel, Rolle (Verbrauch rechnet sich aus der Bilanz), Beschriftung.
@@ -123,11 +152,23 @@ RECORDS: tuple[tuple[str, str, str], ...] = (
 
 
 class TableRequest(BaseModel):
-    columns: list[str] = Field(default_factory=lambda: list(COLUMN_KEYS))
+    columns: list[str] = Field(default_factory=lambda: list(DEFAULT_COLUMNS))
     vorjahr: bool = True
     mode: str = "bis_jetzt"
     #: Stichtag (JJJJ-MM-TT): die Tabelle zeigt dann die Zeiträume zu diesem Tag statt zu „jetzt“.
     at: str | None = None
+
+
+class ConsumersRequest(BaseModel):
+    #: Stichtag (JJJJ-MM-TT) der Rangliste „Verbraucher im Jahr“, wie in der Vergleichstabelle.
+    at: str | None = None
+    #: Ohne Monatswerte nur das Fenster der Rangliste: Die Stichtag-Leiste lädt dann nicht alle Jahre neu.
+    months: bool = True
+    #: Zeiträume (aus CONSUMER_PERIODS) für die Tabelle „Zeiträume im Vergleich je Verbraucher“: je Verbraucher Wert
+    #: und Vorjahreswert.
+    periods: list[str] = Field(default_factory=lambda: list(CONSUMER_PERIODS))
+    #: Vorjahresvergleich der Zeiträume wie in TableRequest: „bis_jetzt“ (dasselbe Stück) oder „komplett“ (ganzer Zeitraum).
+    mode: str = "bis_jetzt"
 
 
 def role_entities(config: dict) -> dict[str, list[str]]:
@@ -150,6 +191,18 @@ def pv_entities(config: dict) -> list[tuple[str, float]]:
         for e in config.get("erzeuger") or []
         if e.get("entity_id") and e.get("kwp") and float(e["kwp"]) > 0
     ]
+
+
+def producers(config: dict) -> list[dict]:
+    """Die eingetragenen Erzeuger mit Entität (eine Entität nur einmal), in der Reihenfolge des Setups."""
+    seen: set[str] = set()
+    out = []
+    for erz in config.get("erzeuger") or []:
+        entity_id = erz.get("entity_id")
+        if entity_id and entity_id not in seen:
+            seen.add(entity_id)
+            out.append(erz)
+    return out
 
 
 def is_configured(config: dict) -> bool:
@@ -204,8 +257,14 @@ def kenntag_hit(
         if day["netzbezug"] is None:
             return None
         return day["verbrauch"] >= CONSUMPTION_MIN and day["netzbezug"] <= day["verbrauch"] * (100 - thresholds["autark"]) / 100 + 1e-9
+    if key == "ohne_netz":
+        if day["netzbezug"] is None:
+            return None
+        return day["verbrauch"] >= CONSUMPTION_MIN and day["netzbezug"] <= NO_GRID_MAX
     if key == "ueberschuss":
         return None if day["einspeisung"] is None else day["einspeisung"] > day["verbrauch"] > 0
+    if key == "einspeisung_hoch":
+        return None if day["einspeisung"] is None else day["einspeisung"] > thresholds["einspeisung"]
     if key == "sonnig":
         return None if day["erzeugung"] is None or not kwp else day["erzeugung"] / kwp >= thresholds["sonnig"]
     if key == "truebe":
@@ -215,6 +274,43 @@ def kenntag_hit(
     if key == "speicher_schwach":
         return None if day.get("entladung") is None or not capacity else day["entladung"] / capacity * 100 < thresholds["speicher_schwach"]
     return None
+
+
+def top_consumers(config: dict) -> list[dict]:
+    """Verbraucher der obersten Ebene (ohne Zwischenzähler darüber). Geräte hinter einem Zwischenzähler fehlen:
+    ihr Wert steckt im Zwischenzähler und zählte sonst doppelt."""
+    return [c for c in config.get("verbraucher") or [] if c.get("entity_id") and not c.get("parent")]
+
+
+def merge_findings(
+    findings: dict[str, dict], entity_ids, value_months: set[str],
+) -> tuple[dict[str, dict[str, int]], int]:
+    """Befunde mehrerer Entitäten je Monat zusammengefasst (``data_quality.monthly_findings``) plus die Zahl der
+    noch nicht geprüften Entitäten. Lücken bleiben nur in Monaten stehen, die deutlich über dem üblichen Wert der
+    Monate mit Werten (value_months, „JJJJ-MM“) liegen, siehe GAP_FACTOR; Zählerrückgänge bleiben immer."""
+    months: dict[str, dict[str, int]] = {}
+    unchecked = 0
+    for entity_id in sorted(set(entity_ids)):
+        info = findings.get(entity_id)
+        if info is None or not info["measured"]:
+            unchecked += 1
+            continue
+        for month_key, counts in info["months"].items():
+            bucket = months.setdefault(month_key, {})
+            for kind, amount in counts.items():
+                bucket[kind] = bucket.get(kind, 0) + amount
+    typical = statistics.median([months.get(key, {}).get("gaps", 0) for key in value_months] or [0])
+    limit = max(GAP_MIN, GAP_FACTOR * typical)
+    for key in list(months):
+        counts = months[key]
+        if "gaps" in counts:
+            if counts["gaps"] < limit:
+                del counts["gaps"]
+            else:
+                counts["gaps_typical"] = int(typical)
+        if not counts:
+            del months[key]
+    return months, unchecked
 
 
 def balance(parts: dict[str, float | None]) -> float | None:
@@ -230,6 +326,28 @@ def balance(parts: dict[str, float | None]) -> float | None:
         - max(parts["einspeisung"] or 0.0, 0.0)
         - (parts["ladung"] or 0.0)
     )
+
+
+def flow_metrics(sums: dict[str, float | None]) -> dict[str, float | None]:
+    """Kennzahlen aus den Summen je Rolle: die Energiezeilen, der Verbrauch als Bilanz sowie Autarkie und Eigenverbrauch
+    (dieselben Formeln wie in compute_flow, auf 0 bis 100 begrenzt wegen Rundungsrauschen kleiner Summen)."""
+    metrics: dict[str, float | None] = {
+        "erzeugung": sums["erzeugung"],
+        "einspeisung": max(sums["einspeisung"], 0.0) if sums["einspeisung"] is not None else None,
+        "netzbezug": max(sums["netzbezug"], 0.0) if sums["netzbezug"] is not None else None,
+        "ladung": sums["ladung"],
+        "entladung": sums["entladung"],
+    }
+    verbrauch = balance(sums)
+    metrics["verbrauch"] = round(verbrauch, 3) if verbrauch is not None else None
+    metrics["autarkie"] = None
+    if metrics["verbrauch"] and metrics["verbrauch"] > 0 and metrics["netzbezug"] is not None:
+        metrics["autarkie"] = round(max(0.0, min(1.0, 1 - metrics["netzbezug"] / metrics["verbrauch"])) * 100, 1)
+    metrics["eigenverbrauch"] = None
+    if metrics["erzeugung"] and metrics["erzeugung"] > 0:
+        export = metrics["einspeisung"] or 0.0
+        metrics["eigenverbrauch"] = round(max(0.0, min(1.0, (metrics["erzeugung"] - export) / metrics["erzeugung"])) * 100, 1)
+    return metrics
 
 
 class EnergieLangzeitService:
@@ -248,6 +366,8 @@ class EnergieLangzeitService:
         entity_series: Callable[..., tuple[dict[float, float], bool]] | None = None,
         radiation_entity: Callable[[], str] | None = None,
         storage_capacity: Callable[[dict], float | None] | None = None,
+        sun_days: Callable[[datetime], list[dict] | None] | None = None,
+        temperature_entity: Callable[[], str] | None = None,
     ) -> None:
         self.data_dir = data_dir
         self.index = index
@@ -260,8 +380,18 @@ class EnergieLangzeitService:
         #: config -> Summe der Speicherkapazität in kWh (None, wenn sie nicht bei jedem Speicher bekannt ist). Ohne sie entfällt
         #: das Speicherpaar der Kenntage.
         self.storage_capacity = storage_capacity
+        #: now -> Sonnentage der abgeschlossenen Tage aus dem Wetterdashboard (Einträge mit ``date`` und ``hours``); None, wenn dort
+        #: keine Helligkeit zugeordnet ist. Ohne sie entfällt der Ertrag je Sonnenstunde.
+        self.sun_days = sun_days
+        #: Entität der Außentemperatur aus dem Wetterdashboard (leer, wenn keine zugeordnet ist). Ohne sie entfällt das Diagramm
+        #: Verbrauch gegen Temperatur.
+        self.temperature_entity = temperature_entity
         #: (Schlüssel, Zeitpunkt, Tage): die Tageswerte, die der Jahreskalender der Kenntage nach den Kenntagen noch einmal braucht.
         self._days_cache: tuple[tuple, float, list[dict]] | None = None
+        #: Wie _days_cache, für die Jahressummen der Jahresbilanz.
+        self._years_cache: tuple[tuple, float, dict] | None = None
+        #: Wie _days_cache, für die Sonnentage des Wetterdashboards (das Lesen der Helligkeit über alle Jahre ist teuer).
+        self._sun_cache: tuple[date, float, list[dict] | None] | None = None
 
     def _rows(
         self, entity_id: str, start: datetime, end: datetime, now_local: datetime,
@@ -328,23 +458,7 @@ class EnergieLangzeitService:
     ) -> tuple[dict[str, float | None], dict[str, float | None]]:
         """Alle Kennzahlen eines Fensters (Zeilenschlüssel -> Wert) plus Archivbeginn je Rolle."""
         sums, froms = self.side_values(roles, start, end, now_local, read_cache)
-        metrics: dict[str, float | None] = {
-            "erzeugung": sums["erzeugung"],
-            "einspeisung": max(sums["einspeisung"], 0.0) if sums["einspeisung"] is not None else None,
-            "netzbezug": max(sums["netzbezug"], 0.0) if sums["netzbezug"] is not None else None,
-            "ladung": sums["ladung"],
-            "entladung": sums["entladung"],
-        }
-        verbrauch = balance(sums)
-        metrics["verbrauch"] = round(verbrauch, 3) if verbrauch is not None else None
-        # Dieselben Formeln wie in compute_flow, auf 0 bis 100 begrenzt (Rundungsrauschen bei kleinen Summen).
-        metrics["autarkie"] = None
-        if metrics["verbrauch"] and metrics["verbrauch"] > 0 and metrics["netzbezug"] is not None:
-            metrics["autarkie"] = round(max(0.0, min(1.0, 1 - metrics["netzbezug"] / metrics["verbrauch"])) * 100, 1)
-        metrics["eigenverbrauch"] = None
-        if metrics["erzeugung"] and metrics["erzeugung"] > 0:
-            export = metrics["einspeisung"] or 0.0
-            metrics["eigenverbrauch"] = round(max(0.0, min(1.0, (metrics["erzeugung"] - export) / metrics["erzeugung"])) * 100, 1)
+        metrics = flow_metrics(sums)
         metrics["spezifisch"] = None
         metrics["einstrahlung"] = None
         pv = pv_entities(config)
@@ -358,7 +472,25 @@ class EnergieLangzeitService:
                     irradiation = self.window_irradiation(radiation, start, end, now_local, read_cache)
                     if irradiation:
                         metrics["einstrahlung"] = round(yield_kwh / (kwp * irradiation) * 100, 1)
+        self._producer_metrics(config, metrics, froms, start, end, now_local, read_cache)
         return metrics, froms
+
+    def _producer_metrics(
+        self, config: dict, metrics: dict[str, float | None], froms: dict[str, float | None], start: datetime,
+        end: datetime, now_local: datetime, read_cache: query_mod.QueryReadCache,
+    ) -> None:
+        """Je Erzeuger die Energie (``erz:<Entität>``) und, mit Anlagenleistung, der spezifische Ertrag (``spez:<Entität>``); nur ab
+        zwei Erzeugern beziehungsweise zwei Anlagen mit Leistung, bei einem wäre es die Summe noch einmal."""
+        sources = producers(config)
+        if len(sources) >= 2:
+            for erz in sources:
+                entity_id = erz["entity_id"]
+                metrics[f"erz:{entity_id}"], froms[f"erz:{entity_id}"] = self.window_total([entity_id], start, end, now_local, read_cache)
+        plants = pv_entities(config)
+        if len(plants) >= 2:
+            for entity_id, power in plants:
+                yield_kwh, _first = self.window_total([entity_id], start, end, now_local, read_cache)
+                metrics[f"spez:{entity_id}"] = round(yield_kwh / power, 3) if yield_kwh is not None else None
 
     def visible_rows(self, config: dict, roles: dict[str, list[str]]) -> list[dict]:
         """Zeilen, für die die Einrichtung ausreicht; fehlende Rollen blenden ihre Zeilen aus."""
@@ -370,10 +502,31 @@ class EnergieLangzeitService:
             "spezifisch": pv, "einstrahlung": pv and radiation,
         }
         hidden = hidden_blocks(config)
-        return [
+        rows = [
             row for row in ROWS
             if shown.get(row["key"], bool(roles.get(row["key"]))) and BLOCK_BY_GROUP[row["group"]] not in hidden
         ]
+        sources = producers(config)
+        if len(sources) >= 2 and "erzeuger" not in hidden:
+            # Die einzelnen Erzeuger stehen hinter den Summen der Gruppe „Energie“, vor den Quoten.
+            extra = [
+                {"key": f"erz:{erz['entity_id']}", "group": N_("Erzeuger"), "label": self._consumer_name(erz),
+                 "better": "up", "kind": "energy"}
+                for erz in sources
+            ]
+            at = max((i for i, row in enumerate(rows) if row["group"] == "Energie"), default=-1) + 1
+            rows[at:at] = extra
+        plants = pv_entities(config)
+        if len(plants) >= 2 and "pv" not in hidden:
+            names = {erz["entity_id"]: self._consumer_name(erz) for erz in sources}
+            extra = [
+                {"key": f"spez:{entity_id}", "group": N_("PV-Anlage, wetterbereinigt"),
+                 "label": f"{tr(N_('Spezifischer Ertrag'))} · {names.get(entity_id, entity_id)}", "better": "up", "kind": "spec"}
+                for entity_id, _power in plants
+            ]
+            last = max((i for i, row in enumerate(rows) if row["group"] == "PV-Anlage, wetterbereinigt"), default=len(rows) - 1) + 1
+            rows[last:last] = extra
+        return rows
 
     def compute_table(self, config: dict, body: TableRequest, now_local: datetime | None = None) -> dict:
         now_local = now_local or datetime.now(self.tz)
@@ -456,21 +609,37 @@ class EnergieLangzeitService:
                     values[(year, month)] = by_month.get(month, 0.0)
         return values
 
-    def compute_months(self, config: dict, now_local: datetime | None = None) -> dict:
-        """Monatswerte je Rolle über alle Jahre des Archivs (neuestes Jahr zuerst), dazu Messlücken und
-        Zählersprünge je Monat. Ein Monat ohne Daten ist None, nie 0."""
-        now_local = now_local or datetime.now(self.tz)
-        roles = role_entities(config)
+    def _latest_start(self, entity_ids) -> float | None:
+        """Beginn des Archivs der zuletzt begonnenen Entität (erst ab da sind alle zusammen erfasst)."""
+        starts = [
+            entity["first_ts"] for entity_id in set(entity_ids)
+            if (entity := self.index.get_entity(entity_id)) is not None and entity["first_ts"]
+        ]
+        return max(starts) if starts else None
+
+    def _partial_start(self, entity_ids) -> list[int] | None:
+        """Monat, in dem das Archiv beginnt, wenn er nicht am 1. anfängt: er ist nur zum Teil erfasst und taugt
+        nicht für einen Vergleich. Bei mehreren Entitäten gilt die zuletzt begonnene."""
+        latest = self._latest_start(entity_ids)
+        if latest is None:
+            return None
+        moment = datetime.fromtimestamp(latest, self.tz)
+        return [moment.year, moment.month] if moment.day > 1 else None
+
+    def _years(self, entity_ids, now_local: datetime) -> list[int]:
+        """Jahre ab dem frühesten Archivbeginn der Entitäten bis heute, neuestes zuerst, höchstens MAX_YEARS."""
         first_years = [
             datetime.fromtimestamp(entity["first_ts"], self.tz).year
-            for entity_id in {e for ids in roles.values() for e in ids}
+            for entity_id in set(entity_ids)
             if (entity := self.index.get_entity(entity_id)) is not None and entity["first_ts"]
         ]
         first_year = max(min(first_years, default=now_local.year), now_local.year - MAX_YEARS + 1)
-        years = list(range(now_local.year, first_year - 1, -1))
-        read_cache = query_mod.QueryReadCache()
+        return list(range(now_local.year, first_year - 1, -1))
 
-        # Summe je Rolle und Monat; None, wenn keine Entität der Rolle in diesem Monat Daten hatte.
+    def _role_month_sums(
+        self, roles: dict[str, list[str]], years: list[int], now_local: datetime, read_cache: query_mod.QueryReadCache,
+    ) -> dict[str, dict[tuple[int, int], float]]:
+        """Summe je Rolle und Monat; ein Monat fehlt, wenn keine Entität der Rolle in ihm archiviert war."""
         sums: dict[str, dict[tuple[int, int], float]] = {}
         for role, entity_ids in roles.items():
             merged: dict[tuple[int, int], float] = {}
@@ -478,6 +647,18 @@ class EnergieLangzeitService:
                 for key, value in self._entity_months(entity_id, years, now_local, read_cache).items():
                     merged[key] = merged.get(key, 0.0) + value
             sums[role] = merged
+        return sums
+
+    def compute_months(self, config: dict, now_local: datetime | None = None) -> dict:
+        """Monatswerte je Rolle über alle Jahre des Archivs (neuestes Jahr zuerst), dazu Messlücken und
+        Zählersprünge je Monat. Ein Monat ohne Daten ist None, nie 0."""
+        now_local = now_local or datetime.now(self.tz)
+        roles = role_entities(config)
+        years = self._years({e for ids in roles.values() for e in ids}, now_local)
+        read_cache = query_mod.QueryReadCache()
+
+        # Summe je Rolle und Monat; None, wenn keine Entität der Rolle in diesem Monat Daten hatte.
+        sums = self._role_month_sums(roles, years, now_local, read_cache)
 
         def month_values(role: str, year: int) -> list[float | None]:
             out: list[float | None] = []
@@ -499,43 +680,11 @@ class EnergieLangzeitService:
             return {f"{year}-{month:02d}" for key in role_keys for (year, month) in sums[key]}
 
         def partial_start(role_keys: tuple[str, ...]) -> list[int] | None:
-            """Monat, in dem das Archiv der Rolle beginnt, wenn er nicht am 1. anfängt: er ist nur zum Teil
-            erfasst und taugt nicht für einen Vergleich. Bei mehreren Entitäten gilt die zuletzt begonnene."""
-            starts = [
-                datetime.fromtimestamp(entity["first_ts"], self.tz)
-                for entity_id in {e for key in role_keys for e in roles[key]}
-                if (entity := self.index.get_entity(entity_id)) is not None and entity["first_ts"]
-            ]
-            if not starts:
-                return None
-            latest = max(starts)
-            return [latest.year, latest.month] if latest.day > 1 else None
+            return self._partial_start({e for key in role_keys for e in roles[key]})
 
         def role_findings(role_keys: tuple[str, ...]) -> tuple[dict[str, dict[str, int]], int]:
-            months: dict[str, dict[str, int]] = {}
-            unchecked = 0
-            for entity_id in sorted({e for key in role_keys for e in roles[key]}):
-                info = findings.get(entity_id)
-                if info is None or not info["measured"]:
-                    unchecked += 1
-                    continue
-                for month_key, counts in info["months"].items():
-                    bucket = months.setdefault(month_key, {})
-                    for kind, amount in counts.items():
-                        bucket[kind] = bucket.get(kind, 0) + amount
             # Nur auffällige Lücken stehen drin, siehe GAP_FACTOR.
-            typical = statistics.median([months.get(key, {}).get("gaps", 0) for key in month_keys(role_keys)] or [0])
-            limit = max(GAP_MIN, GAP_FACTOR * typical)
-            for key in list(months):
-                counts = months[key]
-                if "gaps" in counts:
-                    if counts["gaps"] < limit:
-                        del counts["gaps"]
-                    else:
-                        counts["gaps_typical"] = int(typical)
-                if not counts:
-                    del months[key]
-            return months, unchecked
+            return merge_findings(findings, {e for key in role_keys for e in roles[key]}, month_keys(role_keys))
 
         out_roles = []
         for row in ROWS:
@@ -561,6 +710,59 @@ class EnergieLangzeitService:
             "current": {"year": now_local.year, "month": now_local.month, "day": now_local.day},
             "years": years, "roles": out_roles,
         }
+
+    # -- Jahresbilanz -------------------------------------------------------------------
+
+    def compute_years(self, config: dict, now_local: datetime | None = None) -> dict:
+        """Jahressummen je Kalenderjahr (neuestes zuerst) für die Karte „Jahresbilanz“ im Reiter „Langzeit“: Erzeugung,
+        Einspeisung, Netzbezug, Verbrauch (Bilanz) sowie Autarkie und Eigenverbrauch, einmal „komplett“ (ganzes Jahr, das
+        laufende bis jetzt) und einmal „bis jetzt“ (jedes Jahr vom 1.1. bis zum selben Kalendertag wie heute, die Rechnung
+        der Spalte „Dieses Jahr“ in der Vergleichstabelle). Ein Wert ohne Daten ist None, nie 0. ``partial_from`` nennt den
+        Archivbeginn, wenn er in diesem Jahr nach dem 1.1. liegt: das Jahr ist dann nur zum Teil erfasst."""
+        now_local = now_local or datetime.now(self.tz)
+        roles = role_entities(config)
+        key = (tuple((role, tuple(ids)) for role, ids in sorted(roles.items())), now_local.date())
+        cached = self._years_cache
+        if cached and cached[0] == key and time.monotonic() - cached[1] < DAYS_CACHE_SECONDS:
+            return cached[2]
+        every = {e for ids in roles.values() for e in ids}
+        years = self._years(every, now_local)
+        balance_ids = sorted({e for role in BALANCE_ROLES for e in roles[role]})
+        latest = self._latest_start(balance_ids)
+        first_day = datetime.fromtimestamp(latest, self.tz).date() if latest else None
+        read_cache = query_mod.QueryReadCache()
+        used = {role: ids for role, ids in roles.items() if ids}
+        keep = ("erzeugung", "einspeisung", "netzbezug", "verbrauch", "autarkie", "eigenverbrauch")
+        sources = producers(config) if len(producers(config)) >= 2 else []
+        out_years = []
+        for year in years:
+            start = datetime(year, 1, 1, tzinfo=self.tz)
+            full_end = min(datetime(year + 1, 1, 1, tzinfo=self.tz), now_local)
+            ytd_end = min(query_mod._shift_year(now_local, year - now_local.year), full_end)  # noqa: SLF001
+            entry: dict = {"year": year, "partial_from": None}
+            for name, end in (("full", full_end), ("ytd", ytd_end)):
+                sums, _froms = self.side_values(used, start, end, now_local, read_cache)
+                sums = {role: sums.get(role) for role in BALANCE_ROLES}
+                metrics = flow_metrics(sums)
+                entry[name] = {k: metrics[k] for k in keep}
+                if sources:
+                    # Je Erzeuger die Jahressumme, damit die Balken „Erzeugung“ gestapelt werden können; ohne Daten None.
+                    entry[name]["erzeuger"] = {
+                        erz["entity_id"]: self.window_total([erz["entity_id"]], start, end, now_local, read_cache)[0] for erz in sources
+                    }
+            if first_day and first_day.year == year and (first_day.month, first_day.day) > (1, 1):
+                entry["partial_from"] = first_day.isoformat()
+            out_years.append(entry)
+        have_bus = bool(roles["erzeugung"] or roles["netzbezug"])
+        shown = [role for role in MONTH_ROLES if have_bus and (role == "verbrauch" or roles[role])]
+        result = {
+            "tz": str(self.tz), "now": now_local.timestamp(), "unit": "kWh",
+            "today": now_local.date().isoformat(), "current": now_local.year,
+            "roles": shown, "years": out_years,
+            "producers": [{"key": erz["entity_id"], "name": self._consumer_name(erz)} for erz in sources],
+        }
+        self._years_cache = (key, time.monotonic(), result)
+        return result
 
     # -- Tageswerte: Rekorde und Kenntage -------------------------------------------------
 
@@ -658,34 +860,90 @@ class EnergieLangzeitService:
             })
         return out
 
-    def compute_records(self, config: dict, now_local: datetime | None = None) -> dict:
-        """Rekordtage und Kenntage je Jahr aus den Tageswerten. Rekorde gibt es erst ab RECORD_MIN_DAYS Tagen Archiv."""
+    def compute_records(self, config: dict, now_local: datetime | None = None, years: int = 0) -> dict:
+        """Rekordtage und Kenntage je Jahr aus den Tageswerten. ``years`` > 0 beschränkt die Rekorde auf die neuesten so
+        vielen Jahre mit Daten (die Auswahl „Letzte 5“ der Seite), 0 heißt alle; die Kenntage liefern immer alle Jahre.
+        Rekorde gibt es ab dem ersten Tag mit Werten; ``since`` nennt den Beginn des gezählten Zeitraums."""
         now_local = now_local or datetime.now(self.tz)
         roles = role_entities(config)
-        days = self.usable_days(config, now_local)
+        all_days = self.usable_days(config, now_local)
         today = now_local.date()
+        with_data = sorted({d["date"].year for d in all_days})
+        first_year = with_data[-years] if 0 < years < len(with_data) else None  # None: alle Jahre
+        days = [d for d in all_days if first_year is None or d["date"].year >= first_year]
         span = (days[-1]["date"] - days[0]["date"]).days + 1 if days else 0
         records = []
-        if span >= RECORD_MIN_DAYS:
-            for key, role, label in RECORDS:
-                candidates = [d for d in days if d[key] is not None]
-                if not candidates:
-                    continue
-                # Gleichstand: der frühere Tag.
-                top = max(candidates, key=lambda d: (d[key], -d["date"].toordinal()))
-                single = roles[role][0] if role != "verbrauch" and len(roles.get(role, [])) == 1 else None
-                records.append({
-                    "key": key, "label": tr(label), "value": round(top[key], 3), "date": top["date"].isoformat(),
-                    "entity_id": single, "offset": (top["date"] - today).days,
-                })
-        kenntage = self.compute_kenntage(config, days, today)
+        for key, role, label in RECORDS:
+            candidates = [d for d in days if d[key] is not None]
+            if not candidates:
+                continue
+            # Gleichstand: der frühere Tag.
+            top = max(candidates, key=lambda d: (d[key], -d["date"].toordinal()))
+            single = roles[role][0] if role != "verbrauch" and len(roles.get(role, [])) == 1 else None
+            records.append({
+                "key": key, "label": tr(label), "value": round(top[key], 3), "date": top["date"].isoformat(),
+                "entity_id": single, "offset": (top["date"] - today).days,
+            })
+        if days:
+            records.extend(self._streak_records(config, roles, days))
+        kenntage = self.compute_kenntage(config, all_days, today)
         return {
             "unit": "kWh",
             "since": days[0]["date"].isoformat() if days else None,
-            "days": len(days), "span": span, "enough": span >= RECORD_MIN_DAYS,
+            "days": len(days), "span": span, "enough": bool(days),
             "records": records,
             "kenntage": kenntage,
         }
+
+    def _streak_records(self, config: dict, roles: dict[str, list[str]], days: list[dict]) -> list[dict]:
+        """Rekorde, die aus mehreren Tagen entstehen (brauchen den Netzbezug): der Monat mit der besten Autarkie (nur ganze
+        Monate mit allen Tagen; an einzelnen Sommertagen sind 100 % häufig) und die längste Folge „fast autarker“ Tage
+        (Schwelle aus dem Setup). Gleichstand: der frühere Monat beziehungsweise die frühere Folge."""
+        if not roles["netzbezug"]:
+            return []
+        out: list[dict] = []
+        by_month: dict[tuple[int, int], list[dict]] = {}
+        for d in days:
+            by_month.setdefault((d["date"].year, d["date"].month), []).append(d)
+        best: tuple[float, tuple[int, int]] | None = None
+        for (year, month), group in sorted(by_month.items()):
+            length = (date(year + (month == 12), month % 12 + 1, 1) - date(year, month, 1)).days
+            if len(group) != length or any(d["netzbezug"] is None for d in group):
+                continue
+            use = sum(d["verbrauch"] for d in group)
+            if use <= 0:
+                continue
+            value = max(0.0, min(1.0, 1 - sum(d["netzbezug"] for d in group) / use)) * 100
+            if best is None or value > best[0]:
+                best = (value, (year, month))
+        if best is not None:
+            out.append({
+                "key": "autarkie_monat", "label": tr(N_("Beste Autarkie im Monat")), "value": round(best[0], 1),
+                "unit": "pct", "span": "month", "date": date(best[1][0], best[1][1], 1).isoformat(),
+                "entity_id": None, "offset": None,
+            })
+        thresholds = kenntage_thresholds(config)
+        run_start = run_end = None
+        run = 0
+        top: tuple[int, date, date] | None = None
+        for d in days:
+            hit = kenntag_hit("fast_autark", d, thresholds, None, None)
+            if hit and run and run_end is not None and (d["date"] - run_end).days == 1:
+                run += 1
+            elif hit:
+                run, run_start = 1, d["date"]
+            else:
+                run = 0
+            if hit:
+                run_end = d["date"]
+                if top is None or run > top[0]:
+                    top = (run, run_start, run_end)
+        if top is not None:
+            out.append({
+                "key": "autark_serie", "label": tr(N_("Längste Serie fast autark")), "value": top[0], "unit": "days",
+                "date": top[1].isoformat(), "date_end": top[2].isoformat(), "entity_id": None, "offset": None,
+            })
+        return out
 
     def compute_kenntage(self, config: dict, days: list[dict], today: date) -> dict:
         """Kenntage je Jahr: Tage mit einer Eigenschaft (Schwellen aus dem Setup) und die Tage, an denen sie sich prüfen
@@ -747,9 +1005,190 @@ class EnergieLangzeitService:
             })
         return {"field": field, "year": year, "days": out, "average": round(average, 2) if average is not None else None}
 
+    # -- Jahre im Vergleich, Tag für Tag ----------------------------------------------------
+
+    def compute_day_matrix(self, config: dict, field: str = "erzeugung", now_local: datetime | None = None) -> dict:
+        """Tageswerte einer Größe als Matrix Jahr × Kalendertag (Karte „Jahre im Vergleich, Tag für Tag“ im Reiter „Langzeit“).
+
+        Dasselbe Format wie die Jahresübersicht des Wetterdashboards (``cells`` = [Spalte, Zeile, Wert], ``missing`` = Tage
+        ohne vollständige Werte, ``min``/``max`` für die Farbskala), damit derselbe Renderer sie zeichnet. Die Spalte ist der
+        Kalendertag in einem Schaltjahr (Spalte 59 = 29.02.), die Zeile das Jahr, das neueste zuerst. Es zählen nur Tage mit
+        allen Werten (usable_days, ohne den Tag nach einem fehlenden Tag); als ``missing`` gelten die übrigen Tage ab dem
+        ersten auswertbaren bis gestern. Eine nicht verfügbare Größe fällt auf die erste verfügbare zurück."""
+        now_local = now_local or datetime.now(self.tz)
+        roles = role_entities(config)
+        have_bus = bool(roles["erzeugung"] or roles["netzbezug"])
+        available = [key for key in DAY_FIELDS if (have_bus if key == "verbrauch" else bool(roles[key]))]
+        out: dict = {
+            "unit": "kWh", "fields": available, "field": None, "years": [], "cells": [], "missing": [],
+            "min": None, "max": None, "today": now_local.date().isoformat(), "since": None,
+        }
+        if not available:
+            return out
+        field = field if field in available else available[0]
+        out["field"] = field
+        days = self.usable_days(config, now_local)
+        values = {d["date"]: d[field] for d in days if d[field] is not None}
+        if not values:
+            return out
+        today = now_local.date()
+        first = min(values)
+        out["since"] = first.isoformat()
+        years = list(range(today.year, max(first.year, today.year - MAX_YEARS + 1) - 1, -1))
+        out["years"] = years
+
+        def slot(day: date) -> int:
+            return (date(2000, day.month, day.day) - date(2000, 1, 1)).days
+
+        for row, year in enumerate(years):
+            start, stop = max(date(year, 1, 1), first), min(date(year, 12, 31), today - timedelta(days=1))
+            day = start
+            while day <= stop:
+                if day in values:
+                    out["cells"].append([slot(day), row, round(values[day], 1)])
+                else:
+                    out["missing"].append([slot(day), row])
+                day += timedelta(days=1)
+        shown = sorted(cell[2] for cell in out["cells"])
+        if shown:
+            top = shown[min(len(shown) - 1, int(DAY_SCALE_PERCENTILE * len(shown)))]
+            out["min"], out["max"] = 0.0, max(round(top, 1), 1.0)
+        return out
+
+    # -- Ertrag und Wetter ------------------------------------------------------------------
+
+    def _sun_days_cached(self, now_local: datetime) -> list[dict] | None:
+        """sun_days mit kurzem Zwischenspeicher (gleicher Tag); None, wenn das Wetterdashboard keine Helligkeit kennt."""
+        if self.sun_days is None:
+            return None
+        cached = self._sun_cache
+        if cached and cached[0] == now_local.date() and time.monotonic() - cached[1] < DAYS_CACHE_SECONDS:
+            return cached[2]
+        days = self.sun_days(now_local)
+        self._sun_cache = (now_local.date(), time.monotonic(), days)
+        return days
+
+    def temperature_sizes(self, config: dict) -> list[dict]:
+        """Größen, die sich gegen die Außentemperatur auftragen lassen: der Verbrauch laut Bilanz, der Netzbezug und die
+        Verbraucher der obersten Ebene. Schlüssel wie in der Auswahl der Karte „Monatswerte je Jahr“ („r:“ Bilanz, „c:“ Verbraucher)."""
+        roles = role_entities(config)
+        sizes: list[dict] = []
+        if roles["erzeugung"] or roles["netzbezug"]:
+            sizes.append({"key": "r:verbrauch", "label": tr("Verbrauch"), "group": "balance"})
+        if roles["netzbezug"]:
+            sizes.append({"key": "r:netzbezug", "label": tr("Netzbezug"), "group": "balance"})
+        for consumer in top_consumers(config):
+            entity = self.index.get_entity(consumer["entity_id"])
+            if entity is not None and entity["first_ts"]:
+                sizes.append({"key": f"c:{consumer['entity_id']}", "label": self._consumer_name(consumer), "group": "consumer"})
+        return sizes
+
+    def _temperature_archive(self) -> tuple[str, dict] | None:
+        """(Entität, Eintrag) der Außentemperatur, wenn sie archiviert wird; sonst None."""
+        entity_id = (self.temperature_entity() if self.temperature_entity else "") or ""
+        entity = self.index.get_entity(entity_id) if entity_id else None
+        return (entity_id, entity) if entity is not None and entity["first_ts"] else None
+
+    def compute_weather(self, config: dict, now_local: datetime | None = None) -> dict:
+        """Daten der Karte „Ertrag und Wetter“ im Reiter „Langzeit“; sie nutzt Rollen aus dem Wetterdashboard (Helligkeit und
+        Außentemperatur), ohne sie neu abzufragen.
+
+        ``yield``: Erzeugung je Sonnenstunde (kWh/h) je Monat und Jahr, None ohne Helligkeit oder Erzeugung. Berechnet wird sie
+        aus den Tagen, an denen beides vorliegt (Erzeugung nur an vollständigen Tagen, Sonnenstunden nur dort, wo der Sensor Werte
+        hat): Summe der Erzeugung durch Summe der Sonnenstunden dieser Tage. So verzerrt eine Lücke des einen Sensors den Monat
+        nicht. Ein Quotient bleibt auch im laufenden Monat gültig, dort zählen die Tage bis gestern. ``temperature`` sagt, ob das
+        Diagramm Verbrauch gegen Temperatur möglich ist, und nennt die wählbaren Größen."""
+        now_local = now_local or datetime.now(self.tz)
+        roles = role_entities(config)
+        archive = self._temperature_archive()
+        sizes = self.temperature_sizes(config) if archive else []
+        out: dict = {
+            "unit": "kWh/h", "min_days": YIELD_MIN_DAYS, "min_sun_hours": YIELD_MIN_SUN_HOURS,
+            "current": {"year": now_local.year, "month": now_local.month},
+            "sun": False, "yield": None,
+            "temperature": {
+                "available": bool(archive and sizes), "configured": archive is not None,
+                "unit": (archive[1]["unit"] if archive else None) or "°C", "sizes": sizes,
+                "min_days": TEMPERATURE_MIN_DAYS,
+            },
+        }
+        sun = self._sun_days_cached(now_local)
+        out["sun"] = sun is not None
+        if not sun or not roles["erzeugung"]:
+            return out
+        hours = {entry["date"]: entry["hours"] for entry in sun if entry.get("hours") is not None}
+        per_month: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        for day in self.usable_days(config, now_local):
+            kwh = day["erzeugung"]
+            if kwh is not None and day["date"] in hours:
+                per_month.setdefault((day["date"].year, day["date"].month), []).append((kwh, hours[day["date"]]))
+        years: dict[int, list[float | None]] = {}
+        for (year, month), pairs in per_month.items():
+            sun_hours = sum(hours_ for _kwh, hours_ in pairs)
+            if len(pairs) < YIELD_MIN_DAYS or sun_hours < YIELD_MIN_SUN_HOURS:
+                continue
+            years.setdefault(year, [None] * 12)[month - 1] = round(sum(kwh for kwh, _h in pairs) / sun_hours, 3)
+        if years:
+            keep = sorted(years, reverse=True)[:MAX_YEARS]
+            out["yield"] = {"years": {str(year): years[year] for year in sorted(keep)}}
+        return out
+
+    def compute_temperature_days(self, config: dict, size: str, now_local: datetime | None = None) -> dict:
+        """Tage mit Tagesmittel der Außentemperatur und Tageswert einer Größe (kWh), für das Streudiagramm „Verbrauch gegen
+        Temperatur“. ``size`` ist ein Schlüssel aus ``temperature_sizes``; sonst ValueError. Es zählen abgeschlossene Tage, an
+        denen die Temperatur genug Stunden Werte hat (wie im Wetterdashboard) und die Größe einen Wert; der Archivbeginn
+        der Größe ist ein halber Tag und fehlt."""
+        now_local = now_local or datetime.now(self.tz)
+        archive = self._temperature_archive()
+        sizes = {entry["key"]: entry for entry in self.temperature_sizes(config)}
+        if archive is None or size not in sizes:
+            raise ValueError(size)
+        temperature_id, temperature = archive
+        today = now_local.date()
+        midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        floor_year = today.year - MAX_YEARS + 1
+        read_cache = query_mod.QueryReadCache()
+
+        def first_day(entity: dict) -> date:
+            return max(datetime.fromtimestamp(entity["first_ts"], self.tz).date(), date(floor_year, 1, 1))
+
+        def daily(entity_id: str, entity: dict) -> list:
+            start = datetime(*first_day(entity).timetuple()[:3], tzinfo=self.tz)
+            return query_mod.query_daily_series(
+                self.data_dir, self.index, entity_id, start, midnight, self.tz, now_local, read_cache,
+            )
+
+        def day_of(point) -> date:
+            return datetime.fromtimestamp(point.day_start, self.tz).date()
+
+        values: dict[date, float] = {}
+        if size.startswith("r:"):
+            role = size[2:]
+            values = {d["date"]: d[role] for d in self.usable_days(config, now_local) if d.get(role) is not None}
+        else:
+            entity_id = size[2:]
+            entity = self.index.get_entity(entity_id)
+            first = datetime.fromtimestamp(entity["first_ts"], self.tz).date()
+            values = {
+                day_of(point): point.value or 0.0 for point in daily(entity_id, entity)
+                if day_of(point) > first  # der Archivbeginn ist ein halber Tag
+            }
+        days: list[list] = []
+        for point in daily(temperature_id, temperature):
+            day = day_of(point)
+            if point.covered and point.value is not None and day in values and day < today:
+                days.append([day.isoformat(), round(point.value, 1), round(values[day], 2)])
+        days.sort()
+        years = sorted({int(entry[0][:4]) for entry in days}, reverse=True)
+        return {
+            "size": size, "label": sizes[size]["label"], "unit": "kWh", "temperature_unit": temperature["unit"] or "°C",
+            "days": days, "years": years, "enough": len(days) >= TEMPERATURE_MIN_DAYS, "min_days": TEMPERATURE_MIN_DAYS,
+            "today": today.isoformat(),
+        }
+
     # -- Was hat sich verändert? -----------------------------------------------------------
 
-    def compute_changes(self, config: dict, body: TableRequest, now_local: datetime | None = None) -> dict:
+    def compute_changes(self, config: dict, body: TableRequest, now_local: datetime | None = None, limit: int = CHANGES_LIMIT) -> dict:
         """Verbraucher mit der größten Änderung gegenüber dem Vorjahr im Zeitraum „Dieses Jahr“ (gleiche Fenster
         und gleicher Stichtag wie die Vergleichstabelle). Geräte hinter einem Zwischenzähler fehlen: ihr Wert
         steckt im Zwischenzähler. Der Rest bis zum Verbrauch laut Bilanz erscheint als „Übrige (Grundlast)“."""
@@ -760,9 +1199,7 @@ class EnergieLangzeitService:
         win = period_columns.column_windows(COLUMN_WINDOWS, "jahr", now_local, mode, anchor)
         roles = role_entities(config)
         read_cache = query_mod.QueryReadCache()
-        consumers = [
-            c for c in config.get("verbraucher") or [] if c.get("entity_id") and not c.get("parent")
-        ]
+        consumers = top_consumers(config)
         items: list[dict] = []
         measured = {"cur": 0.0, "vj": 0.0}
         for consumer in consumers:
@@ -787,10 +1224,185 @@ class EnergieLangzeitService:
             both = item["cur"] is not None and item["vj"] is not None
             item["diff"] = round(item["cur"] - item["vj"], 3) if both else None
             item["percent"] = round(item["diff"] / item["vj"] * 100, 1) if both and item["vj"] else None
-        ranked = sorted((i for i in items if i["diff"] is not None), key=lambda i: -abs(i["diff"]))[:CHANGES_LIMIT]
+        ranked = sorted((i for i in items if i["diff"] is not None), key=lambda i: -abs(i["diff"]))[:limit]
         return {
             "unit": "kWh", "mode": mode, "at": stichtag.isoformat() if stichtag else None,
             "cur": {"start": win["start"].timestamp(), "end": win["end"].timestamp()},
             "vj": {"start": win["vj_start"].timestamp(), "end": win["vj_end"].timestamp()},
             "items": ranked, "consumers": len(consumers),
         }
+
+    # -- Verbraucher über die Jahre ------------------------------------------------------
+
+    def compute_consumers(self, config: dict, body: ConsumersRequest, now_local: datetime | None = None) -> dict:
+        """Verbraucher der obersten Ebene über die Jahre (Reiter „Langzeit“, Ansicht „Verbraucher“).
+
+        Fenster: „Dieses Jahr“ bis zum Stichtag gegen dasselbe Stück des Vorjahres (wie compute_changes, immer
+        „bis jetzt“), je Verbraucher und für den Verbrauch laut Bilanz. „Übrige (Grundlast)“ ist der Rest bis zur
+        Bilanz, nie negativ. Mit ``months`` dazu je Verbraucher die Monatswerte aller Jahre, die Jahressummen,
+        Befunde je Monat (Messlücken, Zählerrückgänge) und der Teilmonat am Archivbeginn.
+
+        Ein gelöschter Verbraucher fehlt auch in den Vorjahren; sein Verbrauch steckt dann dort in „Übrige“.
+        ``late`` markiert Verbraucher, deren Archiv erst nach dem der Bilanz beginnt: davor steckt ihr Verbrauch in
+        „Übrige“, ein Vergleich über diesen Zeitpunkt hinweg ist dort verzerrt."""
+        now_local = now_local or datetime.now(self.tz)
+        stichtag = period_columns.parse_stichtag(body.at, now_local.date())
+        anchor = period_columns.stichtag_anchor(stichtag, self.tz)
+        win = period_columns.column_windows(COLUMN_WINDOWS, "jahr", now_local, "bis_jetzt", anchor)
+        roles = role_entities(config)
+        consumers = top_consumers(config)
+        read_cache = query_mod.QueryReadCache()
+        balance_ids = sorted({e for role in BALANCE_ROLES for e in roles[role]})
+        balance_start = self._latest_start(balance_ids)
+        entity_ids = [consumer["entity_id"] for consumer in consumers]
+        values, measured, total, rest_values = self._consumer_window(win, entity_ids, roles, now_local, read_cache)
+
+        items: list[dict] = []
+        for consumer in consumers:
+            entity_id = consumer["entity_id"]
+            entity = self.index.get_entity(entity_id)
+            first_ts = entity["first_ts"] if entity is not None and entity["first_ts"] else None
+            items.append({
+                "key": entity_id, "name": self._consumer_name(consumer), "entity_id": entity_id,
+                "first_ts": first_ts, "partial_start": self._partial_start([entity_id]),
+                # Ein Tag Spielraum: Zähler, die am selben Tag wie die Bilanz begonnen haben, verzerren nichts.
+                "late": bool(first_ts and balance_start and first_ts > balance_start + 86400),
+                **values[entity_id],
+            })
+        rest: dict = {
+            "key": "rest", "name": tr("Übrige (Grundlast)"), "entity_id": None,
+            "first_ts": balance_start, "partial_start": self._partial_start(balance_ids), "late": False,
+            **rest_values,
+        }
+
+        out: dict = {
+            "tz": str(self.tz), "now": now_local.timestamp(), "unit": "kWh",
+            "at": stichtag.isoformat() if stichtag else None, "today": now_local.date().isoformat(),
+            "current": {"year": now_local.year, "month": now_local.month, "day": now_local.day},
+            "window": {
+                "year": win["start"].year,
+                "cur": {"start": win["start"].timestamp(), "end": win["end"].timestamp()},
+                "vj": {"start": win["vj_start"].timestamp(), "end": win["vj_end"].timestamp()},
+                "total": total,
+                "measured": {side: round(value, 3) for side, value in measured.items()},
+            },
+            "consumers": items, "rest": rest,
+        }
+        periods = [key for key in CONSUMER_PERIODS if key in body.periods]
+        mode = body.mode if body.mode in period_columns.MODES else "bis_jetzt"
+        out["mode"] = mode
+        if periods:
+            # „Dieses Jahr“ bis jetzt ist das Fenster der Rangliste: schon gerechnet, nicht noch einmal lesen.
+            base = (win, values, measured, total, rest_values)
+            out["periods"] = self._consumer_periods(periods, items, rest, roles, now_local, read_cache, mode, anchor, base)
+        if body.months:
+            self._consumer_months(out, roles, balance_ids, now_local, read_cache)
+        return out
+
+    def _consumer_window(
+        self, win: dict, entity_ids: list[str], roles: dict[str, list[str]], now_local: datetime,
+        read_cache: query_mod.QueryReadCache,
+    ) -> tuple[dict[str, dict], dict[str, float], dict[str, float | None], dict[str, float | None]]:
+        """Werte der Verbraucher für ein Fenster und dessen Vorjahr: (je Verbraucher {cur, vj}, Summe der Verbraucher,
+        Verbrauch laut Bilanz, „Übrige“ = Rest bis zur Bilanz, nie negativ). Je Seite, „cur“ und „vj“."""
+        sides = (("cur", win["start"], win["end"]), ("vj", win["vj_start"], win["vj_end"]))
+        values: dict[str, dict] = {entity_id: {} for entity_id in entity_ids}
+        measured = {"cur": 0.0, "vj": 0.0}
+        total: dict[str, float | None] = {}
+        for side, start, end in sides:
+            for entity_id in entity_ids:
+                values[entity_id][side], _first = self.window_total([entity_id], start, end, now_local, read_cache)
+                measured[side] += values[entity_id][side] or 0.0
+            sums, _froms = self.side_values(roles, start, end, now_local, read_cache)
+            balanced = balance(sums)
+            total[side] = round(balanced, 3) if balanced is not None else None
+        rest = {
+            side: round(max(total[side] - measured[side], 0.0), 3) if total[side] is not None else None
+            for side in ("cur", "vj")
+        }
+        return values, measured, total, rest
+
+    def _consumer_periods(
+        self, keys: list[str], items: list[dict], rest: dict, roles: dict[str, list[str]], now_local: datetime,
+        read_cache: query_mod.QueryReadCache, mode: str = "bis_jetzt", anchor: datetime | None = None,
+        base: tuple | None = None,
+    ) -> list[dict]:
+        """Zeiträume je Verbraucher gegen ihr Vorjahr: trägt je Verbraucher und für „Übrige“ ``periods[key] = {cur, vj}``
+        ein und liefert die Fenster und Summen. mode wie in der Summen-Tabelle: „bis_jetzt“ vergleicht einen laufenden
+        Zeitraum mit demselben Stück des Vorjahres, „komplett“ mit dem ganzen Vorjahreszeitraum. base: die schon
+        gerechneten Werte des Jahresfensters („Dieses Jahr“ bis jetzt) der Rangliste."""
+        entity_ids = [item["entity_id"] for item in items]
+        for item in (*items, rest):
+            item["periods"] = {}
+        out: list[dict] = []
+        for key in keys:
+            win = period_columns.column_windows(COLUMN_WINDOWS, key, now_local, mode, anchor)
+            if key == "jahr" and base is not None and mode == "bis_jetzt":
+                _win, values, measured, total, rest_values = base
+            else:
+                values, measured, total, rest_values = self._consumer_window(win, entity_ids, roles, now_local, read_cache)
+            for item in items:
+                item["periods"][key] = values[item["entity_id"]]
+            rest["periods"][key] = rest_values
+            out.append({
+                "key": key, "partial": win["partial"],
+                "cur": {"start": win["start"].timestamp(), "end": win["end"].timestamp()},
+                "vj": {"start": win["vj_start"].timestamp(), "end": win["vj_end"].timestamp()},
+                "total": total, "measured": {side: round(value, 3) for side, value in measured.items()},
+            })
+        return out
+
+    def _consumer_months(
+        self, out: dict, roles: dict[str, list[str]], balance_ids: list[str], now_local: datetime,
+        read_cache: query_mod.QueryReadCache,
+    ) -> None:
+        """Monatswerte, Jahressummen und Befunde je Verbraucher, für „Übrige“ und den Verbrauch laut Bilanz."""
+        items, rest = out["consumers"], out["rest"]
+        years = self._years(set(balance_ids) | {item["entity_id"] for item in items}, now_local)
+        sums = self._role_month_sums({role: roles[role] for role in BALANCE_ROLES}, years, now_local, read_cache)
+
+        def present_sum(values: list[float | None]) -> float | None:
+            present = [value for value in values if value is not None]
+            return round(sum(present), 3) if present else None
+
+        total_values: dict[str, list[float | None]] = {}
+        for year in years:
+            row: list[float | None] = []
+            for month in range(1, 13):
+                value = balance({part: sums[part].get((year, month)) for part in BALANCE_ROLES})
+                row.append(round(value, 3) if value is not None else None)
+            total_values[str(year)] = row
+        findings = data_quality.monthly_findings(self.index, sorted(set(balance_ids) | {i["entity_id"] for i in items}))
+
+        measured_months = {str(year): [0.0] * 12 for year in years}
+        for item in items:
+            months = self._entity_months(item["entity_id"], years, now_local, read_cache)
+            item["values"] = {
+                str(year): [round(months[(year, m)], 3) if (year, m) in months else None for m in range(1, 13)]
+                for year in years
+            }
+            item["year_sums"] = {year: present_sum(values) for year, values in item["values"].items()}
+            for (year, month), value in months.items():
+                measured_months[str(year)][month - 1] += value
+            item["flags"], item["unchecked"] = merge_findings(
+                findings, [item["entity_id"]], {f"{year}-{month:02d}" for (year, month) in months},
+            )
+
+        # „Übrige“ je Monat ist der Rest dieses Monats, je Jahr der Rest der Jahressummen (ein Monat mit
+        # rechnerisch negativem Rest zieht das Jahr nicht unter die Summe der Verbraucher).
+        rest["values"] = {
+            year: [round(max(t - measured_months[year][i], 0.0), 3) if t is not None else None for i, t in enumerate(row)]
+            for year, row in total_values.items()
+        }
+        total_sums = {year: present_sum(row) for year, row in total_values.items()}
+        rest["year_sums"] = {
+            year: (
+                round(max(value - sum(item["year_sums"][year] or 0.0 for item in items), 0.0), 3)
+                if value is not None else None
+            )
+            for year, value in total_sums.items()
+        }
+        balance_months = {f"{year}-{month:02d}" for part in BALANCE_ROLES for (year, month) in sums[part]}
+        rest["flags"], rest["unchecked"] = merge_findings(findings, balance_ids, balance_months)
+        out["years"] = years
+        out["total"] = {"values": total_values, "year_sums": total_sums}

@@ -28,6 +28,10 @@ knüpfen dabei an ihren zuletzt gespeicherten Wert an (kein Zählersprung/
 import_rows() ohnehin dedupliziert, ein Sicherheitsabstand ist also
 unkritisch. Ohne vorhandene Demo-Daten fällt --append automatisch auf eine
 normale Vollerzeugung (--months) zurück.
+
+Fehlen in der vorhandenen Demo die Raum-Sensoren für „Temperatur & Klima“ (sensor.demo_schlafzimmer_…,
+_kueche_…, _bad_…, _keller_…, je Temperatur und Feuchte), trägt --append sie mit 36 Monaten Historie nach
+(auch wenn sonst nichts zu ergänzen wäre); vorhandene laufen normal weiter.
 """
 
 from __future__ import annotations
@@ -40,7 +44,8 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.demo_generation import DEMO_ENTITIES, localized_id, run_generation  # noqa: E402
+from app import demo_seed  # noqa: E402
+from app.demo_generation import DEMO_ENTITIES, WEATHER_HISTORY_MONTHS, localized_id, run_generation  # noqa: E402
 from app.storage.entity_removal import delete_all_values, delete_entity  # noqa: E402
 from app.storage.index import Index  # noqa: E402
 
@@ -52,6 +57,7 @@ def main() -> None:
     parser.add_argument("--tz", default="Europe/Berlin", help="IANA-Zeitzone (Standard: Europe/Berlin)")
     parser.add_argument("--seed", type=int, default=42, help="Zufalls-Seed für reproduzierbare Läufe (Standard: 42)")
     parser.add_argument("--clean", action="store_true", help="Werte vorhandener demo_*-Entitäten im Zielverzeichnis zuerst bereinigen (Entitäten selbst bleiben bestehen)")
+    parser.add_argument("--weather-months", type=int, default=WEATHER_HISTORY_MONTHS, help=f"Historie der Wetter-Reihen für das Wetterdashboard in Monaten (Standard: {WEATHER_HISTORY_MONTHS}); 0 oder weniger als --months: wie --months. Wirkt nur bei voller Erzeugung, nicht mit --append")
     parser.add_argument("--append", action="store_true", help="Statt die komplette Historie neu zu würfeln: nur die Werte seit dem letzten Lauf ergänzen (--months wird dabei ignoriert) — macht aus der Demo-Instanz ein 'lebendes' System, z. B. per Cron. Ohne vorhandene Demo-Daten wird automatisch auf eine normale Vollerzeugung zurückgefallen")
     parser.add_argument(
         "--clear", nargs="?", choices=["values", "entities"], const="entities", default=None,
@@ -69,6 +75,7 @@ def main() -> None:
         ),
     )
     parser.add_argument("--language", choices=["de", "en"], default="de", help="Sprache der Demo-Entitäten (Namen und entity_ids) (Standard: de). Die entity_ids folgen dem Namen (en: sensor.demo_living_room_temperature); ein Lauf in der anderen Sprache ersetzt den vorhandenen Datensatz")
+    parser.add_argument("--setup-ui", action="store_true", help="Zusätzlich die Demo-Oberfläche anlegen wie der Demo-Modus der App: Energie- und Wetterdashboard einrichten, Charts, Tabellen und die Dashboards „Übersicht“, „Energie“, „Wetter“. Ohne --append wird zuvor Angelegtes abgeräumt und neu angelegt (eigene Objekte bleiben); mit --append nur, wenn noch nie angelegt wurde")
     args = parser.parse_args()
     if args.append and args.clean:
         parser.error("--append und --clean schließen sich gegenseitig aus.")
@@ -97,7 +104,7 @@ def main() -> None:
 
     result = run_generation(
         args.data_dir, index, tz, rng,
-        months=args.months, append=args.append, clean=args.clean,
+        months=args.months, weather_months=args.weather_months, append=args.append, clean=args.clean,
         on_entity=lambda _i, entity_id, n: print(f"{entity_id}: {n} Werte geschrieben"),
         on_status=print,
         language=args.language,
@@ -106,6 +113,11 @@ def main() -> None:
     if result.skipped:
         print(result.skip_reason)
         return
+
+    if args.setup_ui:
+        created = demo_seed.seed(index, args.language, reset=not args.append)
+        print("Demo-Oberfläche angelegt (Dashboards, Charts, Tabellen, Energie- und Wetterdashboard)." if created
+              else "Demo-Oberfläche war schon angelegt, nichts geändert.")
 
     print(f"Indexabgleich: {result.entities_checked} Entität(en) geprüft, "
           f"{result.mismatches_repaired} Abweichung(en) repariert.")

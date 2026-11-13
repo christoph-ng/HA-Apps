@@ -634,6 +634,7 @@ CREATE TABLE IF NOT EXISTS saved_charts (
     chart_stats INTEGER NOT NULL DEFAULT 1,
     legend_metrics TEXT NOT NULL DEFAULT '["sum"]',
     legend_style TEXT NOT NULL DEFAULT 'chips',
+    legend_size TEXT NOT NULL DEFAULT '',
     chart_type TEXT NOT NULL DEFAULT 'auto',
     is_favorite INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
@@ -680,7 +681,8 @@ CREATE TABLE IF NOT EXISTS dashboards (
     is_favorite INTEGER NOT NULL DEFAULT 0,
     precise_mode INTEGER NOT NULL DEFAULT 0,
     fill_gaps INTEGER NOT NULL DEFAULT 0,
-    period_nav INTEGER NOT NULL DEFAULT 0
+    period_nav INTEGER NOT NULL DEFAULT 0,
+    grid_columns INTEGER NOT NULL DEFAULT 3
 );
 
 -- dashboard_id verweist auf dashboards.id — mehrere, unabhängige Dashboards
@@ -807,7 +809,8 @@ CREATE TABLE IF NOT EXISTS table_rows (
     show_label INTEGER NOT NULL DEFAULT 0,
     accent INTEGER NOT NULL DEFAULT 0,
     percent_of_total INTEGER NOT NULL DEFAULT 0,
-    hide_if_empty INTEGER NOT NULL DEFAULT 0
+    hide_if_empty INTEGER NOT NULL DEFAULT 0,
+    hide_line INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -1200,6 +1203,12 @@ class Index:
             self._conn.execute(
                 "ALTER TABLE saved_charts ADD COLUMN legend_style TEXT NOT NULL DEFAULT 'chips'"
             )
+        if "legend_size" not in sc_columns:
+            # Legendengröße je Chart (ROADMAP 1.52): leer = folgt der globalen
+            # Einstellung "Legendengröße", sonst "normal" oder "small".
+            self._conn.execute(
+                "ALTER TABLE saved_charts ADD COLUMN legend_size TEXT NOT NULL DEFAULT ''"
+            )
         if "chart_type" not in sc_columns:
             # "auto" (Linie/Balken je Serie automatisch, siehe query.py) oder
             # "timeline" (AN-Intervalle, nur wählbar wenn alle Serien Schalter
@@ -1334,6 +1343,10 @@ class Index:
             # statt des aufgelösten Hex-Werts, damit die Farbe beim Wechsel
             # des Themes mitgeht. Siehe series_colors_clean() in chart_types.py.
             self._conn.execute("ALTER TABLE saved_charts ADD COLUMN series_colors TEXT NOT NULL DEFAULT '{}'")
+        if "stack_groups" not in sc_columns:
+            # Mehrere Stapel je Chart als JSON {"groups": [{"id","name"}], "members": {entity_id: id}}.
+            # '{}' = wie bisher ein einziger Stapel je Achse. Siehe stack_groups_clean() in chart_types.py.
+            self._conn.execute("ALTER TABLE saved_charts ADD COLUMN stack_groups TEXT NOT NULL DEFAULT '{}'")
 
         if self._conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='saved_tables'").fetchone()[0]:
             st_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(saved_tables)")}
@@ -1382,6 +1395,9 @@ class Index:
             self._conn.execute("ALTER TABLE table_rows ADD COLUMN percent_of_total INTEGER NOT NULL DEFAULT 0")
         if "hide_if_empty" not in table_row_columns:
             self._conn.execute("ALTER TABLE table_rows ADD COLUMN hide_if_empty INTEGER NOT NULL DEFAULT 0")
+        if "hide_line" not in table_row_columns:
+            # Leerzeile: eine Trennlinie ohne sichtbare Linie (main.py _TableRowBody.hide_line).
+            self._conn.execute("ALTER TABLE table_rows ADD COLUMN hide_line INTEGER NOT NULL DEFAULT 0")
 
         table_column_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(table_columns)")}
         if "decimals" not in table_column_columns:
@@ -1580,6 +1596,10 @@ class Index:
             # Zeitraum-Navigation (Stichtag-Leiste über den Kacheln) — Standard
             # aus, damit kein bestehendes Dashboard ungefragt eine Leiste bekommt.
             self._conn.execute("ALTER TABLE dashboards ADD COLUMN period_nav INTEGER NOT NULL DEFAULT 0")
+        if "grid_columns" not in dashboards_columns:
+            # Kacheln pro Zeile (3 oder 4, breite Darstellung): nur die Anzeige ab großer
+            # Fensterbreite richtet sich danach; Standard 3 lässt jedes Dashboard wie bisher.
+            self._conn.execute("ALTER TABLE dashboards ADD COLUMN grid_columns INTEGER NOT NULL DEFAULT 3")
 
         # Einmalige Anlage des migrierten Default-Dashboards ("Übersicht", fest
         # verankert an id=1, siehe dashboard_pins-Migration oben) — nur beim
@@ -2676,6 +2696,7 @@ class Index:
         chart_stats: bool = True,
         legend_metrics: list[str] | None = None,
         legend_style: str = "chips",
+        legend_size: str = "",
         chart_type: str = "auto",
         decimals: str = "auto",
         show_values: bool = False,
@@ -2691,6 +2712,7 @@ class Index:
         compare_settings: dict | None = None,
         heatmap_states: dict | None = None,
         series_colors: dict | None = None,
+        stack_groups: dict | None = None,
     ) -> int:
         now = time.time()
         with self._lock, self._conn:
@@ -2699,22 +2721,22 @@ class Index:
                 "INSERT INTO saved_charts "
                 "(name, entity_ids, range_key, continuous, entity_names, hidden_entity_ids, "
                 "resolution_preset, "
-                "dynamic_y_axis, dashboard_animation, chart_stats, legend_metrics, legend_style, "
+                "dynamic_y_axis, dashboard_animation, chart_stats, legend_metrics, legend_style, legend_size, "
                 "chart_type, decimals, show_values, average_line, area_fill, show_points, stacked, normalize, "
                 "average_style, horizontal, donut_aggregation, period_anchor, compare_settings, "
-                "heatmap_states, series_colors, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "heatmap_states, series_colors, stack_groups, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name, json.dumps(entity_ids), range_key, int(continuous),
                     json.dumps(entity_names or {}), json.dumps(hidden_entity_ids or []),
                     resolution_preset,
                     int(dynamic_y_axis), int(dashboard_animation), int(chart_stats),
                     json.dumps(legend_metrics if legend_metrics is not None else ["sum"]),
-                    legend_style, chart_type, decimals, int(show_values),
+                    legend_style, legend_size, chart_type, decimals, int(show_values),
                     int(average_line), int(area_fill), int(show_points), int(stacked), int(normalize),
                     average_style, int(horizontal), donut_aggregation, period_anchor,
                     json.dumps(compare_settings or {}), json.dumps(heatmap_states or {}),
-                    json.dumps(series_colors or {}), now, now,
+                    json.dumps(series_colors or {}), json.dumps(stack_groups or {}), now, now,
                 ),
             )
             return cur.lastrowid
@@ -2734,6 +2756,7 @@ class Index:
         chart_stats: bool = True,
         legend_metrics: list[str] | None = None,
         legend_style: str = "chips",
+        legend_size: str = "",
         chart_type: str = "auto",
         decimals: str = "auto",
         show_values: bool = False,
@@ -2749,6 +2772,7 @@ class Index:
         compare_settings: dict | None = None,
         heatmap_states: dict | None = None,
         series_colors: dict | None = None,
+        stack_groups: dict | None = None,
     ) -> None:
         with self._lock, self._conn:
             self._ensure_valid_name_locked("saved_charts", name, exclude_id=chart_id)
@@ -2756,21 +2780,21 @@ class Index:
                 "UPDATE saved_charts SET name = ?, entity_ids = ?, range_key = ?, continuous = ?, "
                 "entity_names = ?, hidden_entity_ids = ?, resolution_preset = ?, "
                 "dynamic_y_axis = ?, dashboard_animation = ?, "
-                "chart_stats = ?, legend_metrics = ?, legend_style = ?, chart_type = ?, decimals = ?, "
+                "chart_stats = ?, legend_metrics = ?, legend_style = ?, legend_size = ?, chart_type = ?, decimals = ?, "
                 "show_values = ?, average_line = ?, area_fill = ?, show_points = ?, stacked = ?, normalize = ?, "
                 "average_style = ?, horizontal = ?, donut_aggregation = ?, period_anchor = ?, "
-                "compare_settings = ?, heatmap_states = ?, series_colors = ?, updated_at = ? WHERE id = ?",
+                "compare_settings = ?, heatmap_states = ?, series_colors = ?, stack_groups = ?, updated_at = ? WHERE id = ?",
                 (
                     name, json.dumps(entity_ids), range_key, int(continuous),
                     json.dumps(entity_names or {}), json.dumps(hidden_entity_ids or []),
                     resolution_preset,
                     int(dynamic_y_axis), int(dashboard_animation), int(chart_stats),
                     json.dumps(legend_metrics if legend_metrics is not None else ["sum"]),
-                    legend_style, chart_type, decimals, int(show_values),
+                    legend_style, legend_size, chart_type, decimals, int(show_values),
                     int(average_line), int(area_fill), int(show_points), int(stacked), int(normalize),
                     average_style, int(horizontal), donut_aggregation, period_anchor,
                     json.dumps(compare_settings or {}), json.dumps(heatmap_states or {}),
-                    json.dumps(series_colors or {}), time.time(), chart_id,
+                    json.dumps(series_colors or {}), json.dumps(stack_groups or {}), time.time(), chart_id,
                 ),
             )
 
@@ -2783,6 +2807,7 @@ class Index:
         d["chart_stats"] = bool(d.get("chart_stats", 1))
         d["legend_metrics"] = json.loads(d["legend_metrics"]) if d.get("legend_metrics") else ["sum"]
         d["legend_style"] = d.get("legend_style") or "chips"
+        d["legend_size"] = d.get("legend_size") or ""
         d["chart_type"] = d.get("chart_type") or "auto"
         d["decimals"] = d.get("decimals") or "auto"
         d["show_values"] = bool(d.get("show_values", 0))
@@ -2798,6 +2823,7 @@ class Index:
         d["compare_settings"] = json.loads(d["compare_settings"]) if d.get("compare_settings") else {}
         d["heatmap_states"] = json.loads(d["heatmap_states"]) if d.get("heatmap_states") else {}
         d["series_colors"] = json.loads(d["series_colors"]) if d.get("series_colors") else {}
+        d["stack_groups"] = json.loads(d["stack_groups"]) if d.get("stack_groups") else {}
         d["entity_names"] = json.loads(d["entity_names"]) if d.get("entity_names") else {}
         d["hidden_entity_ids"] = (
             json.loads(d["hidden_entity_ids"]) if d.get("hidden_entity_ids") else []
@@ -2925,7 +2951,7 @@ class Index:
         angehefteten Kachel (Gitter/Zeilenhöhe halbieren sich gleichzeitig,
         siehe .dashboard-grid.is-precise) — ohne das würden alle Kacheln beim
         Umschalten plötzlich nur noch halb so groß wirken. Beim Ausschalten
-        umgekehrt auf die alte Obergrenze (3) gekappt statt rechnerisch
+        umgekehrt auf die alte Obergrenze (Spaltenzahl des Dashboards, 3 oder 4; Zeilen 3) gekappt statt rechnerisch
         halbiert — eine im Präzisen Modus z. B. auf 5 gesetzte Kachel hat
         kein eindeutiges "halbes" Äquivalent im gröberen Gitter.
 
@@ -2939,7 +2965,7 @@ class Index:
         ein Wert außer der Reihe zustande kommt."""
         with self._lock, self._conn:
             row = self._conn.execute(
-                "SELECT precise_mode FROM dashboards WHERE id = ?", (dashboard_id,)
+                "SELECT precise_mode, grid_columns FROM dashboards WHERE id = ?", (dashboard_id,)
             ).fetchone()
             if row is None:
                 return False
@@ -2947,18 +2973,28 @@ class Index:
             self._conn.execute(
                 "UPDATE dashboards SET precise_mode = ? WHERE id = ?", (1 if precise else 0, dashboard_id)
             )
+            columns = int(row["grid_columns"])
             if precise and not was_precise:
                 self._conn.execute(
                     "UPDATE dashboard_pins SET "
-                    "grid_cols = MIN(grid_cols * 2, 6), grid_rows = MIN(grid_rows * 2, 6) "
-                    "WHERE dashboard_id = ?", (dashboard_id,),
+                    "grid_cols = MIN(grid_cols * 2, ?), grid_rows = MIN(grid_rows * 2, 6) "
+                    "WHERE dashboard_id = ?", (columns * 2, dashboard_id),
                 )
             elif not precise:
                 self._conn.execute(
-                    "UPDATE dashboard_pins SET grid_cols = MIN(grid_cols, 3), grid_rows = MIN(grid_rows, 3) "
-                    "WHERE dashboard_id = ?", (dashboard_id,),
+                    "UPDATE dashboard_pins SET grid_cols = MIN(grid_cols, ?), grid_rows = MIN(grid_rows, 3) "
+                    "WHERE dashboard_id = ?", (columns, dashboard_id),
                 )
             return True
+
+    def set_dashboard_grid_columns(self, dashboard_id: int, columns: int) -> bool:
+        """Kacheln pro Zeile (3 oder 4). Die gespeicherten Kachelgrößen bleiben unberührt: Bei 3 Spalten
+        kappt die Anzeige eine zu breite Kachel nur, damit sie bei 4 wieder ihre Breite hat."""
+        if columns not in (3, 4):
+            raise ValueError(tr("Ungültige Spaltenzahl"))
+        with self._lock, self._conn:
+            cursor = self._conn.execute("UPDATE dashboards SET grid_columns = ? WHERE id = ?", (columns, dashboard_id))
+            return cursor.rowcount > 0
 
     def set_dashboard_fill_gaps(self, dashboard_id: int, fill_gaps: bool) -> bool:
         with self._lock, self._conn:
@@ -2982,14 +3018,19 @@ class Index:
         frisch angelegtes."""
         with self._lock, self._conn:
             row = self._conn.execute(
-                "SELECT name FROM dashboards WHERE id = ?", (dashboard_id,)
+                "SELECT name, precise_mode, fill_gaps, period_nav, grid_columns FROM dashboards WHERE id = ?",
+                (dashboard_id,),
             ).fetchone()
             if row is None:
                 return None
             max_pos = self._conn.execute("SELECT MAX(position) FROM dashboards").fetchone()[0]
+            # Die Kachelgrößen unten sind im Präzisen Modus verdoppelt und reichen bis zur Spaltenzahl;
+            # die Kopie braucht dieselben Modi, sonst stünden Spannen bis 6 in einem 3-Spalten-Raster.
             cursor = self._conn.execute(
-                "INSERT INTO dashboards (name, position) VALUES (?, ?)",
-                (self._copy_name_locked("dashboards", row["name"]), (max_pos or 0) + 1),
+                "INSERT INTO dashboards (name, position, precise_mode, fill_gaps, period_nav, grid_columns) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (self._copy_name_locked("dashboards", row["name"]), (max_pos or 0) + 1,
+                 row["precise_mode"], row["fill_gaps"], row["period_nav"], row["grid_columns"]),
             )
             new_id = cursor.lastrowid
             pins = self._conn.execute(
@@ -3128,21 +3169,22 @@ class Index:
             return True
 
     def set_dashboard_pin_size(
-        self, dashboard_id: int, item_type: str, item_id: int, grid_cols: int, grid_rows: int, max_size: int = 3
+        self, dashboard_id: int, item_type: str, item_id: int, grid_cols: int, grid_rows: int,
+        max_cols: int = 3, max_rows: int = 3,
     ) -> bool:
         """Speichert die Rastergröße einer angehefteten Dashboard-Kachel.
 
         Die Validierung lebt zusätzlich zur API auch hier, damit kein anderer
-        Aufrufer ungültige CSS-Grid-Spannen persistieren kann. max_size ist 3
-        normal, 6 im Präzisen Modus (siehe dashboard_size() in main.py, das
-        anhand des Dashboards entscheidet) — der Picker in
+        Aufrufer ungültige CSS-Grid-Spannen persistieren kann. Die Grenzen
+        richten sich nach dem Dashboard (dashboard_grid.size_limits(): Spalten
+        3 oder 4, Zeilen 3, im Präzisen Modus je das Doppelte) — der Picker in
         _dashboard_tile_menu.html geht entsprechend weit. False bedeutet: Die
         angegebene Kachel ist nicht (mehr) angeheftet.
         """
         if item_type not in {"chart", "table"}:
             raise ValueError(tr("Ungültiger Dashboard-Kacheltyp"))
-        if not 1 <= int(grid_cols) <= max_size or not 1 <= int(grid_rows) <= max_size:
-            raise ValueError(tr("Dashboard-Kachelgröße muss zwischen 1 und {max_size} liegen", max_size=max_size))
+        if not 1 <= int(grid_cols) <= max_cols or not 1 <= int(grid_rows) <= max_rows:
+            raise ValueError(tr("Dashboard-Kachelgröße muss zwischen 1 und {max_size} liegen", max_size=max(max_cols, max_rows)))
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET grid_cols = ?, grid_rows = ? "
@@ -3349,10 +3391,10 @@ class Index:
             return [dict(row) for row in rows]
 
     def set_dashboard_entity_pin_size(
-        self, dashboard_id: int, pin_id: int, grid_cols: int, grid_rows: int, max_size: int = 6
+        self, dashboard_id: int, pin_id: int, grid_cols: int, grid_rows: int, max_cols: int = 6, max_rows: int = 6
     ) -> bool:
-        if not 1 <= int(grid_cols) <= max_size or not 1 <= int(grid_rows) <= max_size:
-            raise ValueError(tr("Dashboard-Kachelgröße muss zwischen 1 und {max_size} liegen", max_size=max_size))
+        if not 1 <= int(grid_cols) <= max_cols or not 1 <= int(grid_rows) <= max_rows:
+            raise ValueError(tr("Dashboard-Kachelgröße muss zwischen 1 und {max_size} liegen", max_size=max(max_cols, max_rows)))
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE dashboard_pins SET grid_cols = ?, grid_rows = ? "
@@ -3613,15 +3655,15 @@ class Index:
         self._conn.executemany(
             "INSERT INTO table_rows "
             "(table_id, position, label, row_type, entity_ids, formula, formula_unit, bold, aggregation, hidden, "
-            "show_label, accent, percent_of_total, hide_if_empty) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "show_label, accent, percent_of_total, hide_if_empty, hide_line) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     table_id, i, r["label"], r["row_type"], json.dumps(r["entity_ids"]),
                     r["formula"], r.get("formula_unit", ""), int(r["bold"]), r.get("aggregation", "auto"),
                     int(r.get("hidden", False)), int(r.get("show_label", False)), int(r.get("accent", False)),
                     int(r.get("percent_of_total", False)),
-                    int(r.get("hide_if_empty", False)),
+                    int(r.get("hide_if_empty", False)), int(r.get("hide_line", False)),
                 )
                 for i, r in enumerate(rows)
             ],
@@ -3723,7 +3765,7 @@ class Index:
                     "aggregation": r["aggregation"], "hidden": bool(r["hidden"]),
                     "show_label": bool(r["show_label"]), "accent": bool(r["accent"]),
                     "percent_of_total": bool(r["percent_of_total"]),
-                    "hide_if_empty": bool(r["hide_if_empty"]),
+                    "hide_if_empty": bool(r["hide_if_empty"]), "hide_line": bool(r["hide_line"]),
                 }
                 for r in row_rows
             ]
@@ -4180,19 +4222,37 @@ class Index:
             entry["daily"] = daily
         self.set_setting(self._CLEANUP_ALLTIME_STATS_PREFIX + entity_id, json.dumps(entry))
 
-    def list_cleanup_alltime_stats(self) -> dict[str, dict]:
+    def list_cleanup_alltime_stats(self, with_daily: bool = True) -> dict[str, dict]:
         """Alle gecachten Gesamt-Zählungen auf einmal, {entity_id: Eintrag}.
 
         Für Housekeeping → Ausreißer und die zugehörige Meldung: beide brauchen
         den Stand ALLER Entitäten. Einzeln nachgeschlagen wären das je Aufruf
         so viele SELECTs wie Entitäten; hier ist es eines. Defekte Einträge
         werden übersprungen statt zu werfen — ein kaputter JSON-Wert darf die
-        Housekeeping-Seite nicht unbenutzbar machen."""
+        Housekeeping-Seite nicht unbenutzbar machen.
+
+        ``with_daily=False`` lässt das Feld ``daily`` weg: Es sind die Tageszähler seit Beginn der Messung und damit
+        über 99 % der Bytes (gemessen 4,5 MB bei 171 Einträgen, bis 85 KB je Entität). Wer nur ``counts`` und die
+        Schwellen braucht (die Quote, die Meldung), spart das Parsen: etwa 10 statt 37 ms. Die Einträge enthalten dann
+        den Schlüssel ``daily`` nicht, auch wenn er gespeichert ist; wer ihn oder sein Fehlen auswertet, ruft ohne
+        den Schalter auf."""
         vorsatz = self._CLEANUP_ALLTIME_STATS_PREFIX
+        rows = None
         with self._lock, self._conn:
-            rows = self._conn.execute(
-                "SELECT key, value FROM settings WHERE key LIKE ? || '%'", (vorsatz,)
-            ).fetchall()
+            if not with_daily:
+                try:
+                    rows = self._conn.execute(
+                        "SELECT key, json_remove(value, '$.daily') AS value FROM settings WHERE key LIKE ? || '%'",
+                        (vorsatz,),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    # SQLite ohne JSON-Funktionen, oder ein Wert ist kein gültiges JSON (json_remove wirft dann für die
+                    # ganze Abfrage): zurück auf den Weg unten, der defekte Einträge einzeln überspringt.
+                    rows = None
+            if rows is None:
+                rows = self._conn.execute(
+                    "SELECT key, value FROM settings WHERE key LIKE ? || '%'", (vorsatz,)
+                ).fetchall()
         eintraege: dict[str, dict] = {}
         for row in rows:
             try:
@@ -4452,7 +4512,7 @@ class Index:
             self._conn.execute("DELETE FROM dashboards WHERE id != 1")
             self._conn.execute(
                 "UPDATE dashboards SET name = 'Übersicht', position = 0, is_default = 1, "
-                "locked = 0, is_favorite = 0, precise_mode = 0, fill_gaps = 0, period_nav = 0 WHERE id = 1"
+                "locked = 0, is_favorite = 0, precise_mode = 0, fill_gaps = 0, period_nav = 0, grid_columns = 3 WHERE id = 1"
             )
             if keep_setting_prefixes:
                 clause = " AND ".join("key NOT LIKE ?" for _ in keep_setting_prefixes)

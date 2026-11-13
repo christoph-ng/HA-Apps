@@ -4,7 +4,7 @@
 
 This document is the detailed guide for users of the app — step by step,
 task-oriented, every page in detail. For a short overview (what the app is,
-core features at a glance) see the [app README](../../README.en.md); technical
+core features at a glance) see the [app README](../../README.md); technical
 internals for developers are in the other documents of this folder (see
 [README.md](README.md)).
 
@@ -36,6 +36,7 @@ internals for developers are in the other documents of this folder (see
 - [Weather dashboard](#weather-dashboard)
   - [Roles](#roles)
   - [Tiles and comparison table](#tiles-and-comparison-table)
+  - [Sun, light and weather summary](#sun-light-and-weather-summary)
   - [Precipitation tab](#precipitation-tab)
   - [Monthly comparison](#monthly-comparison)
   - [Long-term tab](#long-term-tab)
@@ -112,7 +113,7 @@ internals for developers are in the other documents of this folder (see
 
 1. **Install the app** — via the add-on store (add the repository
    `https://github.com/bertel2020/HA-Apps`) or manually. Details:
-   [App README → Installation](../../README.en.md#installation).
+   [App README → Installation](../../README.md#installation).
 2. **Copy the API token** — open Zeitarchiv from the Home Assistant sidebar,
    **Settings → Connection**, copy the token. The token is generated
    automatically on first start and is valid only for this Zeitarchiv
@@ -205,6 +206,16 @@ requirements) and below it the **default dashboard** — the same tile view as
 under **Dashboards**, just permanently assigned to the overview and not
 renamable or deletable. Like any other dashboard it can be populated with
 tiles, rearranged and locked (see below).
+
+Two things apply to the overview only and are in the editor of the default
+dashboard (**Dashboards → Edit**) under **Overview page**, no longer in the
+settings: the **overview tiles** are the shortcuts at the top of the page
+(energy and weather dashboard, own dashboards, charts, tables, entities,
+statistics, housekeeping, import, export). Up to 10 are active at the same time;
+the arrows change the order. **Statistics tiles on the overview** (Only when
+something needs attention, Always or Off) controls whether the key figures
+also appear as tiles or only a slim strip when something is open in
+Housekeeping. Both options save immediately, not only with "Save".
 
 What appears when opening Zeitarchiv via the HA sidebar (the overview, the
 energy dashboard or the weather dashboard) is determined by **Settings → Appearance → Start
@@ -310,6 +321,12 @@ something to scroll.
   Arrange them by drag and drop; via the tile menu (⋮) resize, duplicate
   (charts/tables) or remove. Removing a tile only deletes the placement, not
   the underlying chart or table.
+- **4 tiles per row:** If **Wide layout (experimental)** is switched on under
+  **Settings → Appearance**, the dashboard editor offers the switch "4 tiles per
+  row". It applies per dashboard and takes effect from 1500 px window width
+  (eight columns in Precise mode); below that it stays at three. Stored sizes
+  are not lost when switching: a tile 4 wide shows across the whole row with
+  three columns, and the size menu says so.
 - **Sections** organize many tiles into named blocks: via the "+" tile, "Section"
   tab, assign a name. A section header can be collapsed/expanded via a chevron
   (remembered only locally in the browser) and removed via its own menu (⋮) —
@@ -701,7 +718,7 @@ and feed-in, less grid import and consumption), red unfavorable.
   many years the monthly comparison, “Years × months” and key days show. The
   average and range are formed only from these years. Records always count since
   the archive began. The browser remembers the choice.
-- **Key days per year:** Six key days in three pairs, one bar per year with the
+- **Characteristic days per year:** Six key days in three pairs, one bar per year with the
   number of days and their share of the days evaluated: **Almost
   self-sufficient** (self-sufficiency of 90 % or more, i.e. grid import at most
   10 % of consumption with at least 0.5 kWh consumption) and **Surplus days**
@@ -777,6 +794,10 @@ matching type for each role and rejects wrong assignments.
 | Precipitation (amount) | Counter | Sum, rain days, wettest day |
 | Rain (on/off) | Switch | Rain minutes, rain days, rainiest day |
 | Humidity, pressure, wind, gust, radiation | Measurement | Max and min with time, mean |
+| Brightness (preferably the south sensor) | Measurement | Sunshine duration, sun hours, day class |
+| Brightness dawn | Measurement | Start and end of day, day length |
+| Wind direction, sun elevation | Measurement | only for the weather summary and daylight |
+| PV power | Measurement (W, kW, MW) | Daily yield against expectation from brightness |
 
 A rain sensor that only reports on and off is enough: the page then shows rain
 minutes and rain days instead of millimetres. If you have both, both rows are
@@ -784,7 +805,9 @@ shown side by side. Many on/off sensors also report “rain” in fog, dew or wh
 the sensor is wet; the drying time then counts too. You set when a day counts
 as a rain day in setup (default 1 mm or 10 min). In the **Display** section you can hide blocks of the comparison table (key days, precipitation, rain, humidity, pressure, wind, gust, radiation); the outdoor temperature and additional sensors are always shown, and the tiles at the top do not change. The period of a column is in the tooltip of its heading ("ⓘ"), not on a line of its own. For max and min, the day appears as a small line under the value in the month, previous month and year columns; the difference to the previous year can be switched on and off in the "Previous year" menu with "Show difference" (remembered by the browser).
 
-The **Suggest** button in the readings section fills the roles that are still empty, based on device class, unit, names ("outdoor", "rain", "gust") and the weather integration; entities on the same device as the outdoor temperature are preferred. Roles that are already assigned stay unchanged, and nothing is saved until you press Save. Close calls are marked "check" and list further candidates. Heating counters (names with heating, heat pump, heating element …) are suggested too, and so are further temperature and humidity sensors (indoor rooms as well) for "More sensors" as long as none is set. Matching entities that are not archived yet are named; a link opens the selection assistant (topic Weather).
+Under **Display → Cards** every block of the tabs can be hidden on its own, grouped by tab: Overview (Weather conditions, Periods compared, Day overview, Monthly comparison), Precipitation (Precipitation, Precipitation per month), Temperature & climate (Temperature & climate, Temperature comparison, Humidity comparison), Wind & sun (Wind & sun, Hours of sunshine, Daylight, The last days compared, Day length over the year, PV and brightness) and Long-term (Records, Key days per year, Monthly values per year, Years compared, day by day). Only blocks with an assigned role are offered. A tab is missing when all its blocks are hidden. Only the Heating tab stays separate in the "Experimental" block.
+
+The **Suggest** button in the readings section fills the roles that are still empty, based on device class, unit, names ("outdoor", "rain", "gust") and the weather integration; entities on the same device as the outdoor temperature are preferred. Roles that are already assigned stay unchanged, and nothing is saved until you press Save. Close calls are marked "check" and list further candidates. Wind direction, sun elevation (name with "sun height" or "elevation", not azimuth) and the PV power of the system (name with PV, unit W/kW, no forecast; a balcony system ranks lower) are suggested as well, as are heating counters (names with heating, heat pump, heating element …), and so are further temperature and humidity sensors (indoor rooms as well) for "More sensors" as long as none is set. Matching entities that are not archived yet are named; a link opens the selection assistant (topic Weather).
 
 **Additional sensors** (temperature or humidity, for example cellar or attic)
 become their own rows, shown on the **Temperature & climate** tab, and are never averaged with the outdoor temperature. Backups include the assignment; the
@@ -812,6 +835,44 @@ columns with **Columns ▾**; a click on a tile opens the entity.
 year. Completed periods (yesterday, last month) are the same in both cases. If
 a period has no data it shows “–”, never 0; a tooltip tells when the archive
 begins. The browser remembers the column selection.
+
+### Sun, light and weather summary
+
+With a **brightness** (lx) the weather station gives more. The evaluation is not an official
+measure: the station does not separate direct and diffuse light, and the south sensor
+saturates at about 98,800 lx. The thresholds are in setup under **Sun and daylight**.
+
+- **Weather summary** (Overview): a symbol and one word for the sky (overcast, cloudy, fair,
+  sunny, twilight, night), a short sentence from temperature, wind (Beaufort, with direction
+  if **Wind direction** is assigned) and rain, plus details such as gusts, daily high and
+  low, sun hours and "light until … yesterday". The class limits follow the sun threshold but
+  can be set yourself in setup. For an earlier day it shows that day's summary. Under
+  **Display** you choose the layout: **Large** (centred header above four tiles),
+  **Compact** (header on one row, lower tiles) or **Strip** (header on one row, the tiles as
+  one row without boxes; default). The information is the same in all of them.
+- **Sunshine duration**: an hour counts as sunny if its mean reaches the sun threshold
+  (default 25,000 lx). It appears as a row in the comparison table, as a tile and as the
+  **Sun hours** curve on the Wind & sun tab.
+- **Daily picture** (Overview): one card per day for the last 14 days, sunny, changeable or
+  overcast by the share of bright hours with sun. A click selects the day.
+- **Daylight** (Wind & sun): with the role **Brightness dawn** the curve shows night, twilight
+  and day, plus start and end of day, day length and a comparison of the last days, and the
+  **day length over the year** (one line per year, from hourly values with an interpolated
+  threshold crossing). The times show what the
+  sensor sees, not the sun position. With the role **Sun elevation** (a sensor with the
+  height of the sun in degrees, for example a template sensor from `sun.sun`) the table also
+  shows the sun position at the start and end of day; a high value points to shading.
+- **Long-term**: monthly comparison, key days, yearly overview and records also know sun
+  (sun hours, sunny and overcast days). A real comparison with the previous year is possible
+  once the brightness has been archived for a year.
+- **PV and brightness** (Wind & sun): with the roles **Brightness** and **PV power** the card
+  compares the daily yield of the system with the expectation. The expectation is learned
+  from the previous 28 days (median hourly power per brightness level). Deviations above
+  15 % are marked, but only on days with a meaningful expectation. The expectation is a
+  dashed frame behind the bar. Clicking a day selects it: the chip at the top names its
+  deviation, the chart below shows by hour whether the system deviates in the morning or
+  evening (green band: within range). It is a measurement, not a
+  forecast: temperature, curtailment and a full battery lower the output without a defect.
 
 ### Precipitation tab
 
@@ -859,6 +920,15 @@ values are shown uncoloured. The annual mean appears from six months with values
 current year is marked with * and does not count towards the mean. At most the last ten
 years are shown.
 
+The selector above the table (Temperature, Precipitation, Sun; depending on which roles are
+assigned) switches the same table to **precipitation** and **hours of sunshine** per month and
+year. There the cells are totals, and the deviation is given in percent of the mean of that
+month. If there is only a rain sensor (on/off), the table counts hours of rain. The year
+column is the total and appears only for complete, completed years, because it would be too
+low with missing months. The current month shows only the figure so far and is not compared.
+Months with too few values stay empty. The colour scale below the table shows which side
+means drier or wetter (for sun: less or more sun).
+
 **Years compared, day by day** stacks all years as a matrix: one row per year (the
 newest on top), one column per calendar day, coloured by the daily value. You can
 choose mean, max or min of the outdoor temperature, or precipitation (white to blue).
@@ -869,7 +939,9 @@ day in the entity. 29 February has a column of its own.
 
 **Records** (warmest and coldest day, highest and lowest value, strongest gust,
 wettest day) appear once the archive holds at least a year of daily values and apply
-since the archive began. A single measurement error can set a record: **Open day**
+since the archive began. They sit at the top of the Long term tab in three coloured
+groups (temperature, wind and rain, sun) with large key figures; each row links to the day, a streak to its first day,
+and a streak that is still running ends "today". A single measurement error can set a record: **Open day**
 jumps straight to the entity on that day, where faulty values can be marked; only after
 they are deleted for good do the records exclude them.
 
@@ -890,13 +962,21 @@ The **degree-day figure** (G20/15 to VDI 3807) counts, for each day, room temper
 daily mean, but only on days below the heating limit. **kWh per degree day** is the
 weather-adjusted consumption: it lets you compare cold and mild winters, which the plain total
 cannot. The table shows, per month and for the whole heating season (fixed 1 Oct to 30 Apr),
-degree days, kWh and kWh per degree day for the last three seasons, plus the change against
-the previous season. A "1 Oct–yesterday" row compares the running season with the same stretch
-of earlier seasons, so the start of a winter does not look like a slump. A sentence at the top
-sums it up. Only completed days with enough temperature values count.
+kWh per degree day for the last three seasons, with degree days and kWh in small type below,
+plus the change against the previous season as a pill (green less, red more, neutral under
+1.5 %). A "Same period" row (1 Oct–yesterday) compares the running season with the same
+stretch of earlier seasons, so the start of a winter does not look like a slump. Only completed days with enough temperature values count.
 
 With several counters, **Share per counter** shows stacked bars per month for a selectable
 heating season, with each counter's share in percent.
+
+**Heating and sun** (experimental, with brightness assigned): with "Colour points by
+sunshine" the scatter plot gets a colour and shape per day class (sunny, changeable,
+overcast). Three tiles compare kWh per degree day by class, a bar shows how the heating days
+are split, and a chip states the result. A difference is only stated if it stands out from
+chance (at least 8 days per class), otherwise it says "No clear difference"; classes with
+fewer than 30 days carry a note. The result only holds for this house: the sensor measures at one point,
+PV-controlled heating can reverse the effect, and thermal mass lets the previous day count.
 
 ## Entities and histories
 
@@ -2648,9 +2728,14 @@ After the restart, the app works exclusively with the demo data — the real
 archived values remain unchanged in a completely separate directory
 (`<data directory>/demo` instead of the real data directory) and are never
 read, changed or overwritten at any time. If no demo history exists yet at the
-first start in this mode, the app generates it automatically (about 3 years,
-takes about a minute in the background — the app is reachable normally in the
+first start in this mode, the app generates it automatically (5 years,
+takes a few minutes in the background — the app is reachable normally in the
 meantime but shows complete values only afterwards).
+
+The app also sets up a ready-made interface: the energy and weather dashboards are configured (including
+storage, dynamic electricity price, CO₂ and heating counters), and three dashboards ("Overview", "Energy",
+"Weather") show saved charts and comparison tables. On first start and on "Regenerate" all of it is created
+anew; on "Supplement now" only if it was never created — your own changes stay.
 
 Changing the option **always** requires a restart, like any add-on
 configuration change — there is no switch that changes between real and demo
@@ -2673,7 +2758,8 @@ next supplement is due. Three controls:
   without touching the existing history. The same happens automatically when
   "Supplement automatically" becomes due.
 - **Regenerate** — discards the complete demo history and rolls it anew (with a
-  confirmation prompt). Useful for starting again with "fresh" 3 years.
+  confirmation prompt). Useful for starting again with "fresh" 5 years. The predefined dashboards, charts, tables and the setup of the
+  energy and weather dashboards are created anew as well (your own charts and tables stay).
 
 There is deliberately no "Remove" here: as long as the instance itself runs in
 demo mode, deleting would pull its own running database out from under it. For
@@ -2743,7 +2829,7 @@ If you want to look something up later, download it first.
 
 | Area | Contains |
 | --- | --- |
-| **Appearance** | Language (Automatic/German/English — default German; "Automatic" follows the browser language; untranslated places appear in German), number and date format (Automatic/German/English UK/English US — "Automatic" follows the browser: `en-GB` → `1,234.5` and `07/10/2026`, `en-US` → `10/07/2026` with a 12-hour clock, `de-*` → `1.234,5` and `07.10.2026`; independent of the language; CSV exports and file names stay unchanged), currency (Automatic/EUR/GBP/USD/CHF — "Automatic" takes it from Home Assistant, otherwise euro; amounts are not converted, enter your prices again after changing it), start page (overview/energy dashboard/weather dashboard), color scheme (Zeitarchiv/Home Assistant/Modern), light/dark/automatic, font size, dashboard tile fade animation, starting values for the chart options of the entity history view |
+| **Appearance** | Language (Automatic/German/English — default German; "Automatic" follows the browser language; untranslated places appear in German), number and date format (Automatic/German/English UK/English US — "Automatic" follows the browser: `en-GB` → `1,234.5` and `07/10/2026`, `en-US` → `10/07/2026` with a 12-hour clock, `de-*` → `1.234,5` and `07.10.2026`; independent of the language; CSV exports and file names stay unchanged), currency (Automatic/EUR/GBP/USD/CHF — "Automatic" takes it from Home Assistant, otherwise euro; amounts are not converted, enter your prices again after changing it), start page (overview/energy dashboard/weather dashboard), color scheme (Zeitarchiv/Home Assistant/Modern), light/dark/automatic, font size, dashboard tile fade animation, wide layout (experimental; Off/On, default Off — from 1200 px window width the overview, dashboards, charts, tables and entities use up to 1920 px, centered beyond that; applies to the whole installation; other pages such as settings and the energy dashboard stay at 1120 px), starting values for the chart options of the entity history view |
 | **Archiving** | Default values for newly detected entities (never act retroactively on existing entities): resolution, retention, decimal places, value change filter, gap/outlier detection |
 | **Notices** | Switch the tip display on/off and dialog with all tips (see [Housekeeping](#housekeeping)); overview of muted system notices with remaining duration, individually re-enableable early |
 | **Connection** | Show/regenerate API token, last received value, number of writes and auth errors since start, connected integration version with "last seen" time (notice for outdated or newly available version) |

@@ -137,21 +137,11 @@
         .replace(/\s+/g, '_');
     }
 
-    // "Als Bild speichern" (toolbox.feature.saveAsImage) — reines ECharts-
-    // Bordmittel, dieselbe Konfiguration für alle drei Renderpfade (render()/
-    // renderTimelineMulti()/renderDonut()), deshalb hier zentral statt
-    // dreimal dupliziert. NUR auf dieser Seite (nicht auf der Dashboard-
-    // Kachel, dashboard-tiles.js) — eine Kachel ist ohnehin nur eine
-    // Vorschau, das Icon wäre dort in der kleinen Fläche nur Ballast, und das
-    // Original mit vollem Bedienfeld steht ohnehin einen Klick entfernt.
-    function toolboxOption(exportFilename, surface, inkFaint) {
-      return {
-        show: true, right: 6, top: 0,
-        feature: {
-          saveAsImage: {title: t('Als Bild speichern'), backgroundColor: surface, name: exportFilename},
-        },
-        iconStyle: {borderColor: inkFaint},
-      };
+    // Kein "Als Bild speichern"-Icon mehr (toolbox.feature.saveAsImage): Es lag oben rechts über der
+    // obersten Beschriftung der rechten Achse, sobald ein Chart zwei Achsen hat (Forum-Feedback, 5. November
+    // 2026). Zentral statt an den Aufrufen aller Renderpfade (render()/renderTimelineMulti()/renderDonut()).
+    function toolboxOption() {
+      return {show: false};
     }
 
     function previousPeriodLabel(range) {
@@ -471,6 +461,22 @@
     // Bewusst außerhalb von x-data (siehe entity_detail.html: ECharts verlässt
     // sich auf `this` als echtes Objekt, nicht Alpines reaktiven Proxy).
     let chartInstance = null;
+    // Beim stillen Nachladen (Chip) wird ohne Animation neu gezeichnet: setOption(…, true) ersetzt die Serien,
+    // und ECharts würde den Chart sonst jede Minute neu einwachsen lassen. Ein Wrapper statt einer Option an
+    // jedem der vielen setOption-Aufrufe der Zeichenpfade.
+    let quietRender = false;
+    function newChartInstance() {
+      const instance = echarts.init(document.getElementById('chart'));
+      const rawSetOption = instance.setOption.bind(instance);
+      instance.setOption = (option, ...rest) => rawSetOption(quietRender ? {...option, animation: false} : option, ...rest);
+      return instance;
+    }
+    // Takt des automatischen Nachladens, wie die Dashboard-Kacheln (dashboard-tiles.js).
+    const REFRESH_INTERVAL_MS = 60000;
+    // Legendenname der Hauptserie -> Namen ihrer Begleitserien (Vorjahr/Vorperiode,
+    // gleitender Ø). Sie folgen dem Legenden-Umschalter der Hauptserie, siehe
+    // toggleLegendItem() und render().
+    let legendCompanions = {};
     // Schichten der verdichteten Spalten im Zeitstrahl, je Element über den Index im sechsten Wert
     // (ECharts führt in Werten keine Listen), siehe renderTimelineMulti().
     let timelineParts = [];
@@ -512,6 +518,9 @@
         if (!handleGrabbed) { e.preventDefault(); return; }
         draggedEl = row;
         draggedId = row.dataset.entityId;
+        component.draggingEntityId = draggedId;
+        // Reihenfolge vor dem Ziehen: der Weg zu einem Stapel führt über andere Zeilen und würde sie sonst umsortieren.
+        component.dragOrderSnapshot = [...component.selectedEntityIds];
         row.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', draggedId || '');
@@ -535,6 +544,9 @@
       container.addEventListener('dragend', () => {
         if (draggedEl) draggedEl.classList.remove('dragging');
         if (draggedId) component.load();
+        component.draggingEntityId = null;
+        component.dragOrderSnapshot = null;
+        component.stackOver = null;
         draggedEl = null;
         draggedId = null;
       });
@@ -568,6 +580,11 @@
         // im Tabellen-Editor.
         hiddenEntityIds: [...HIDDEN_ENTITY_IDS],
         seriesColors: {...SERIES_COLORS},
+        // Mehrere Stapel: {groups: [{id, name}], members: {entity_id: id}}, {} = ein Stapel je Achse.
+        stackGroups: JSON.parse(JSON.stringify(STACK_GROUPS || {})),
+        draggingEntityId: null,
+        dragOrderSnapshot: null,
+        stackOver: null,
         colorPickerFor: null,
         name: CHART_NAME,
         entityNames: {...ENTITY_NAMES},
@@ -709,6 +726,18 @@
         // wird — wie legendMetrics ein gespeichertes Chart-Feld (siehe
         // save()), damit sie beim erneuten Öffnen erhalten bleibt.
         legendStyle: LEGEND_STYLE,
+        // '' = folgt der globalen Legendengröße (Einstellungen → Darstellung), sonst 'normal' | 'small'.
+        legendSize: LEGEND_SIZE || '',
+        get legendSizeShown() { return this.legendSize || document.documentElement.dataset.legendSize || 'normal'; },
+        // Bei 'off' fällt der Serien-Umschalter der Legende weg: Ausblendungen per Klick
+        // (nur Ansicht) werden zurückgesetzt, die im Chart gespeicherte Ausblendung bleibt.
+        setLegendStyle(style) {
+          this.legendStyle = style;
+          if (style === 'off' && this.legendHiddenIds.length) {
+            this.legendHiddenIds = [];
+            this.render();
+          }
+        },
         decimals: DECIMALS,
         legendHiddenIds: [],
         optionsMenuOpen: false,
@@ -722,11 +751,19 @@
         // Bearbeiten-Modus zu starten statt erst über "Anpassen" umschalten
         // zu müssen.
         editing: !CHART_ID || new URLSearchParams(location.search).has('edit'),
+        // Eingebettet im Kachel-Popup des Dashboards: nur ansehen, aber mit Zeitraum/Vergleichen.
+        popup: new URLSearchParams(location.search).get('popup') === '1',
         // Zustands-Entitäten, die wegen gemischter Zahlen-Entitäten nicht
         // gezeichnet werden (siehe load()).
         droppedStateIds: [],
         loading: false,
         loadError: false,
+        // Automatisches Nachladen (Chip neben "CSV"): Standard aus der Installation (Einstellungen,
+        // Darstellung, data-page-refresh an <html>), der Schalter im Chip-Menü gilt nur für diese Seite.
+        refreshOn: document.documentElement.dataset.pageRefresh !== 'off',
+        refreshMenuOpen: false,
+        refreshAge: 0,  // Sekunden seit dem letzten Laden, nur gepflegt, solange das Chip-Menü offen ist
+        _lastRefresh: Date.now(),
         saving: false,
         savedMessage: '',
         _requestId: 0,
@@ -800,7 +837,10 @@
         // Kategorie stapeln" UND "jede Entität ihre eigene Kategorie" wäre
         // ein Widerspruch, deshalb schließen sich beide aus — dieselbe
         // Konvention wie "Gestapelt" + "Vergleichen".
-        get canStack() { return !this.singleBucket && this.series.filter(s => s.chart_type === 'bar').length >= 2; },
+        get canStack() { return this.series.filter(s => s.chart_type === 'bar').length >= 2; },
+        get hasStackMembers() { return Object.keys((this.stackGroups && this.stackGroups.members) || {}).length > 0; },
+        // Stapeln wirkt tatsächlich: bei Auflösung „Voll“ nur mit eigenen Stapeln (jeder Stapel eine Kategorie).
+        get stackActive() { return this.stacked && this.canStack && (!this.singleBucket || this.hasStackMembers); },
         // "Ausrichtung" (Vertikal/Horizontal, Optionen-Menü) — setHorizontal()
         // weiter unten, statt eines eigenen canGoHorizontal-Getters: die Zeile
         // ist jetzt immer sichtbar, "Horizontal" schaltet den dafür nötigen
@@ -892,12 +932,39 @@
           // größeren Sekundenwerten sichtbar ungenau wird.
           const sumFormatted = isSwitch ? NumberFormat.fmtDuration(sumValue) : formatted(sumValue);
           return {
+            // Rohwerte und Formatierer für die Summe über einen Stapel (legendEntries).
+            lastRaw: values.length ? values[values.length - 1] : null,
+            sumRaw: hasSum && values.length ? sumValue : null,
+            fmtValue: formatted,
+            fmtSum: isSwitch ? NumberFormat.fmtDuration : formatted,
             last: values.length ? formatted(values[values.length - 1]) : '—',
             min: minima.length ? formatted(Math.min(...minima)) : '—',
             max: maxima.length ? formatted(Math.max(...maxima)) : '—',
             average: values.length ? formatted(values.reduce((sum, v) => sum + v, 0) / values.length) : '—',
             sum: hasSum ? (values.length ? sumFormatted : '—') : null,
           };
+        },
+        // Legende nach Stapeln gruppiert (Parität zu groupByStack() in legend-render.js): die Mitglieder eines
+        // Stapels stehen an der Stelle des ersten beisammen, Aktuell und Σ des Stapels sind die Summen der Mitglieder.
+        get legendEntries() {
+          const entries = [];
+          const byKey = new Map();
+          this.seriesStats.forEach(stat => {
+            if (!stat.stack || !stat.stackKey || stat.isState) { entries.push({group: false, key: stat.entityId, members: [stat]}); return; }
+            let entry = byKey.get(stat.stackKey);
+            if (!entry) { entry = {group: true, key: 'stack:' + stat.stackKey, name: stat.stack, members: []}; byKey.set(stat.stackKey, entry); entries.push(entry); }
+            entry.members.push(stat);
+          });
+          entries.forEach(entry => {
+            if (!entry.group) return;
+            const first = entry.members[0];
+            const total = key => (entry.members.every(m => Number.isFinite(m[key])) ? entry.members.reduce((sum, m) => sum + m[key], 0) : null);
+            const last = total('lastRaw');
+            const sum = total('sumRaw');
+            entry.last = last === null ? null : first.fmtValue(last);
+            entry.sum = sum === null ? null : first.fmtSum(sum);
+          });
+          return entries;
         },
         // Tabellen-Legende bei Zuständen: eine Zeile je Entität und Zustand.
         get stateTableRows() {
@@ -962,6 +1029,8 @@
               isState: s.aggregation_type === 'state',
               stateRows: s.aggregation_type === 'state' ? this.stateRowsFor(s) : [],
               color: this.colorFor(s.entity_id),
+              stack: this.stackLabelFor(s.entity_id),
+              stackKey: this.stackLabelFor(s.entity_id) ? `${this.stackGroups.members[s.entity_id]}|${(s.aggregation_type === 'switch' && s.display_mode === 'time') ? ' duration' : s.unit}` : '',
               ...this.seriesStatsFor(s, s.points, this.windowEnd),
               // Min/Max/Ø über Zustandsindizes sind keine Aussage.
               ...(s.aggregation_type === 'state' ? {last: '—', min: '—', max: '—', average: '—', sum: null} : {}),
@@ -1003,7 +1072,10 @@
               key: `${s.entity_id}-${previousYear}`,
               color,
               name: `${name} (${previousYear})`,
-              ...this.seriesStatsFor(s, s.compare_points, s.compare_window_end),
+              // Bis zum selben Tag wie das laufende Jahr (compare_cut_points, nur Zähler/Schalter), nicht das ganze Vorjahr.
+              ...(s.compare_cut_points
+                ? this.seriesStatsFor(s, s.compare_cut_points, s.compare_cut_end)
+                : this.seriesStatsFor(s, s.compare_points, s.compare_window_end)),
             });
             out.push({
               key: `${s.entity_id}-${currentYear}`,
@@ -1246,6 +1318,10 @@
 
         toggleEntity(entityId, checked) {
           const idx = this.selectedEntityIds.indexOf(entityId);
+          if (checked && idx === -1 && this.selectedEntityIds.length >= MAX_ENTITIES) {
+            appAlert(t('Maximal {max} Entitäten pro Chart.', {max: MAX_ENTITIES}));
+            return;
+          }
           if (checked) { if (idx === -1) this.selectedEntityIds.push(entityId); }
           else if (idx !== -1) this.selectedEntityIds.splice(idx, 1);
           // Eine abgewählte Entität bleibt sonst als tote Referenz im
@@ -1451,7 +1527,6 @@
           // sichtbar statt an ein offengehaltenes Menü gebunden.
           this.compareMenuOpen = false;
           this.raw = false;
-          this.stacked = false;
           this.timeline = false;
           this.donut = false;
           // Ein Vergleich (Vorjahr, Langzeit, …) bezieht sich immer auf die
@@ -1477,7 +1552,13 @@
           const idx = this.legendHiddenIds.indexOf(entityId);
           if (idx === -1) this.legendHiddenIds.push(entityId);
           else this.legendHiddenIds.splice(idx, 1);
-          if (chartInstance) chartInstance.dispatchAction({type: 'legendToggleSelect', name: seriesName});
+          if (!chartInstance) return;
+          // Begleitserien (Vorjahr/Vorperiode, gleitender Ø) folgen der Hauptserie —
+          // wer eine Serie ausblendet, will deren Vergleichswerte nicht mehr sehen.
+          const type = idx === -1 ? 'legendUnSelect' : 'legendSelect';
+          [seriesName, ...(legendCompanions[seriesName] || [])].forEach(name => {
+            chartInstance.dispatchAction({type, name});
+          });
         },
         // Hover auf eine Legendenzeile hebt bei aktivem Donut den zugehörigen
         // Slice hervor — dasselbe highlight/showTip- bzw. downplay/hideTip-
@@ -1515,6 +1596,126 @@
         // ist disabled, solange compare true ist. Reines render() statt
         // load(): Stapelung ändert nur, WIE die bereits geladenen Daten
         // gezeichnet werden, keinen Server-Query-Parameter.
+        // ---- Stapel (Auswahlfeld je Zeile in „Ausgewählt“) ----------------------
+        isBarId(id) {
+          const s = this.series.find(x => x.entity_id === id);
+          return !!s && s.chart_type === 'bar';
+        },
+        // 'implicit' = noch keine Stapel angelegt, alle Balken einer Achse stehen in einem Stapel.
+        stackValue(id) {
+          const groups = (this.stackGroups && this.stackGroups.groups) || [];
+          if (!groups.length) return 'implicit';
+          return (this.stackGroups.members || {})[id] || 'none';
+        },
+        stackGroupList() { return (this.stackGroups && this.stackGroups.groups) || []; },
+        setStack(id, value) {
+          const groups = this.stackGroupList().map(g => ({...g}));
+          const members = {...((this.stackGroups && this.stackGroups.members) || {})};
+          const barIds = this.series.filter(s => s.chart_type === 'bar').map(s => s.entity_id);
+          const nextId = () => 'g' + (groups.reduce((m, g) => Math.max(m, +g.id.slice(1)), 0) + 1);
+          if (!groups.length) {
+            // Der erste Stapel nimmt alle anderen Balken mit, damit sich die Ansicht nicht verändert.
+            const first = {id: nextId(), name: t('Stapel {n}', {n: 1})};
+            groups.push(first);
+            barIds.forEach(b => { if (b !== id) members[b] = first.id; });
+          }
+          if (value === 'new') {
+            const g = {id: nextId(), name: t('Stapel {n}', {n: groups.length + 1})};
+            groups.push(g);
+            members[id] = g.id;
+          } else if (value === 'none') {
+            delete members[id];
+          } else {
+            members[id] = value;
+          }
+          // Leere Stapel bleiben stehen (frisch angelegt, wartet auf Einträge); der Server räumt sie beim Speichern auf.
+          this.stackGroups = {groups, members};
+          // Wer einen Eintrag einem Stapel zuordnet, will ihn gestapelt sehen: „Gestapelt“ schaltet sich ein
+          // (nicht bei Vergleich, der Vorrang hat und Stapeln ausschließt).
+          if (value !== 'none' && !this.stacked && this.canStack) this.stacked = true;
+          this.render();
+        },
+        // Stapelname für die Legende, nur bei wirksamen Stapeln (gleiche Regel wie ChartTileRender.stackLabels).
+        stackLabelFor(id) {
+          const members = (this.stackGroups && this.stackGroups.members) || {};
+          const gid = members[id];
+          if (!gid || !this.stackActive || !this.isBarId(id)) return '';
+          const unitOf = s => (s.aggregation_type === 'switch' && s.display_mode === 'time') ? ' duration' : s.unit;
+          const mine = this.series.find(s => s.entity_id === id);
+          const same = this.series.filter(s => s.chart_type === 'bar' && members[s.entity_id] === gid && unitOf(s) === unitOf(mine));
+          if (same.length < 2) return '';
+          return (this.stackGroupList().find(g => g.id === gid) || {}).name || t('Stapel');
+        },
+        // Anteile (%) wirken nur, wenn jeder Balken einer Achse in einem Stapel liegt (siehe barOnlyAxis in render()).
+        get stackPercentBlocked() {
+          if (!this.stackActive || !this.normalize) return false;
+          const members = (this.stackGroups && this.stackGroups.members) || {};
+          if (!Object.keys(members).length) return false;
+          return this.series.some(s => s.chart_type === 'bar' && !this.stackLabelFor(s.entity_id));
+        },
+        stackMembersOf(gid) {
+          const members = (this.stackGroups && this.stackGroups.members) || {};
+          return this.orderableEntityIds.filter(id => members[id] === gid && this.isBarId(id));
+        },
+        // Ein neuer, leerer Stapel; es wird nichts verschoben (ein leerer Stapel ändert die Ansicht nicht).
+        // Reihenfolge im Stapel (links = unten, rechts = oben). Es gibt nur eine Reihenfolge für Legende,
+        // Statistik und Stapel: die beiden Serien tauschen in der Liste „Ausgewählt“ ihren Platz. Ihre bisherige
+        // Palettenfarbe wird dabei als eigene Farbe festgeschrieben, damit sich beim Umsortieren keine Farbe ändert.
+        moveInStack(entityId, delta) {
+          const gid = ((this.stackGroups && this.stackGroups.members) || {})[entityId];
+          if (!gid) return;
+          const members = this.stackMembersOf(gid);
+          const at = members.indexOf(entityId);
+          const to = at + delta;
+          if (at === -1 || to < 0 || to >= members.length) return;
+          const neighbor = members[to];
+          const pinned = {...this.seriesColors};
+          [entityId, neighbor].forEach(id => {
+            if (!pinned[id]) pinned[id] = 'palette:' + (this.colorIndexFor(id) % PALETTE.length);
+          });
+          this.seriesColors = pinned;
+          const idxA = this.selectedEntityIds.indexOf(entityId);
+          const idxB = this.selectedEntityIds.indexOf(neighbor);
+          [this.selectedEntityIds[idxA], this.selectedEntityIds[idxB]] = [this.selectedEntityIds[idxB], this.selectedEntityIds[idxA]];
+          this.load();
+        },
+        addStack() {
+          const groups = this.stackGroupList().map(g => ({...g}));
+          const members = {...((this.stackGroups && this.stackGroups.members) || {})};
+          const id = 'g' + (groups.reduce((m, g) => Math.max(m, +g.id.slice(1)), 0) + 1);
+          groups.push({id, name: t('Stapel {n}', {n: groups.length + 1})});
+          this.stackGroups = {groups, members};
+          // Wer einen Stapel anlegt, will stapeln: „Gestapelt“ schaltet sich ein (nicht bei Vergleich, der Vorrang hat).
+          if (!this.stacked && this.canStack) this.stacked = true;
+          this.render();
+        },
+        renameStack(gid, name) {
+          const groups = this.stackGroupList().map(g => (g.id === gid ? {...g, name} : g));
+          this.stackGroups = {groups, members: {...(this.stackGroups.members || {})}};
+        },
+        dissolveStack(gid) {
+          const groups = this.stackGroupList().filter(g => g.id !== gid);
+          const members = {};
+          Object.entries((this.stackGroups && this.stackGroups.members) || {}).forEach(([id, g]) => { if (g !== gid) members[id] = g; });
+          this.stackGroups = groups.length ? {groups, members} : {};
+          // Der letzte aufgelöste Stapel schaltet „Gestapelt“ wieder aus (so wie das Anlegen es einschaltet);
+          // bleiben andere Stapel stehen, bleiben sie gestapelt.
+          if (!groups.length) this.stacked = false;
+          this.render();
+        },
+        stackDragOver(event, gid) {
+          if (!this.draggingEntityId || !this.isBarId(this.draggingEntityId)) return;
+          event.preventDefault();
+          this.stackOver = gid;
+        },
+        stackDrop(event, gid) {
+          event.preventDefault();
+          const id = this.draggingEntityId;
+          this.stackOver = null;
+          // Das Ablegen auf einen Stapel ordnet nur zu: die Reihenfolge (und damit die Farben) bleibt wie vor dem Ziehen.
+          if (this.dragOrderSnapshot) this.selectedEntityIds = [...this.dragOrderSnapshot];
+          if (id && this.isBarId(id)) this.setStack(id, gid);
+        },
         toggleStacked() {
           this.stacked = !this.stacked;
           this.render();
@@ -1599,11 +1800,17 @@
           this.render();
         },
 
-        async load() {
+        // silent: Nachladen im Hintergrund (Chip) — keine "Lädt …"-Anzeige, ein Fehler lässt den Chart
+        // stehen, und gezeichnet wird ohne Animation.
+        async load({silent = false} = {}) {
           // Ausgeblendete Serien werden gar nicht erst geholt — sie sollen
           // weder gezeichnet noch in der Statistik gezählt werden, und eine
           // Abfrage für Daten, die niemand sieht, wäre reine Last.
           if (this.visibleEntityIds.length === 0) {
+            // Eine noch laufende Abfrage gilt nicht mehr: sonst schreibt sie ihre Daten nach dem Leeren zurück.
+            this._requestId += 1;
+            this.loading = false;
+            this.loadError = false;
             this.series = [];
             this.autoResolutionLabel = '';
             this.$nextTick(() => this.render());
@@ -1622,8 +1829,10 @@
           // weiterzutragen. Ein Ort statt je einer Prüfung in jedem Umschalter.
           if (this.compare && this.compareMode === 'longterm' && !this.longtermAvailable) this.compareMode = 'previous';
           const requestId = ++this._requestId;
-          this.loading = true;
-          this.loadError = false;
+          if (!silent) {
+            this.loading = true;
+            this.loadError = false;
+          }
           const params = new URLSearchParams({
             entity_ids: this.visibleEntityIds.join(','),
             range: this.range, offset: String(this.offset), continuous: String(this.continuous),
@@ -1657,11 +1866,19 @@
             columnsData = columnsRes && columnsRes.ok ? await columnsRes.json() : null;
             // Die Rohabfrage bricht bei zu vielen Wechseln mit einem Fehler ab: dann gilt die
             // Spaltenantwort (Fenster, Zustandsliste und Spalten je Zustands-Entität).
-            data = res.ok ? await res.json() : (columnsData || {});
+            if (!res.ok && !columnsData) {
+              // Weder Rohabfrage noch Spalten-Rückfall: ein Fehler, kein leerer Bestand (sonst „Keine Daten“ ohne Wiederholen).
+              if (requestId === this._requestId && !silent) {
+                this.loading = false;
+                this.loadError = true;
+              }
+              return;
+            }
+            data = res.ok ? await res.json() : columnsData;
             heatmapData = heatmapRes && heatmapRes.ok ? await heatmapRes.json() : null;
           } catch (error) {
             // Netzwerkfehler oder ein 502 vom Proxy mit HTML statt JSON: sonst bliebe "Lädt …" für immer stehen.
-            if (requestId === this._requestId) {
+            if (requestId === this._requestId && !silent) {
               this.loading = false;
               this.loadError = true;
             }
@@ -1699,7 +1916,7 @@
             if (this.timeline && !this.raw) {
               this.raw = true;
               this.loading = false;
-              return this.load();
+              return this.load({silent});
             }
           }
           // Mit Zustands-Entitäten gibt es außer dem Donut nur den Zeitstrahl.
@@ -1707,7 +1924,7 @@
             this.timeline = true;
             this.raw = this.stateMode === 'timeline';
             this.loading = false;
-            return this.load();
+            return this.load({silent});
           }
           // Standard für reine Schalter-Charts: Zeitstrahl. Die Serien kamen
           // ohne Rohwerte, deshalb einmal neu laden.
@@ -1716,7 +1933,7 @@
             this.timeline = true;
             this.raw = true;
             this.loading = false;
-            return this.load();
+            return this.load({silent});
           }
           this.autoResolutionLabel = this.computeAutoResolutionLabel();
           this.windowStart = data.window_start ?? null;
@@ -1724,12 +1941,59 @@
           this.periodEnd = data.period_end ?? null;
           this.isCurrent = data.is_current ?? true;
           this.loading = false;
-          this.$nextTick(() => this.render());
+          this._lastRefresh = Date.now();
+          this.$nextTick(() => {
+            quietRender = silent;
+            try { this.render(); } finally { quietRender = false; }
+          });
+        },
+
+        // Grund, warum das Nachladen gerade ruht: null (läuft), 'off' (abgeschaltet), 'edit' (Editor offen)
+        // oder 'past' (ein abgeschlossener Zeitraum, dessen Werte sich nicht mehr ändern).
+        refreshPause() {
+          if (!this.refreshOn) return 'off';
+          if (this.editing) return 'edit';
+          if (!this.isCurrent) return 'past';
+          return null;
+        },
+        refreshChipText() {
+          const pause = this.refreshPause();
+          if (pause === 'off') return t('Aus');
+          if (pause === 'edit') return t('Pausiert · Editor');
+          if (pause === 'past') return t('Pausiert · vergangen');
+          return t('Aktuell');
+        },
+        refreshChipTitle() {
+          const pause = this.refreshPause();
+          if (pause === 'off') return t('Die automatische Aktualisierung ist ausgeschaltet.');
+          if (pause === 'edit') return t('Im Editor würde ein Nachladen deine Eingaben stören. Nach dem Speichern geht es weiter.');
+          if (pause === 'past') return t('Der Zeitraum ist abgeschlossen, die Werte ändern sich nicht mehr.');
+          return t('Zuletzt aktualisiert vor {s} s', {s: this.refreshAge});
+        },
+        refreshInfo() {
+          if (this.refreshPause()) return t('Keine automatische Aktualisierung.');
+          return t('Zuletzt vor {s} s · nächste in {n} s', {s: this.refreshAge, n: Math.max(0, REFRESH_INTERVAL_MS / 1000 - this.refreshAge)});
+        },
+        async refreshNow() {
+          this.refreshMenuOpen = false;
+          await this.load({silent: true});
+          this.refreshAge = 0;
+        },
+        // Einmal pro Sekunde geprüft, alle 60 s nachgeladen — nur bei sichtbarem Tab und ohne Pause. Kehrt man
+        // nach längerer Zeit in den Tab zurück, lädt der nächste Takt sofort.
+        refreshTick() {
+          if (!this.$root.isConnected) { clearInterval(this._refreshTimer); return; }
+          const age = Date.now() - this._lastRefresh;
+          if (this.refreshMenuOpen) this.refreshAge = Math.round(age / 1000);
+          if (age >= REFRESH_INTERVAL_MS && document.visibilityState === 'visible'
+              && !this.refreshPause() && !this.loading && !this.saving) {
+            this.refreshNow();
+          }
         },
 
         render() {
           if (!chartInstance) {
-            chartInstance = echarts.init(document.getElementById('chart'));
+            chartInstance = newChartInstance();
             AxisFit.attach(chartInstance);
           }
           if (!this.hasData) { chartInstance.clear(); return; }
@@ -1821,10 +2085,9 @@
           // je Entität liest sich außerdem als Ranking natürlicher als
           // mehrere in eine Kategorie gruppierte Balken.
           //
-          // "Gestapelt" schließt diese Auflösung aus (canStack-Getter) —
-          // sonst gäbe es zwei widersprüchliche Antworten auf "wie viele
-          // Kategorien": eine gestapelte Kombination will ALLE Entitäten in
-          // EINER Kategorie, der Ranking-Vergleich hier will das Gegenteil.
+          // "Gestapelt" wirkt hier nur mit eigenen Stapeln: jeder Stapel bekommt eine
+          // eigene Kategorie, übrige Entitäten bleiben je eine (Ranking-Vergleich). Ohne
+          // Stapel gäbe es zwei widersprüchliche Antworten auf "wie viele Kategorien".
           const singleBucket = this.singleBucket;
           const horizontalActive = singleBucket && this.horizontal;
           // Anzeigename je Entität, in Auswahlreihenfolge — dieselbe Quelle
@@ -1833,7 +2096,6 @@
           // Wh- und kWh-Serien teilen sich eine Achse (Kopien in der größten
           // Einheit); die Kennzahlen-Tabelle liest weiter this.series.
           const chartSeries = NumberFormat.harmonizeUnits(this.series);
-          const entityCategories = chartSeries.map(s => this.entityNames[s.entity_id] || s.friendly_name);
 
           // Eine Y-Achse je unterschiedlicher Einheit (wie die Wachstums-Chart auf
           // der Statistik-Seite mit zwei Achsen, hier verallgemeinert auf N) —
@@ -1852,7 +2114,44 @@
           // kombiniert (siehe yAxis unten, eine Achse je axisKey).
           // stackedActive/normalizeActive gelten deshalb nicht global,
           // sondern je Achse.
-          const stackedActive = this.stacked && this.canStack;
+          const stackedActive = this.stackActive;
+          // Stapelschlüssel je Serie (Parität zu chart-tile-render.js): ohne Stapel-Einstellung
+          // ein Stapel je Achse, mit Stapeln nur die zugeordneten Balken je Stapel; ein Stapel
+          // mit nur einer Balken-Serie wirkt wie ein Einzelbalken.
+          const stackMembers = (this.stackGroups && this.stackGroups.members) || {};
+          const hasStackGroups = Object.keys(stackMembers).length > 0 || (((this.stackGroups && this.stackGroups.groups) || []).length > 0);
+          const stackKeys = chartSeries.map(s => {
+            if (!stackedActive || s.chart_type !== 'bar') return null;
+            if (!hasStackGroups) return 'bar-' + axisKey(s);
+            const gid = stackMembers[s.entity_id];
+            return gid ? 'bar-' + axisKey(s) + '-' + gid : null;
+          });
+          if (hasStackGroups) {
+            const keyCounts = new Map();
+            stackKeys.forEach(k => { if (k) keyCounts.set(k, (keyCounts.get(k) || 0) + 1); });
+            stackKeys.forEach((k, i) => { if (k && keyCounts.get(k) < 2) stackKeys[i] = null; });
+          }
+          const stackNameByKey = new Map();
+          chartSeries.forEach((s, i) => {
+            if (stackKeys[i] && hasStackGroups) {
+              stackNameByKey.set(stackKeys[i], (this.stackGroupList().find(g => g.id === stackMembers[s.entity_id]) || {}).name || t('Stapel'));
+            }
+          });
+          // Kategorie je Serie bei „Voll“: Mitglieder eines Stapels teilen sich eine Kategorie (Name
+          // des Stapels), jede übrige Serie hat ihre eigene (Anzeigename wie in der Legende).
+          const slotOf = [];
+          const slotLabels = [];
+          const slotForKey = new Map();
+          chartSeries.forEach((s, i) => {
+            const key = stackKeys[i];
+            if (singleBucket && key) {
+              if (!slotForKey.has(key)) { slotForKey.set(key, slotLabels.length); slotLabels.push(stackNameByKey.get(key) || ''); }
+              slotOf[i] = slotForKey.get(key);
+            } else {
+              slotOf[i] = slotLabels.length;
+              slotLabels.push(this.entityNames[s.entity_id] || s.friendly_name);
+            }
+          });
           const normalizeActive = stackedActive && this.normalize;
           // Nur Achsen, auf denen AUSSCHLIESSLICH Balken-Serien liegen, dürfen
           // auf Prozent umgestellt werden — eine mitgezeichnete Linien-Serie
@@ -1860,7 +2159,7 @@
           // die gestapelten Balken gemeint ist, und zeigte ihre eigenen (nicht
           // normierten) Werte dadurch verzerrt.
           const barOnlyAxis = new Set(
-            units.filter(u => chartSeries.every(s => axisKey(s) !== u || s.chart_type === 'bar'))
+            units.filter(u => chartSeries.every((s, i) => axisKey(s) !== u || (s.chart_type === 'bar' && stackKeys[i])))
           );
           // Achsen mit MINDESTENS einer Balken-Serie (nicht nur reine
           // Balken-Achsen wie barOnlyAxis oben) dürfen "Dynamische Y-Achse"
@@ -1888,8 +2187,8 @@
             chartSeries.forEach((s, i) => {
               const u = axisKey(s);
               if (!barOnlyAxis.has(u)) return;
-              if (!axisTotals.has(u)) axisTotals.set(u, new Map());
-              const totals = axisTotals.get(u);
+              if (!axisTotals.has(stackKeys[i])) axisTotals.set(stackKeys[i], new Map());
+              const totals = axisTotals.get(stackKeys[i]);
               preparedPoints[i].forEach(p => totals.set(p.ts, (totals.get(p.ts) || 0) + p.value));
             });
           }
@@ -1934,6 +2233,10 @@
               // also keine sichtbare Wirkung gegenüber der festen Variante.
               scale: isPercentAxis ? false : axisDynamic,
               axisLabel: {formatter: v => isPercentAxis ? `${fmtNum(v, 0)} %` : (isDuration ? NumberFormat.fmtDuration(v) : (u ? `${fmtNum(v, decimals)} ${u}` : fmtNum(v, decimals)))},
+              // Gitterlinien nur von der ersten Achse und gestrichelt in Rahmenfarbe wie in der Dashboard-
+              // Kachel: ECharts' Standard zeichnet je Achse eine durchgezogene helle Linie, bei zwei Achsen
+              // (andere Teilung) lag ein zweites Gitter darüber und die Skala war nicht mehr ablesbar.
+              splitLine: {show: i === 0, lineStyle: {color: getComputedStyle(document.body).getPropertyValue('--border').trim() || '#ccc', type: 'dashed'}},
             };
           });
           // "Ausrichtung: Horizontal" tauscht Kategorie- und Werte-Achse —
@@ -1954,7 +2257,7 @@
           // sondern derselbe Ausdruck wie für die x-Achsen-Rolle.
           const categoryAxisObj = singleBucket ? {
             type: 'category',
-            data: entityCategories,
+            data: slotLabels,
             axisTick: {show: false},
             // Ohne dies versucht ECharts (Default: onZero:true), die Achsen-
             // Linie an der Y-Position von y=0 auszurichten — bei aktiver
@@ -1984,10 +2287,36 @@
           // wenn die Serie am Cursor keinen eigenen Punkt hat (tooltip-hold.js).
           const holdSeries = [];
           // Für legend.selected unten — nur die Hauptserie ist über die
-          // eigene Legende (siehe HTML-Template) umschaltbar, nicht die
-          // Vergleichs-Nebenserie (die folgt dem "Vergleichen"-Menü als
-          // Ganzes, siehe setCompareMode()/disableCompare()).
+          // eigene Legende (siehe HTML-Template) umschaltbar; Vergleichs-
+          // Nebenserie und gleitender Ø folgen ihr (addCompanion()).
           const legendSelected = {};
+          legendCompanions = {};
+          const addCompanion = (owner, name) => {
+            (legendCompanions[owner] ||= []).push(name);
+            legendSelected[name] = legendSelected[owner];
+          };
+          // Vorperiode/Vorjahr gestapelter Balken: je Stapel ein eigener, blasser Stapel daneben
+          // ('<Stapelschlüssel>-cmp') mit denselben Segmenten und derselben Reihenfolge. Bei
+          // Anteilen (%) wird der Vergleichsstapel auf seine eigene Summe normiert.
+          const compareShiftMs = s => ((s.compare_window_start != null && this.windowStart != null)
+            ? (this.windowStart - s.compare_window_start) * 1000 : 0);
+          const compareResampled = s => resamplePoints(
+            s.compare_points, this.range, this.resolutionPreset, s.aggregation_type, s.compare_window_start
+          );
+          const compareStackKey = (s, i) => (this.compare && stackKeys[i] && s.chart_type === 'bar' && s.compare_points && s.compare_points.length)
+            ? stackKeys[i] + '-cmp' : null;
+          const compareTotals = new Map();
+          const lastCompareIndex = new Map();
+          chartSeries.forEach((s, i) => {
+            const key = compareStackKey(s, i);
+            if (!key) return;
+            lastCompareIndex.set(key, i);
+            if (!normalizeActive || !barOnlyAxis.has(axisKey(s))) return;
+            if (!compareTotals.has(key)) compareTotals.set(key, new Map());
+            const totals = compareTotals.get(key);
+            const shift = compareShiftMs(s);
+            compareResampled(s).forEach(p => { const x = p.ts * 1000 + shift; totals.set(x, (totals.get(x) || 0) + p.value); });
+          });
           chartSeries.forEach((s, i) => {
             const color = this.colorFor(s.entity_id);
             // chart_type kommt vom Server (query.py: "bar" für Zähler/Schalter,
@@ -2009,22 +2338,22 @@
             // eine überlagerte Linie derselben Einheit bliebe unverändert in
             // Absolutwerten (axisNormalized bleibt dann false für sie, weil
             // ihre Achse nicht in barOnlyAxis steht).
-            const axisNormalized = normalizeActive && chartType === 'bar' && barOnlyAxis.has(axisKey(s));
+            const axisNormalized = normalizeActive && !!stackKeys[i] && barOnlyAxis.has(axisKey(s));
             // Bei singleBucket (Kategorie-Achse, s. o.) ist die X-Position die
             // EIGENE Kategorie dieser Entität (ihre Position in chartSeries,
-            // s. entityCategories) statt eines Zeitstempels — der Halte-Punkt
+            // s. slotOf) statt eines Zeitstempels — der Halte-Punkt
             // bis windowEnd (nächster Block) ergibt bei einer einzelnen
             // Kategorie je Entität ohnehin keinen Sinn und entfällt deshalb
             // hier.
             const mainData = mainPoints.map(p => {
-              if (!axisNormalized) return [singleBucket ? i : p.ts * 1000, p.value, p.ts * 1000, s.unit, seriesDecimals, isDurationSeries(s)];
+              if (!axisNormalized) return [singleBucket ? slotOf[i] : p.ts * 1000, p.value, p.ts * 1000, s.unit, seriesDecimals, isDurationSeries(s)];
               // Felder 7–9: Originalwert/-einheit/-Nachkommastellen, nur für
               // den Tooltip (formatPointValue() liest sie nicht, siehe dort)
               // — sonst verliert der Tooltip genau die Zahl, die die
               // Normierung aus dem Balken selbst entfernt.
-              const total = axisTotals.get(axisKey(s)).get(p.ts) || 0;
+              const total = axisTotals.get(stackKeys[i]).get(p.ts) || 0;
               const pct = total ? (p.value / total) * 100 : 0;
-              return [singleBucket ? i : p.ts * 1000, pct, p.ts * 1000, '%', 0, false, p.value, s.unit, seriesDecimals];
+              return [singleBucket ? slotOf[i] : p.ts * 1000, pct, p.ts * 1000, '%', 0, false, p.value, s.unit, seriesDecimals];
             });
             if (!singleBucket && chartType === 'line' && mainData.length && this.windowEnd != null
                 && mainData[mainData.length - 1][0] < this.windowEnd * 1000) {
@@ -2036,7 +2365,7 @@
             // unterschiedlicher Einheit (z. B. kWh und Dauer) fälschlich in
             // denselben Balken aufsummiert, sobald ein Chart mehrere Achsen
             // kombiniert.
-            const isStackedBar = chartType === 'bar' && stackedActive;
+            const isStackedBar = !!stackKeys[i];
             const unitIndex = units.indexOf(axisKey(s));
             // Gleitender Durchschnitt (Optionen-Menü, "Durchschnittslinie" →
             // "Gleitend") nur für Linien-Serien — bei einer Balken-Serie
@@ -2067,7 +2396,7 @@
               // Tooltip/Label-Formatter lesen ohnehin per festem Index
               // (data[1]=Wert), bleiben also unverändert korrekt.
               encode: horizontalActive ? {x: 1, y: 0} : undefined,
-              stack: isStackedBar ? 'bar-' + axisKey(s) : undefined,
+              stack: stackKeys[i] || undefined,
               // Bei aktiver Trendlinie tritt die rohe (verrauschte) Kurve
               // zurück, bleibt aber sichtbar — die Trendlinie ist die
               // Ergänzung, nicht der Ersatz.
@@ -2174,8 +2503,10 @@
               // verbundene, aber eigenständige Linie. Nicht über die Legende
               // einzeln umschaltbar (wie cmp auch nicht) — sie gehört
               // sichtbar zur Hauptserie, kein eigener Umschalt-Anspruch.
+              const rollingName = t('{name} (Ø gleitend)',{name: displayName});
+              addCompanion(displayName, rollingName);
               echartsSeries.push({
-                name: t('{name} (Ø gleitend)',{name: displayName}),
+                name: rollingName,
                 type: 'line',
                 yAxisIndex: units.indexOf(axisKey(s)),
                 data: rollingData,
@@ -2185,36 +2516,35 @@
                 z: 3,
               });
             }
-            // stackedActive schließt Vergleich schon am Knopf aus
-            // (toggleStacked()/:disabled in chart_editor.html) — hier
-            // zusätzlich robust dagegen, falls compare aus einem älteren
-            // Zustand (z. B. prefill) noch true wäre: eine Vorperiode-
-            // Nebenserie ließe sich in einem gestapelten Balken nicht sinnvoll
-            // einordnen (mitstapeln würde acht statt vier Segmente ergeben).
-            if (this.compare && !stackedActive && s.compare_points && s.compare_points.length) {
+            // Gestapelte Balken: die Vorperiode bekommt einen eigenen Stapel (cmpStackKey, s. o.).
+            if (this.compare && s.compare_points && s.compare_points.length) {
               // Vorperiode um die exakte Fensterdifferenz verschieben, nicht per
               // Array-Index mappen — siehe derselbe Kommentar/Grund in
               // entity_detail.html (unterschiedlich lange Punktreihen).
-              const shiftMs = (s.compare_window_start != null && this.windowStart != null)
-                ? (this.windowStart - s.compare_window_start) * 1000
-                : 0;
+              const shiftMs = compareShiftMs(s);
+              const cmpStackKey = compareStackKey(s, i);
               const compareOffset = this.compareMode === 'year' ? 0 : -1;
               const compareLabel = formatPeriodLabel(
                 this.range, this.continuous, s.compare_window_start, s.compare_window_end, false
               );
               const seriesLabel = this.compareMode === 'year' ? t('Vorjahr') : t('Vorperiode');
-              const comparePoints = resamplePoints(
-                s.compare_points, this.range, this.resolutionPreset,
-                s.aggregation_type, s.compare_window_start
-              );
-              const compareData = comparePoints.map(p => [p.ts * 1000 + shiftMs, p.value, p.ts * 1000, s.unit, seriesDecimals, isDurationSeries(s)]);
+              const comparePoints = compareResampled(s);
+              const cmpNormalized = !!cmpStackKey && normalizeActive && barOnlyAxis.has(axisKey(s));
+              const compareData = comparePoints.map(p => {
+                const x = p.ts * 1000 + shiftMs;
+                if (!cmpNormalized) return [x, p.value, p.ts * 1000, s.unit, seriesDecimals, isDurationSeries(s)];
+                const total = compareTotals.get(cmpStackKey).get(x) || 0;
+                return [x, total ? (p.value / total) * 100 : 0, p.ts * 1000, '%', 0, false, p.value, s.unit, seriesDecimals];
+              });
               if (chartType === 'line' && compareData.length && this.windowEnd != null
                   && compareData[compareData.length - 1][0] < this.windowEnd * 1000) {
                 const last = compareData[compareData.length - 1];
                 compareData.push([this.windowEnd * 1000, last[1], last[2], last[3], last[4], last[5]]);
               }
+              const cmpName = `${displayName} (${seriesLabel}${compareLabel ? ', ' + compareLabel : ''})`;
+              addCompanion(displayName, cmpName);
               const cmp = {
-                name: `${displayName} (${seriesLabel}${compareLabel ? ', ' + compareLabel : ''})`,
+                name: cmpName,
                 type: chartType,
                 yAxisIndex: units.indexOf(axisKey(s)),
                 data: compareData,
@@ -2223,6 +2553,11 @@
                 barMaxWidth: 48,
                 clip: chartType !== 'bar',
               };
+              if (cmpStackKey) {
+                cmp.stack = cmpStackKey;
+                stackNameByKey.set(cmpStackKey, `${stackNameByKey.get(stackKeys[i]) || ''}${hasStackGroups ? ' ' : ''}(${seriesLabel})`.trim());
+                if (lastCompareIndex.get(cmpStackKey) === i) cmp.itemStyle.borderRadius = [3, 3, 0, 0];
+              }
               if (chartType === 'line') {
                 cmp.smooth = true;
                 if (!this.showPoints) cmp.symbol = 'none';
@@ -2360,14 +2695,50 @@
                        + `<span style="margin-left:8px;text-align:right;"><strong>${escapeHtml(formatPointValue(p.data))}${extra}</strong>`
                        + `${TooltipHold.note(p, faint, withStamp ? ms => fmtTooltipTimestamp(ms, tooltipBucketSeconds) : null)}</span></div>`;
                 };
+                // Summe je Stapel (nur mit eigenen Stapeln): bei Anteilen (%) die Summe der Absolutwerte.
+                const sums = new Map();
+                if (hasStackGroups) {
+                  params.forEach(p => {
+                    const key = (echartsSeries[p.seriesIndex] || {}).stack;
+                    if (!key) return;
+                    const abs = p.data[6];
+                    const entry = sums.get(key) || {n: 0, sum: 0, unit: abs != null ? p.data[7] : p.data[3], decimals: abs != null ? p.data[8] : p.data[4], duration: !!p.data[5]};
+                    entry.n += 1;
+                    entry.sum += abs != null ? abs : p.data[1];
+                    sums.set(key, entry);
+                  });
+                }
+                const sumRowFor = (key, e, last) => {
+                  const value = e.duration ? NumberFormat.fmtDuration(e.sum) : `${fmtNum(e.sum, e.decimals)}${e.unit ? ' ' + e.unit : ''}`;
+                  return `<div style="display:flex;justify-content:space-between;gap:18px;margin-top:4px;padding-top:4px;border-top:1px solid var(--border);${last ? '' : 'margin-bottom:6px;'}">`
+                       + `<span>Σ ${escapeHtml(stackNameByKey.get(key) || '')}</span><span style="margin-left:8px;text-align:right;"><strong>${escapeHtml(value)}</strong></span></div>`;
+                };
+                const sumRows = [...sums.entries()].filter(([, e]) => e.n >= 2).map(([key, e]) => sumRowFor(key, e, true)).join('');
+                // Mitglieder eines Stapels stehen eingerückt beisammen (an der Stelle des ersten) mit der Summe darunter,
+                // übrige Zeilen in Reihenfolge (Parität zu stackedRows in chart-tile-render.js).
+                const stackOfParam = p => (echartsSeries[p.seriesIndex] || {}).stack;
+                const stackedRows = renderRow => {
+                  const out = [];
+                  const done = new Set();
+                  params.forEach(p => {
+                    const key = stackOfParam(p);
+                    const e = key && sums.get(key);
+                    if (!e || e.n < 2) { out.push(renderRow(p)); return; }
+                    if (done.has(key)) return;
+                    done.add(key);
+                    params.filter(q => stackOfParam(q) === key).forEach(q => out.push(`<div style="padding-left:10px;border-left:2px solid var(--border);">${renderRow(q)}</div>`));
+                    out.push(sumRowFor(key, e, false));
+                  });
+                  return out.join('');
+                };
                 if (sameTime) {
                   const header = freshIndexes.length ? times[freshIndexes[0]] : times[0];
                   return `<div style="font-size:calc(11px * var(--font-scale, 1));color:${faint};margin-bottom:4px;">${header}</div>`
-                       + params.map(p => row(p, true)).join('');
+                       + stackedRows(p => row(p, true));
                 }
                 return params.map((p, i) =>
                   `<div style="font-size:calc(11px * var(--font-scale, 1));color:${faint};margin-bottom:2px;">${times[i]}</div>${row(p, false)}`
-                ).join('');
+                ).join('') + sumRows;
               },
               appendToBody: true,
             },
@@ -2829,7 +3200,7 @@
         // über Entitäten, das lässt sich nicht in dieselbe Reihe stellen.
         // Anteile oder Wechsel je Zustands-Entität (state-entities.js barPanels()).
         renderStateBarPanels() {
-          if (!chartInstance) chartInstance = echarts.init(document.getElementById('chart'));
+          if (!chartInstance) chartInstance = newChartInstance();
           const css = getComputedStyle(document.body);
           const rows = this.series
             .filter(s => s.aggregation_type === 'state' && !this.legendHiddenIds.includes(s.entity_id))
@@ -2852,7 +3223,7 @@
         },
         // Heatmap: eine je Zustands-Entität (state-entities.js heatmapPanels()).
         renderStateHeatmapPanels() {
-          if (!chartInstance) chartInstance = echarts.init(document.getElementById('chart'));
+          if (!chartInstance) chartInstance = newChartInstance();
           const css = getComputedStyle(document.body);
           const rows = this.heatmapRows;
           // Ab zwei Entitäten wächst die Höhe mit, wie bei Anteilen/Wechsel.
@@ -2941,7 +3312,7 @@
           chartInstance.resize();
         },
         renderDonut() {
-          if (!chartInstance) chartInstance = echarts.init(document.getElementById('chart'));
+          if (!chartInstance) chartInstance = newChartInstance();
           if (this.hasState) { this.renderStateDonuts(); return; }
           const surface = getComputedStyle(document.body).getPropertyValue('--surface');
           const inkFaint = getComputedStyle(document.body).getPropertyValue('--ink-faint');
@@ -3052,6 +3423,11 @@
           if (this.saving) return;
           if (!this.name.trim()) { appAlert(t('Bitte einen Namen für das Chart angeben.')); return; }
           if (this.selectedEntityIds.length === 0) { appAlert(t('Bitte mindestens eine Entität auswählen.')); return; }
+          // Ein bestehendes, zu großes Chart bleibt bearbeitbar: hier wird nur das Speichern mit klarer Meldung gesperrt.
+          if (this.selectedEntityIds.length > MAX_ENTITIES) {
+            appAlert(t('Maximal {max} Entitäten pro Chart. Bitte Entitäten entfernen, bevor du speicherst.', {max: MAX_ENTITIES}));
+            return;
+          }
           this.saving = true;
           this.savedMessage = '';
           // Nur Namen tatsächlich ausgewählter Entitäten mitschicken — eine
@@ -3084,9 +3460,11 @@
             chart_stats: this.chartStats,
             legend_metrics: this.legendMetrics,
             legend_style: this.legendStyle,
+            legend_size: this.legendSize,
             chart_type: this.donut ? 'donut' : (this.timeline ? (this.hasState ? (this.heatmapWanted ? 'heatmap' : (this.stateChosen ? this.stateMode : 'auto')) : 'timeline') : (this.allSwitch ? 'bar' : 'auto')),
             heatmap_states: this.heatmapStates,
             series_colors: this.seriesColors,
+            stack_groups: this.stackGroups,
             decimals: this.decimals,
             show_values: this.showValues,
             average_line: this.averageLine,
@@ -3160,6 +3538,10 @@
           // bereinigen, statt das bei jedem Rendern erneut zu maskieren.
           if (this.resolutionPreset === 'full' && this.continuous) this.continuous = false;
           this.load();
+          if (CHART_ID) {
+            this._refreshTimer = setInterval(() => this.refreshTick(), 1000);
+            document.addEventListener('visibilitychange', () => this.refreshTick());
+          }
           window.addEventListener('resize', () => chartInstance && chartInstance.resize());
           new ResizeObserver(() => chartInstance && chartInstance.resize()).observe(document.getElementById('chart'));
           this.$nextTick(() => setupEntityDrag(this));

@@ -51,16 +51,15 @@
 
   // Vergleich, der mit dem Chart gespeichert ist (saved_charts.compare_settings,
   // data-compare-settings) — dieselben Regeln wie chart_editor.js: kein
-  // Vergleich bei Zeitstrahl, Donut, Auflösung "Voll" oder gestapelten Balken
-  // (dort ist der Knopf gesperrt), "Langzeit" nur bei Jahr/kalendarisch/genau
+  // Vergleich bei Zeitstrahl, Donut oder Auflösung "Voll" (gestapelte Balken
+  // bekommen einen eigenen Vergleichsstapel), "Langzeit" nur bei Jahr/kalendarisch/genau
   // einer Entität, sonst wie im Editor "Vorjahr" (load()); "Vorjahr" mit
   // Laufsumme oder Soll zeichnet Monats-Balkenpaare (yearsCompareActive).
   const COMPARE_YEAR_RANGES = ['hour', 'day', 'week', 'month'];
   function tileCompare({compareSettings, range, continuous, entityIds, chartType, resolutionPreset, stacked}) {
     let settings = {};
     try { settings = JSON.parse(compareSettings || '{}') || {}; } catch (e) { settings = {}; }
-    if (!settings.compare || ['timeline', 'donut', 'shares', 'changes', 'heatmap'].includes(chartType) || resolutionPreset === 'full'
-        || (stacked && entityIds.length >= 2)) return null;
+    if (!settings.compare || ['timeline', 'donut', 'shares', 'changes', 'heatmap'].includes(chartType) || resolutionPreset === 'full') return null;
     let mode = settings.mode || 'previous';
     const longterm = mode === 'longterm' && range === 'year' && !continuous && entityIds.length === 1;
     if (mode === 'longterm' && !longterm) mode = 'previous';
@@ -767,6 +766,9 @@
     // stackedActive/normalizeActive in draw() (chart_editor.js-Parität).
     const stacked = ds.stacked === 'true';
     const normalize = ds.normalize === 'true';
+    // Mehrere Stapel (saved_charts.stack_groups): {groups: [{id, name}], members: {entity_id: id}}.
+    let stackGroups = {};
+    try { stackGroups = JSON.parse(ds.stackGroups || '{}') || {}; } catch (e) { stackGroups = {}; }
     // "Ausrichtung" (Optionen-Menü, nur bei Auflösung "Voll") — siehe
     // horizontalActive in draw() (chart_editor.js-Parität).
     const horizontal = ds.horizontal === 'true';
@@ -776,7 +778,7 @@
     const spec = {
       entityIds, entityNames, colorFor, range, continuous, resolutionPreset, dynamicYAxis, animation,
       chartType, timeline, donut, donutAggregation, effectiveDecimals, showValues, averageLine,
-      averageStyle, areaFill, showPoints, stacked, normalize, horizontal, heatmapStates,
+      averageStyle, areaFill, showPoints, stacked, normalize, stackGroups, horizontal, heatmapStates,
       periodAnchor: ds.periodAnchor || '',
       compareSettings: ds.compareSettings || '',
     };
@@ -879,7 +881,7 @@
     const {
       entityNames, colorFor, range, resolutionPreset, dynamicYAxis, animation, timeline, donut,
       donutAggregation, effectiveDecimals, showValues, averageLine, averageStyle, areaFill,
-      showPoints, stacked, normalize, horizontal, heatmapStates, compare,
+      showPoints, stacked, normalize, stackGroups, horizontal, heatmapStates, compare,
     } = spec;
     const borderColor = style.getPropertyValue('--border').trim();
     const inkFaint = style.getPropertyValue('--ink-faint').trim();
@@ -946,7 +948,6 @@
     // Kommentar dort für die ausführliche Begründung).
     const singleBucket = resolutionPreset === 'full';
     const horizontalActive = singleBucket && horizontal;
-    const entityCategories = series.map(s => entityNames[s.entity_id] || s.friendly_name);
     // Wie chart_editor.js: "Gestapelt" nur ab zwei Balken-Serien UND
     // außerhalb von Auflösung "Voll" (dort hat jede Entität schon ihre
     // eigene Kategorie — eine gestapelte Kombination aller Entitäten in
@@ -956,10 +957,46 @@
     // Normierung nur auf Achsen, auf denen AUSSCHLIESSLICH Balken liegen —
     // eine mitgezeichnete Linie derselben Einheit stünde sonst auf einer
     // 0–100%-Skala, die für die gestapelten Balken gemeint ist.
-    const stackedActive = stacked && !singleBucket && series.filter(s => s.chart_type === 'bar').length >= 2;
+    // Stapelschlüssel je Serie: ohne Stapel-Einstellung ein Stapel je Achse (wie bisher), mit
+    // Stapeln nur die zugeordneten Balken je Stapel. Ein Stapel mit nur einer Balken-Serie
+    // wirkt wie ein Einzelbalken (Schlüssel null).
+    const stackMembers = (stackGroups && stackGroups.members) || {};
+    const hasStackGroups = Object.keys(stackMembers).length > 0 || (((stackGroups && stackGroups.groups) || []).length > 0);
+    // Bei Auflösung „Voll“ (eine Kategorie je Entität) stapelt nur, was einem Stapel zugeordnet
+    // ist: jeder Stapel bekommt dann eine eigene Kategorie, ohne Stapel bleibt es der Ranking-Vergleich.
+    const stackedActive = stacked && (!singleBucket || hasStackGroups) && series.filter(s => s.chart_type === 'bar').length >= 2;
+    const stackKeys = series.map(s => {
+      if (!stackedActive || s.chart_type !== 'bar') return null;
+      if (!hasStackGroups) return 'bar-' + axisKey(s);
+      const gid = stackMembers[s.entity_id];
+      return gid ? 'bar-' + axisKey(s) + '-' + gid : null;
+    });
+    const stackNameOf = gid => ((stackGroups.groups || []).find(g => g.id === gid) || {}).name || t('Stapel');
+    const keyCounts = new Map();
+    stackKeys.forEach(k => { if (k) keyCounts.set(k, (keyCounts.get(k) || 0) + 1); });
+    if (hasStackGroups) stackKeys.forEach((k, i) => { if (k && keyCounts.get(k) < 2) stackKeys[i] = null; });
+    const stackNameByKey = new Map();
+    series.forEach((s, i) => { if (stackKeys[i] && hasStackGroups) stackNameByKey.set(stackKeys[i], stackNameOf(stackMembers[s.entity_id])); });
+    // Kategorie je Serie bei „Voll“: Mitglieder eines Stapels teilen sich eine Kategorie (Name des
+    // Stapels), jede übrige Serie hat ihre eigene (Entitätsname).
+    const slotOf = [];
+    const slotLabels = [];
+    const slotForKey = new Map();
+    series.forEach((s, i) => {
+      const key = stackKeys[i];
+      if (singleBucket && key) {
+        if (!slotForKey.has(key)) { slotForKey.set(key, slotLabels.length); slotLabels.push(stackNameByKey.get(key) || ''); }
+        slotOf[i] = slotForKey.get(key);
+      } else {
+        slotOf[i] = slotLabels.length;
+        slotLabels.push(entityNames[s.entity_id] || s.friendly_name);
+      }
+    });
+    // 100%-Normierung nur, wenn jeder Balken der Achse in einem Stapel liegt: sonst stünden
+    // Prozent und absolute Werte auf einer Achse.
     const normalizeActive = stackedActive && normalize;
     const barOnlyAxis = new Set(
-      units.filter(u => series.every(s => axisKey(s) !== u || s.chart_type === 'bar'))
+      units.filter(u => series.every((s, i) => axisKey(s) !== u || (s.chart_type === 'bar' && stackKeys[i])))
     );
     // Strengste (kleinste) Nachkommastellen-Einstellung aller Entitäten einer
     // gemeinsamen Achse — dieselbe Regel wie in chart_editor.html.
@@ -995,13 +1032,18 @@
         // undefined min/max — "Dynamische Y-Achse" hätte sonst keine
         // sichtbare Wirkung.
         scale: isPercentAxis ? false : axisDynamic,
+        // Einheit am Achsennamen (oben an der Achse) wie auf der Chart-Seite — die Beschriftung bleibt kurz, damit
+        // der Rand der kleinen Kachel nicht wächst.
+        name: isPercentAxis ? '%' : (isDuration ? '' : (u || '')),
+        nameLocation: 'end',
+        nameTextStyle: {fontSize: scaledFont(10), color: inkFaint, align: i % 2 === 0 ? 'left' : 'right'},
         axisLabel: {
           fontSize: scaledFont(10), color: inkFaint,
           formatter: v => isPercentAxis ? `${fmtCompactNumber(v, 0)} %` : (isDuration ? NumberFormat.fmtDuration(v) : fmtCompactNumber(v, decimals)),
         },
         axisLine: {show: false},
         axisTick: {show: false},
-        splitLine: {lineStyle: {color: borderColor, type: 'dashed'}},
+        splitLine: {show: i === 0, lineStyle: {color: borderColor, type: 'dashed'}},
       };
     });
     // "Ausrichtung: Horizontal" tauscht Kategorie- und Werte-Achse — dasselbe
@@ -1012,7 +1054,7 @@
     // Kategorie-Achse für singleBucket — Entitätsnamen statt Zeit-Ticks.
     const categoryAxisObj = singleBucket ? {
       type: 'category',
-      data: entityCategories,
+      data: slotLabels,
       axisTick: {show: false},
       axisLine: {show: false, onZero: false},
       axisLabel: {
@@ -1058,9 +1100,9 @@
           : rawValues.reduce((sum, v) => sum + v, 0) / rawValues.length;
         return {
           // x-Position ist die EIGENE Kategorie dieser Entität (ihre Position
-          // in series, s. entityCategories), nicht mehr 0 für alle — seit
+          // in series, s. slotOf), nicht mehr 0 für alle — seit
           // jede Entität ihre eigene Kategorie bekommt (s. o.).
-          lineData: [[i, aggregate, s.unit, effectiveDecimals(s), isDurationSeries(s)]],
+          lineData: [[slotOf[i], aggregate, s.unit, effectiveDecimals(s), isDurationSeries(s)]],
           averageValues: [aggregate],
           rawPoints: [{ts: data.window_start, value: aggregate}],
         };
@@ -1083,23 +1125,23 @@
       // letzten Wert und würde das Fenster am Rand verfälschen.
       return {lineData, averageValues, rawPoints: displayPoints};
     });
-    // x (ms-Zeitstempel bzw. 0 bei singleBucket) -> Summe je Achse, nur für
+    // x (ms-Zeitstempel bzw. 0 bei singleBucket) -> Summe je Stapel, nur für
     // tatsächlich normierte reine Balken-Achsen (barOnlyAxis, s. o.).
     const axisTotals = new Map();
     if (normalizeActive) {
       series.forEach((s, i) => {
         const u = axisKey(s);
         if (!barOnlyAxis.has(u)) return;
-        if (!axisTotals.has(u)) axisTotals.set(u, new Map());
-        const totals = axisTotals.get(u);
+        if (!axisTotals.has(stackKeys[i])) axisTotals.set(stackKeys[i], new Map());
+        const totals = axisTotals.get(stackKeys[i]);
         prepared[i].lineData.forEach(p => totals.set(p[0], (totals.get(p[0]) || 0) + p[1]));
       });
     }
-    // Letzter Balken-Index je Achse — nur der bekommt beim Stapeln abgerundete
+    // Letzter Balken-Index je Stapel — nur der bekommt beim Stapeln abgerundete
     // obere Ecken (das oberste, sichtbare Ende des Stapels), statt wie im
     // gruppierten Fall JEDES Segment einzeln abzurunden.
-    const lastBarIndexForAxis = new Map();
-    series.forEach((s, i) => { if (s.chart_type === 'bar') lastBarIndexForAxis.set(axisKey(s), i); });
+    const lastBarIndexForStack = new Map();
+    stackKeys.forEach((k, i) => { if (k) lastBarIndexForStack.set(k, i); });
 
     // Gesammelt statt direkt in echartsSeries gepusht — series.map() liefert
     // genau ein Element je Durchlauf, die Trendlinie ist aber eine
@@ -1111,14 +1153,14 @@
     const echartsSeries = series.map((s, i) => {
       const color = colorFor(s.entity_id);
       const displayName = entityNames[s.entity_id] || s.friendly_name;
-      const isStackedBar = s.chart_type === 'bar' && stackedActive;
+      const isStackedBar = !!stackKeys[i];
       // 100%-Normierung nur auf reinen Balken-Achsen und nur für Balken-
       // Serien — eine überlagerte Linie derselben Einheit bleibt unverändert
       // in Absolutwerten (barOnlyAxis enthält ihre Achse dann nicht).
-      const axisNormalized = normalizeActive && s.chart_type === 'bar' && barOnlyAxis.has(axisKey(s));
+      const axisNormalized = normalizeActive && isStackedBar && barOnlyAxis.has(axisKey(s));
       let lineData = prepared[i].lineData;
       if (axisNormalized) {
-        const totals = axisTotals.get(axisKey(s));
+        const totals = axisTotals.get(stackKeys[i]);
         // Felder 6/7 (Originaleinheit/-Nachkommastellen) stehen schon an
         // Position 2/3 des Ausgangs-Tupels — direkt übernommen statt erneut
         // nachgeschlagen. Feld 5: der Original-Absolutwert, nur für den
@@ -1154,7 +1196,7 @@
         // Kategorie-Index als x-Wert und den Messwert als Kategorie-Index
         // (Balken verschwinden, Werte-Achse skaliert auf ~Kategorien-Anzahl).
         encode: horizontalActive ? {x: 1, y: 0} : undefined,
-        stack: isStackedBar ? 'bar-' + axisKey(s) : undefined,
+        stack: stackKeys[i] || undefined,
         // Bei aktiver Trendlinie tritt die rohe Kurve zurück, bleibt aber
         // sichtbar — dieselbe Ergänzung-statt-Ersatz-Logik wie im Editor.
         lineStyle: {width: 2, color, opacity: showRollingAverage ? 0.45 : 1},
@@ -1192,9 +1234,9 @@
         // dank der niedrigen Deckkraft nicht. Abschaltbar (Optionen-Menü,
         // "Fläche"), Default an — siehe chart_editor.js.
         if (areaFill) cfg.areaStyle = {color, opacity: 0.08};
-      } else if (!stackedActive) {
+      } else if (!isStackedBar) {
         cfg.itemStyle.borderRadius = [3, 3, 0, 0];
-      } else if (lastBarIndexForAxis.get(axisKey(s)) === i) {
+      } else if (lastBarIndexForStack.get(stackKeys[i]) === i) {
         // Nur das oberste Segment jedes Stapels abrunden — jedes einzelne
         // Segment abzurunden sähe wie mehrere getrennte Balken aus, nicht
         // wie ein durchgehender Stapel.
@@ -1232,6 +1274,7 @@
         // Legende einzeln umschaltbar, sie gehört sichtbar zur Hauptserie.
         rollingSeries.push({
           name: `${displayName} (Ø gleitend)`,
+          legendOwner: displayName,
           type: 'line',
           yAxisIndex: units.indexOf(axisKey(s)),
           data: rollingData,
@@ -1251,17 +1294,40 @@
     // dieselbe Technik wie render() in chart_editor.js: um die exakte
     // Fensterdifferenz verschoben, nicht über den Array-Index zugeordnet.
     if (compare && !singleBucket) {
-      series.forEach(s => {
+      // Gestapelte Balken: je Stapel ein eigener, blasser Vergleichsstapel ('<Schlüssel>-cmp') mit
+      // denselben Segmenten; bei Anteilen (%) auf die eigene Summe normiert (Parität zu chart_editor.js).
+      const compareShiftMs = s => ((s.compare_window_start != null && data.window_start != null)
+        ? (data.window_start - s.compare_window_start) * 1000 : 0);
+      const compareResampled = s => resamplePoints(
+        s.compare_points, range, resolutionPreset, s.aggregation_type, s.compare_window_start
+      );
+      const compareStackKey = (s, i) => (stackKeys[i] && s.chart_type === 'bar' && s.compare_points && s.compare_points.length)
+        ? stackKeys[i] + '-cmp' : null;
+      const compareTotals = new Map();
+      const lastCompareIndex = new Map();
+      series.forEach((s, i) => {
+        const key = compareStackKey(s, i);
+        if (!key) return;
+        lastCompareIndex.set(key, i);
+        if (!normalizeActive || !barOnlyAxis.has(axisKey(s))) return;
+        if (!compareTotals.has(key)) compareTotals.set(key, new Map());
+        const totals = compareTotals.get(key);
+        const shift = compareShiftMs(s);
+        compareResampled(s).forEach(p => { const x = p.ts * 1000 + shift; totals.set(x, (totals.get(x) || 0) + p.value); });
+      });
+      series.forEach((s, i) => {
         if (!s.compare_points || !s.compare_points.length) return;
         const color = colorFor(s.entity_id);
         const displayName = entityNames[s.entity_id] || s.friendly_name;
-        const shiftMs = (s.compare_window_start != null && data.window_start != null)
-          ? (data.window_start - s.compare_window_start) * 1000
-          : 0;
-        const comparePoints = resamplePoints(
-          s.compare_points, range, resolutionPreset, s.aggregation_type, s.compare_window_start
-        );
-        const compareData = comparePoints.map(p => [p.ts * 1000 + shiftMs, p.value, s.unit, effectiveDecimals(s), isDurationSeries(s)]);
+        const shiftMs = compareShiftMs(s);
+        const cmpStackKey = compareStackKey(s, i);
+        const cmpNormalized = !!cmpStackKey && normalizeActive && barOnlyAxis.has(axisKey(s));
+        const compareData = compareResampled(s).map(p => {
+          const x = p.ts * 1000 + shiftMs;
+          if (!cmpNormalized) return [x, p.value, s.unit, effectiveDecimals(s), isDurationSeries(s)];
+          const total = compareTotals.get(cmpStackKey).get(x) || 0;
+          return [x, total ? (p.value / total) * 100 : 0, '%', 0, false, p.value, s.unit, effectiveDecimals(s)];
+        });
         if (s.chart_type === 'line' && compareData.length && data.window_end != null
             && compareData[compareData.length - 1][0] < data.window_end * 1000) {
           const last = compareData[compareData.length - 1];
@@ -1269,6 +1335,7 @@
         }
         const cmp = {
           name: `${displayName} (${compare.mode === 'year' ? t('Vorjahr') : t('Vorperiode')})`,
+          legendOwner: displayName,
           type: s.chart_type,
           yAxisIndex: units.indexOf(axisKey(s)),
           data: compareData,
@@ -1281,8 +1348,14 @@
           cmp.smooth = true;
           if (!showPoints) cmp.symbol = 'none';
           if (areaFill) cmp.areaStyle = {color, opacity: 0.05};
-        } else {
+        } else if (!cmpStackKey) {
           cmp.itemStyle.borderRadius = [3, 3, 0, 0];
+        } else if (lastCompareIndex.get(cmpStackKey) === i) {
+          cmp.itemStyle.borderRadius = [3, 3, 0, 0];
+        }
+        if (cmpStackKey) {
+          cmp.stack = cmpStackKey;
+          stackNameByKey.set(cmpStackKey, `${stackNameByKey.get(stackKeys[i]) || ''}${hasStackGroups ? ' ' : ''}(${compare.mode === 'year' ? t('Vorjahr') : t('Vorperiode')})`.trim());
         }
         echartsSeries.push(cmp);
       });
@@ -1295,7 +1368,12 @@
     // legendToggleSelect (setupLegendToggles()) überhaupt etwas zum
     // Umschalten hat.
     const legendSelected = {};
-    echartsSeries.forEach(s => { legendSelected[s.name] = !hiddenSet || !hiddenSet.has(s.name); });
+    // Begleitserien (Vorjahr/Vorperiode, gleitender Ø) folgen der Hauptserie
+    // (legendOwner) — ausgeblendete Serie, ausgeblendete Vergleichswerte.
+    echartsSeries.forEach(s => {
+      const key = s.legendOwner || s.name;
+      legendSelected[s.name] = !hiddenSet || !hiddenSet.has(key);
+    });
 
     chart.setOption({
       animation,
@@ -1307,7 +1385,10 @@
       grid: {
         left: 6,
         right: showValues && horizontalActive ? 36 : 6,
-        top: showValues && !horizontalActive && !stackedActive ? 10 + scaledFont(10) + 6 : 10,
+        // Mit Einheit am Achsennamen braucht der Kopf Platz für diese Zeile (bei "Werte anzeigen" teilen sie sich ihn).
+        top: Math.max(
+          showValues && !horizontalActive && !stackedActive ? 10 + scaledFont(10) + 6 : 10,
+          yAxis.some(a => a.name) && !horizontalActive ? 10 + scaledFont(10) + 4 : 10),
         bottom: 20,
         containLabel: true,
       },
@@ -1374,7 +1455,7 @@
           const header = singleBucket
             ? (data.window_start != null ? new Date(data.window_start * 1000).toLocaleDateString(LOCALE, window.ServerTime.withZone({day: '2-digit', month: '2-digit', year: 'numeric'})) : '')
             : fmtTooltipTimestamp(params[0].axisValue, tooltipBucketSeconds);
-          const rows = params.map(p => {
+          const rowOf = p => {
             const unit = p.data[2] || '';
             const decimals = p.data[3];
             const value = p.data[4]
@@ -1392,8 +1473,44 @@
                  + `<span>${p.marker}${escapeHtml(p.seriesName)}</span>`
                  + `<span style="margin-left:8px;text-align:right;"><strong>${value}${extra}</strong>`
                  + `${TooltipHold.note(p, inkFaint, ms => fmtTooltipTimestamp(ms, tooltipBucketSeconds))}</span></div>`;
-          }).join('');
-          return header ? `<div style="margin-bottom:4px;color:${inkFaint};">${header}</div>${rows}` : rows;
+          };
+          // Summe je Stapel (nur mit eigenen Stapeln): bei Anteilen (%) die Summe der Absolutwerte.
+          const sums = new Map();
+          if (hasStackGroups) {
+            params.forEach(p => {
+              const key = (echartsSeries[p.seriesIndex] || {}).stack;
+              if (!key) return;
+              const abs = p.data[5];
+              const entry = sums.get(key) || {n: 0, sum: 0, unit: abs != null ? p.data[6] : p.data[2], decimals: abs != null ? p.data[7] : p.data[3], duration: !!p.data[4]};
+              entry.n += 1;
+              entry.sum += abs != null ? abs : p.data[1];
+              sums.set(key, entry);
+            });
+          }
+          const sumRowFor = (key, e) => {
+            const value = e.duration ? NumberFormat.fmtDuration(e.sum) : `${fmtCompactNumber(e.sum, e.decimals)}${e.unit ? ' ' + escapeHtml(e.unit) : ''}`;
+            return `<div style="display:flex;justify-content:space-between;gap:14px;margin-top:4px;padding-top:4px;border-top:1px solid ${borderColor};margin-bottom:6px;">`
+                 + `<span>Σ ${escapeHtml(stackNameByKey.get(key) || '')}</span><span style="margin-left:8px;text-align:right;"><strong>${value}</strong></span></div>`;
+          };
+          // Mitglieder eines Stapels stehen eingerückt beisammen (an der Stelle des ersten) mit der Summe darunter,
+          // übrige Zeilen in Reihenfolge (Parität zu stackedRows in chart_editor.js).
+          const stackOfParam = p => (echartsSeries[p.seriesIndex] || {}).stack;
+          const stackedRows = renderRow => {
+            const out = [];
+            const done = new Set();
+            params.forEach(p => {
+              const key = stackOfParam(p);
+              const e = key && sums.get(key);
+              if (!e || e.n < 2) { out.push(renderRow(p)); return; }
+              if (done.has(key)) return;
+              done.add(key);
+              params.filter(q => stackOfParam(q) === key).forEach(q => out.push(`<div style="padding-left:10px;border-left:2px solid ${borderColor};">${renderRow(q)}</div>`));
+              out.push(sumRowFor(key, e));
+            });
+            return out.join('');
+          };
+          const body = stackedRows(rowOf);
+          return header ? `<div style="margin-bottom:4px;color:${inkFaint};">${header}</div>${body}` : body;
         },
         // Kachel hat overflow:hidden (verhindert, dass z. B. die Legende das
         // Kachel-Layout sprengt) — ohne appendToBody würde der Tooltip am
@@ -1413,7 +1530,26 @@
     }, true);
   }
 
+  // Name des Stapels je Entität für die Legende (nur bei wirksamen Stapeln): gleiche Regel wie
+  // stackKeys in draw() — Balken mit Gruppe, mindestens zwei je Achse.
+  function stackLabels(series, spec) {
+    const out = {};
+    const members = (spec.stackGroups && spec.stackGroups.members) || {};
+    if (!spec.stacked || !Object.keys(members).length) return out;
+    const axisOf = s => (s.aggregation_type === 'switch' && s.display_mode === 'time') ? ' duration' : s.unit;
+    const bars = series.filter(s => s.chart_type === 'bar' && members[s.entity_id]);
+    const counts = new Map();
+    bars.forEach(s => { const k = axisOf(s) + '|' + members[s.entity_id]; counts.set(k, (counts.get(k) || 0) + 1); });
+    bars.forEach(s => {
+      if (counts.get(axisOf(s) + '|' + members[s.entity_id]) < 2) return;
+      const group = (spec.stackGroups.groups || []).find(g => g.id === members[s.entity_id]);
+      out[s.entity_id] = (group && group.name) || t('Stapel');
+    });
+    return out;
+  }
+
   window.ChartTileRender = {
+    stackLabels,
     PALETTE,
     LOCALE,
     scaledFont,

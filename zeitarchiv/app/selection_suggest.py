@@ -82,9 +82,16 @@ def suggest_energy(entities: Iterable[dict[str, Any]], archived: Collection[str]
         row for row in entities
         if row.get("domain") == "sensor" and not row.get("hidden") and row.get("entity_category") != "config"
     ]
+    # Der Gerätezweig gilt nur für Quellen (Netz, Solar, Batterie), nicht für Verbraucher, und nur, wenn das Gerät genau
+    # einen Leistungswert hat: bei Wechselrichtern mit Strings und Phasen wären sonst alle Teilwerte „empfohlen“.
+    source_roles = set(_ENERGY_ROLES) - {"consumer"}
     dashboard_devices = {
-        _group_key(row) for row in rows if row.get("energy_role") in _ENERGY_ROLES and row.get("device")
+        _group_key(row) for row in rows if row.get("energy_role") in source_roles and row.get("device")
     }
+    power_count: dict[str, int] = {}
+    for row in rows:
+        if row.get("device_class") == "power" and row.get("device"):
+            power_count[_group_key(row)] = power_count.get(_group_key(row), 0) + 1
     recommended: list[dict[str, Any]] = []
     more: list[dict[str, Any]] = []
     derived = 0
@@ -98,7 +105,7 @@ def suggest_energy(entities: Iterable[dict[str, Any]], archived: Collection[str]
         elif counter and is_derived_counter(row):
             derived += 1
             continue
-        elif power and row.get("device") and _group_key(row) in dashboard_devices:
+        elif power and row.get("device") and _group_key(row) in dashboard_devices and power_count.get(_group_key(row)) == 1:
             reason, bucket = tr("Leistung am selben Gerät wie eine Quelle aus dem Energie-Dashboard"), recommended
         elif counter:
             reason, bucket = tr("Zählerstand in kWh ({state_class})", state_class=row["state_class"]), more
@@ -108,7 +115,10 @@ def suggest_energy(entities: Iterable[dict[str, Any]], archived: Collection[str]
             continue
         if row.get("entity_category") == "diagnostic" and bucket is recommended and role not in _ENERGY_ROLES:
             bucket = more
-        bucket.append(suggestion(row, reason, archived, high_rate=power or role == "grid_power"))
+        sug = suggestion(row, reason, archived, high_rate=power or role == "grid_power")
+        sug["core"] = role in _ENERGY_ROLES  # nur die Rollen aus dem Energie-Dashboard sind vorangehakt
+        bucket.append(sug)
+    collapse_duplicates(recommended, more)
     return result("energie", recommended, more, derived)
 
 
@@ -126,6 +136,10 @@ def suggestion(row: dict[str, Any], reason: str, archived: Collection[str], *, h
         "kind": _kind(row),
         "reason": reason,
         "group": _group_key(row),
+        "platform": row.get("platform"),
+        "device": row.get("device"),
+        "domain": row.get("domain"),
+        "device_class": row.get("device_class"),
         "status": status,
         "high_rate": high_rate,
         "text": bool(row.get("text")),
@@ -134,18 +148,50 @@ def suggestion(row: dict[str, Any], reason: str, archived: Collection[str], *, h
     }
 
 
-def result(topic: str, recommended: list[dict], more: list[dict], derived: int) -> dict[str, Any]:
+#: Themen ohne Vorauswahl: sensible Themen (Türen, Anwesenheit) und Batterien (viele Geräte, selten alle gewollt).
+#: Die Zeilen stehen trotzdem unter „Empfohlen“, markiert wird bewusst selbst.
+NO_PRECHECK = frozenset({"batterien", "tueren_fenster", "anwesenheit"})
+
+
+def collapse_duplicates(recommended: list[dict[str, Any]], more: list[dict[str, Any]]) -> None:
+    """Dasselbe Gerät über zwei Integrationen (z. B. ``eltako`` und ``enocean_eltako``): nur eine Zeile bleibt empfohlen.
+
+    Als Doppelte gelten empfohlene Zeilen mit gleichem Gerät, gleicher Domain und gleicher Geräteklasse aus mindestens
+    zwei Integrationen, wenn jede Integration genau eine solche Zeile liefert (sonst ist es kein Paar, sondern eine echte
+    Mehrzahl). Es bleibt die schon archivierte oder ausgewählte Zeile, sonst die der alphabetisch ersten Integration; die
+    übrigen wandern mit dem Hinweis „Doppelt“ zu den weiteren Treffern. Nichts geht verloren, nur die Vorauswahl entfällt."""
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for row in recommended:
-        row["checked"] = row["status"] == "new"
+        if row.get("device") and row.get("platform"):
+            groups.setdefault((row["device"], row.get("domain"), row.get("device_class")), []).append(row)
+    for rows in groups.values():
+        platforms = [row["platform"] for row in rows]
+        if len(set(platforms)) < 2 or len(set(platforms)) != len(platforms):
+            continue
+        keep = min(rows, key=lambda row: (row["status"] not in ("archived", "selected"), row["platform"]))
+        for row in rows:
+            if row is keep:
+                continue
+            recommended.remove(row)
+            row["reason"] = tr("Doppelt: dieselbe Entität kommt auch über {platform}", platform=keep["platform"])
+            more.append(row)
+
+
+def result(topic: str, recommended: list[dict], more: list[dict], derived: int) -> dict[str, Any]:
+    precheck = topic not in NO_PRECHECK
+    for row in recommended:
+        row["checked"] = precheck and row["status"] == "new" and row.get("core", True)
     for row in more:
         row["checked"] = False
     return {
         "topic": topic,
+        "precheck": precheck,
         "recommended": _grouped(recommended),
         "more": _grouped(more),
         "counts": {
             "recommended": len(recommended),
             "recommended_new": sum(1 for r in recommended if r["status"] == "new"),
+            "checked": sum(1 for r in recommended if r["checked"]),
             "more": len(more),
             "derived": derived,
             "found": len(recommended) + len(more) + derived,

@@ -139,7 +139,7 @@ from .storage.coordinator import CoordinatorBusy, StorageCoordinator
 from .storage.paths import ENTITY_ID_MAX_LENGTH, ENTITY_ID_PATTERN, InvalidEntityIdError, validate_entity_id
 from .timezone_config import load_timezone
 from .version import APP_VERSION
-from . import ai_settings_routes, api_routes, entity_category_routes, ha_integration, selection_routes
+from . import ai_settings_routes, api_routes, dashboard_grid, entity_category_routes, ha_integration, selection_routes
 from .import_routes import ImportDependencies, ImportService
 from .index_optimization import (
     build_index_detail_context,
@@ -155,6 +155,7 @@ from .backup_external_routes import BackupExternalDependencies, create_backup_ex
 from .restore_routes import RestoreDependencies, create_restore_router
 from .export_routes import ExportDependencies, create_export_router
 from .entity_delete_routes import EntityDeleteDependencies, create_entity_delete_router
+from .entity_facts_routes import EntityFacts, EntityFactsDependencies, create_entity_facts_router, visible_row_count as _visible_row_count
 from .marked_values_routes import MarkedValuesDependencies, create_marked_values_router
 from .report_routes import ReportDependencies, ReportService
 from .energiedashboard_routes import (
@@ -166,8 +167,8 @@ from .energiedashboard_routes import (
     is_energiedashboard_configured,
 )
 from .wetter_routes import WetterDependencies, WetterService, is_wetter_configured, wetter_role_count
-from . import cleanup_stats, counter_bulk, data_quality, entity_usage, value_range
-from . import dashboard_tiles
+from . import cleanup_stats, counter_bulk, data_quality, entity_usage
+from . import card_elements, dashboard_tiles, overview_tiles, page_layout, page_refresh
 from .dashboard_tiles import tile_metric_context as _tile_metric_context
 from .route_support import (
     MAX_FORM_FIELDS,
@@ -182,7 +183,7 @@ from . import notices as notices_mod
 from . import version_check
 from .notices import collect_notices
 from .chart_period import calendar_bounds, compare_settings_or_400, period_anchor_or_400
-from .chart_types import CHART_EDITOR_CHART_TYPES, ENTITY_CHART_TYPES, chart_type_label, chart_type_key, editor_display_prefill, effective_chart_type, heatmap_states_clean, series_colors_clean
+from .chart_types import CHART_EDITOR_CHART_TYPES, ENTITY_CHART_TYPES, chart_type_label, chart_type_key, editor_display_prefill, effective_chart_type, heatmap_states_clean, series_colors_clean, stack_groups_clean
 from .progress import activity_snapshot, register_source
 
 logger = logging.getLogger(__name__)
@@ -321,6 +322,12 @@ def _current_font_scale() -> str:
     return font_scale
 
 
+def _current_legend_size() -> str:
+    """Globale Legendengröße (Einstellungen → Darstellung): "normal" oder "small"."""
+    value = index.get_setting("legend_size", "normal")
+    return value if value in _GLOBAL_LEGEND_SIZES else "normal"
+
+
 def _font_scale_context(request: Request) -> dict:
     """Starlette context_processor: läuft für JEDE TemplateResponse automatisch
     mit, ohne dass jede einzelne Route den Skalierungsfaktor selbst in ihren
@@ -337,6 +344,9 @@ def _font_scale_context(request: Request) -> dict:
         dashboard_animation = "1"
     return {
         "font_scale_value": FONT_SCALE[font_scale],
+        "legend_size_global": _current_legend_size(),
+        "page_layout": page_layout.current(index),
+        "page_refresh": page_refresh.current(index),
         "dashboard_row_height": DASHBOARD_ROW_HEIGHT[font_scale],
         "color_scheme": color_scheme,
         "color_mode": color_mode,
@@ -347,6 +357,9 @@ def _font_scale_context(request: Request) -> dict:
         # den zwei Stellen (Housekeeping, Einstellungen), die DEMO_MODE bisher
         # schon einzeln in ihren Kontext aufnahmen.
         "demo_mode_active": DEMO_MODE,
+        # Seite steckt im Kachel-Popup des Dashboards (iframe, ?popup=1): ohne Topnav
+        # und Rücklinks, nur lesend (siehe tile-popup.js, Roadmap 1.55).
+        "popup_mode": request.query_params.get("popup") == "1",
     }
 
 
@@ -430,6 +443,7 @@ app.include_router(i18n.make_router(lambda: index))
 app.include_router(ai_settings_routes.make_router(lambda: index, templates, TZ))
 app.include_router(selection_routes.make_router(lambda: index, templates, DATA_DIR, TZ))
 app.include_router(entity_category_routes.make_router(lambda: index, templates, lambda: _add_category_column()))
+app.include_router(dashboard_grid.make_router(lambda: index))
 
 
 class RequestLoggingMiddleware:
@@ -808,6 +822,9 @@ _wetter_service = WetterService(WetterDependencies(
     app_root_context=_app_root_context,
 ))
 app.include_router(_wetter_service.router())
+# Nachgereicht: Die Karte „Ertrag und Wetter“ im Energiedashboard liest Sonnenstunden aus dem Wetter-Dienst.
+_energiedashboard_service.wetter = _wetter_service
+card_elements.bind(index, energie=_energiedashboard_service, wetter=_wetter_service)
 
 
 @app.exception_handler(cleanup.ResultLimitExceeded)
@@ -947,6 +964,7 @@ def entities_view(request: Request) -> HTMLResponse:
         "size_sparkline": _sparkline_paths([s["total_size_bytes"] for s in snapshots]),
         **_dashboard_tiles_context(index.get_default_dashboard_id()),
     }
+    context.update(overview_tiles.page_context(index, TZ, context["total_rows"], context["total_size"]))
     return templates.TemplateResponse(request, "entities.html", context)
 
 
@@ -1050,12 +1068,16 @@ def _settings_darstellung_context(saved: bool = False) -> dict:
         "font_scale": _current_font_scale(),
         "font_scale_options": list(FONT_SCALE_LABELS.items()),
         "font_scale_values": FONT_SCALE,
+        "legend_size": _current_legend_size(),
+        "legend_size_options": list(_LEGEND_SIZE_LABELS.items()),
         "color_scheme": color_scheme,
         "color_scheme_options": list(COLOR_SCHEME_LABELS.items()),
         "color_mode": color_mode,
         "color_mode_options": list(COLOR_MODE_LABELS.items()),
         "dashboard_animation": dashboard_animation,
         "dashboard_animation_options": list(DASHBOARD_ANIMATION_LABELS.items()),
+        **page_layout.settings_context(),
+        **page_refresh.settings_context(),
         "startseite": startseite,
         "startseite_options": list(STARTSEITE_LABELS.items()),
         # Globale Defaults für das Optionen-Menü der Entität-eigenen Chart-Seite
@@ -1402,11 +1424,17 @@ def notices_panel(request: Request) -> HTMLResponse:
 
 
 @app.get("/notices/activity", response_class=HTMLResponse)
-def notices_activity(request: Request) -> HTMLResponse:
+def notices_activity() -> HTMLResponse:
     """Frischer Inhalt für #notice-activity (Glocken-Menü), Gegenstück zu
     notices_panel() — warum nur die LAUFENDEN Vorgänge und nichts über
-    fertige, steht bei activity_snapshot() in progress.py."""
-    return templates.TemplateResponse(request, "_activity_block.html", _notices_context(request))
+    fertige, steht bei activity_snapshot() in progress.py.
+
+    Das Fragment braucht nur ``activity``. Es wird deshalb ohne TemplateResponse gerendert: Die würde alle
+    Kontextprozessoren durchlaufen (Hinweisliste samt Einstellungsabfragen, Navigation, Sprachkatalog) und diese Arbeit
+    bei jedem Takt des Browsers (alle 8 s je offenem Tab) für eine Antwort von meist einem Byte erledigen. Sprache und
+    Zahlenformat stehen schon in den ContextVars der App-Abhängigkeit (i18n.dependencies), ``_`` und ``format_int``
+    sind Umgebungs-Globals bzw. -Filter."""
+    return HTMLResponse(templates.get_template("_activity_block.html").render(activity=activity_snapshot()))
 
 
 @app.get("/settings/muted-notices", response_class=HTMLResponse)
@@ -1545,6 +1573,11 @@ async def settings_darstellung(request: Request) -> HTMLResponse:
             raise HTTPException(status_code=400, detail=tr("Ungültige Schriftgröße"))
         if font_scale is not None:
             index.set_setting("font_scale", str(font_scale))
+        legend_size = form.get("legend_size")
+        if legend_size is not None and legend_size not in _GLOBAL_LEGEND_SIZES:
+            raise HTTPException(status_code=400, detail=tr("Ungültige Legendengröße"))
+        if legend_size is not None:
+            index.set_setting("legend_size", str(legend_size))
         if color_scheme is not None and color_scheme not in COLOR_SCHEME_LABELS:
             raise HTTPException(status_code=400, detail=tr("Ungültiges Farbschema"))
         if color_scheme is not None:
@@ -1563,6 +1596,11 @@ async def settings_darstellung(request: Request) -> HTMLResponse:
             raise HTTPException(status_code=400, detail=tr("Ungültige Startseite"))
         if startseite is not None:
             index.set_setting("startseite", str(startseite))
+        try:
+            page_layout.apply_form(index, form)
+            page_refresh.apply_form(index, form)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         # Globale Defaults für das Optionen-Menü der Entität-eigenen Chart-Seite
         # (entity_detail.html) — jedes Feld postet wie oben einzeln für sich,
@@ -1751,6 +1789,7 @@ register_source("backup", N_("Backup"), lambda: notices_mod.backup_activity(_bac
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    overview_tiles.ensure_defaults(index)
     _background.start()
     yield
     _background.stop()
@@ -2587,90 +2626,6 @@ def statistik_index_optimize(request: Request) -> HTMLResponse:
     )
 
 
-def _entity_facts(entity) -> dict:
-    """Kennzahlen im Kopf der drei Entitätsseiten (Verlauf, Werte bearbeiten,
-    Konfiguration) — dieselben Felder wie die Spalten der Entitätenliste, damit
-    man sie nicht erst dort nachschlagen muss. Ein gemeinsamer Aufbau, weil der
-    Kopf auf allen drei Seiten gleich ist (_entity_facts.html) und die Werte
-    sonst dreimal leicht verschieden zusammengesetzt würden."""
-    last_ts = entity["last_ts"]
-    return {
-        "type_label": format_type(entity["aggregation_type"]),
-        "state_class": entity["state_class"] or "",
-        "unit": entity["unit"] or "",
-        "row_count": format_int(_visible_row_count(entity)),
-        "size": format_size(entity["size_bytes"]),
-        "first_ts": format_timestamp(entity["first_ts"], TZ),
-        "first_ts_time": format_time(entity["first_ts"], TZ),
-        "last_ts": format_timestamp(last_ts, TZ),
-        "last_ts_time": format_time(last_ts, TZ),
-        # Nur die größte Einheit („vor 1 Std.“, nicht „vor 1 Std. 16 Min.“): so passt
-        # sie hinter die Uhrzeit in dieselbe Zeile, ohne dass die Zelle höher wird
-        # oder mitten im Satz umbricht. Jede Einheit besteht aus Zahl und Wort.
-        "last_ago": tr("vor {dauer}", dauer=" ".join(format_uptime(max(0.0, time.time() - last_ts)).split()[:2])) if last_ts else "",
-        "extra": _entity_facts_extra(entity),
-        "category": _entity_facts_category(entity["entity_id"]),
-    }
-
-
-def _entity_facts_category(entity_id: str) -> dict | None:
-    """Die Kategorie der Entität für den Chip unter dem Typ, oder None ohne."""
-    category_id = index.get_entity_category_id(entity_id)
-    if category_id is None:
-        return None
-    return next((c for c in index.list_entity_categories() if c["id"] == category_id), None)
-
-
-def _entity_facts_extra(entity) -> dict | None:
-    """Die typabhängige letzte Zelle der Kennzahlen-Leiste, oder None, wo es
-    keinen sinnvollen Wert gibt (Schalter).
-
-    Standard: Minimum/Maximum über den gesamten Zeitraum. Der Index kennt sie
-    nicht, ein Vollscan gehört nicht in den Seitenaufbau — liegt kein gültiger
-    Zwischenspeicher vor, bleibt `text` leer und der Browser holt sie über
-    /entities/{id}/value-range nach (static/js/entity-facts.js).
-    Zähler: der aktuelle Zählerstand (Min/Max wären hier nur Anfangs- und
-    Endstand). Zustand: Zahl der bekannten Zustände."""
-    kind = entity["aggregation_type"]
-    decimals = decimals_to_int(entity["decimals"])
-    if kind == "standard":
-        entry = value_range.cached(index, entity)
-        return {
-            "label": tr("Min / Max"), "note": tr("gesamter Zeitraum"), "pending": entry is None,
-            "text": _value_range_text(entry, decimals, entity) if entry else "",
-        }
-    if kind == "counter":
-        # last_value fehlt nach Import/Restore/Abgleich — dann aus den Daten lesen,
-        # statt die Zelle je nach Herkunft der Entität verschwinden zu lassen.
-        last = entity["last_value"]
-        if last is None:
-            last = value_range.last_raw_value(DATA_DIR, index, TZ, entity, datetime.now(TZ))
-        return {"label": tr("Zählerstand"), "note": "", "pending": False,
-                "text": _with_unit(format_value(last, decimals), entity) if last is not None else "—"}
-    if kind == "state":
-        return {"label": tr("Zustände"), "note": tr("verschieden"), "pending": False,
-                "text": format_int(len(index.get_state_map(entity["entity_id"])))}
-    return None
-
-
-def _with_unit(text: str, entity) -> str:
-    """Wert mit Einheit, damit die Zelle für sich lesbar ist (die Einheit steht
-    zusätzlich in der Typ-Zelle, dort aber weit weg vom Wert)."""
-    return f"{text} {entity['unit']}" if entity["unit"] else text
-
-
-def _value_range_text(entry: dict, decimals: int | None, entity) -> str:
-    if entry["min"] is None or entry["max"] is None:
-        return "—"
-    return _with_unit(f"{format_value(entry['min'], decimals)} / {format_value(entry['max'], decimals)}", entity)
-
-
-def _visible_row_count(entity) -> int:
-    """Logische Rohwerte: physischer Indexzähler abzüglich Soft-Deletes."""
-    deleted_count = int(entity["deleted_count"] or 0)
-    return max(0, int(entity["row_count"] or 0) - deleted_count)
-
-
 # Spalten der Entitäten-Tabelle jenseits von Favorit-Stern und Entität
 # (Name+ID) — beide sind Kernfunktion (Favorisieren, Navigation) und deshalb
 # nicht abwählbar. Die Tabelle ist mit allen Spalten strukturell breiter als
@@ -3061,19 +3016,6 @@ def entity_outlier_rate(request: Request, entity_id: str) -> HTMLResponse:
     )
 
 
-@app.get("/entities/{entity_id}/value-range")
-@_storage_locked(lambda args: args["entity_id"])
-def entity_value_range(entity_id: str) -> dict:
-    """Minimum/Maximum der Entität über den gesamten Zeitraum, als Text für die
-    Kennzahlen-Leiste. Rechnet bei Bedarf einen Vollscan (siehe value_range.py)
-    — deshalb ein eigener Aufruf, den die Seite erst nach dem Laden stellt."""
-    entity = _require_entity(entity_id)
-    entry = value_range.cached(index, entity) or value_range.compute(
-        DATA_DIR, index, TZ, entity, datetime.now(TZ)
-    )
-    return {"text": _value_range_text(entry, decimals_to_int(entity["decimals"]), entity)}
-
-
 @app.get("/entities/{entity_id}/config", response_class=HTMLResponse)
 @_storage_locked(lambda args: args["entity_id"])
 def entity_config_page(request: Request, entity_id: str) -> HTMLResponse:
@@ -3259,6 +3201,7 @@ class _EntityChartOptionsBody(BaseModel):
     average_line: bool = False
     legend_metrics: list[str]
     legend_style: str
+    legend_size: str = ""
     decimals: str
     # Wechsel-Protokoll unter dem Zeitstrahl (nur Zustands-Entitäten).
     state_log: bool = True
@@ -3312,6 +3255,12 @@ def entity_delete(entity_id: str) -> dict:
 app.include_router(create_entity_delete_router(EntityDeleteDependencies(
     index=index, data_dir=DATA_DIR, tz=TZ, coordinator=storage_coordinator, background=_background,
 )))
+_entity_facts_service = EntityFacts(EntityFactsDependencies(
+    index=index, data_dir=DATA_DIR, tz=TZ, coordinator=storage_coordinator,
+    require_entity=lambda entity_id: _require_entity(entity_id),
+))
+_entity_facts = _entity_facts_service.facts
+app.include_router(create_entity_facts_router(_entity_facts_service))
 
 
 @app.get("/entities/{entity_id}/migrate", response_class=HTMLResponse)
@@ -3499,7 +3448,11 @@ _CHART_RANGE_OPTIONS = [
 ]
 _CHART_RESOLUTION_PRESETS = {"auto", "medium", "coarse", "full"}
 _CHART_LEGEND_METRICS = {"last", "min", "max", "average", "sum"}
-_CHART_LEGEND_STYLES = {"chips", "table"}
+# "off" blendet die Legende ganz aus (ROADMAP 1.52). Die Größe ist je Chart leer
+# (folgt der globalen Einstellung "Legendengröße") oder "normal"/"small".
+_CHART_LEGEND_STYLES = {"chips", "table", "off"}
+_CHART_LEGEND_SIZES = {"", "normal", "small"}
+_GLOBAL_LEGEND_SIZES = {"normal", "small"}
 # "Flach" (bisherige waagerechte Durchschnittslinie) oder "Gleitend" (neue
 # Trendlinie über Linien-Serien) — verschachtelt unter "Durchschnittslinie",
 # siehe chart_editor.js render()/movingAverage().
@@ -3538,6 +3491,7 @@ _ENTITY_CHART_OPTION_DEFAULTS = {
     "average_line": False,
     "legend_metrics": ["last", "min", "max", "average", "sum"],
     "legend_style": "chips",
+    "legend_size": "",
     "decimals": "auto",
     "area_fill": True,  # wie im Chart-Editor und auf Dashboard-Kacheln
     "average_style": "flat",
@@ -3547,7 +3501,8 @@ _ENTITY_CHART_OPTION_DEFAULTS = {
 }
 _ENTITY_CHART_DECIMALS = {"auto", "0", "1", "2", "3", "4"}
 _ON_OFF_LABELS = {"1": N_("An"), "0": N_("Aus")}
-_ENTITY_LEGEND_STYLE_LABELS = {"chips": N_("Chips"), "table": N_("Tabelle")}
+_ENTITY_LEGEND_STYLE_LABELS = {"chips": N_("Chips"), "table": N_("Tabelle"), "off": N_("Aus")}
+_LEGEND_SIZE_LABELS = {"normal": N_("Normal"), "small": N_("Klein")}
 _ENTITY_LEGEND_METRIC_LABELS = {"last": N_("Aktuell"), "min": N_("Min"), "max": N_("Max"), "average": N_("Durchschnitt"), "sum": N_("Summe")}
 
 
@@ -3558,6 +3513,8 @@ def _validate_entity_chart_options(data: dict) -> None:
         raise HTTPException(status_code=400, detail=tr("Ungültige Legenden-Kennzahl"))
     if "legend_style" in data and data["legend_style"] not in _CHART_LEGEND_STYLES:
         raise HTTPException(status_code=400, detail=tr("Ungültiger Legenden-Stil"))
+    if "legend_size" in data and data["legend_size"] not in _CHART_LEGEND_SIZES:
+        raise HTTPException(status_code=400, detail=tr("Ungültige Legendengröße"))
     if "decimals" in data and data["decimals"] not in _ENTITY_CHART_DECIMALS:
         raise HTTPException(status_code=400, detail=tr("Ungültige Nachkommastellen"))
 
@@ -3638,7 +3595,8 @@ def _chart_editor_context(chart: dict | None, prefill: dict | None = None) -> di
     rows = index.list_entities()
     entity_options = [
         {
-            "entity_id": row["entity_id"], "label": row["friendly_name"] or row["entity_id"], "unit": row["unit"] or "",
+            "entity_id": row["entity_id"], "label": entity_display_name(row["entity_id"], row["friendly_name"], row["custom_name"]),
+            "unit": row["unit"] or "",
             "aggregation_type": row["aggregation_type"], "is_favorite": bool(row["is_favorite"]),  # entityMultiPicker
         }
         for row in rows
@@ -3648,6 +3606,7 @@ def _chart_editor_context(chart: dict | None, prefill: dict | None = None) -> di
         "chart_id": chart["id"] if chart else None,
         "chart_name": chart["name"] if chart else prefill.get("name", ""),
         "selected_entity_ids": chart["entity_ids"] if chart else prefill.get("entity_ids", []),
+        "max_entities": MAX_MULTI_QUERY_ENTITIES,
         "range_key": chart["range_key"] if chart else prefill.get("range_key", "day"),
         "continuous": chart["continuous"] if chart else prefill.get("continuous", False),
         "resolution_preset": chart["resolution_preset"] if chart else prefill.get("resolution_preset", "auto"),
@@ -3655,6 +3614,8 @@ def _chart_editor_context(chart: dict | None, prefill: dict | None = None) -> di
         "chart_stats": chart["chart_stats"] if chart else prefill.get("chart_stats", True),
         "legend_metrics": chart["legend_metrics"] if chart else prefill.get("legend_metrics", ["sum"]),
         "legend_style": chart["legend_style"] if chart else prefill.get("legend_style", "chips"),
+        "legend_size": chart["legend_size"] if chart else prefill.get("legend_size", ""),
+        "legend_size_global": _current_legend_size(),
         "chart_type": effective_chart_type(chart, _aggregation_types()) if chart else prefill.get("chart_type", "auto"),
         "decimals": chart["decimals"] if chart else prefill.get("decimals", "auto"),
         "show_values": chart["show_values"] if chart else prefill.get("show_values", False),
@@ -3679,6 +3640,7 @@ def _chart_editor_context(chart: dict | None, prefill: dict | None = None) -> di
         "compare_settings": chart["compare_settings"] if chart else {},
         "heatmap_states": chart["heatmap_states"] if chart else prefill.get("heatmap_states", {}),
         "series_colors": chart["series_colors"] if chart else {},
+        "stack_groups": chart["stack_groups"] if chart else {},
     }
 
 
@@ -3728,6 +3690,7 @@ class _SaveChartBody(BaseModel):
     chart_stats: bool = True
     legend_metrics: list[str] = ["sum"]
     legend_style: str = "chips"
+    legend_size: str = ""
     chart_type: str = "auto"
     decimals: str = "auto"
     show_values: bool = False
@@ -3743,6 +3706,7 @@ class _SaveChartBody(BaseModel):
     compare_settings: dict = {}  # Vergleich, siehe chart_period.py
     heatmap_states: dict[str, str] = {}  # gezeichneter Zustand je Entität der Heatmap
     series_colors: dict[str, str] = {}  # eigene Serienfarbe, siehe series_colors_clean()
+    stack_groups: dict = {}  # Stapel und Zuordnung, siehe stack_groups_clean()
 
 
 def _hidden_for(body: _SaveChartBody) -> list[str]:
@@ -3761,6 +3725,11 @@ def charts_create(body: _SaveChartBody) -> dict:
         raise HTTPException(status_code=400, detail=tr("Bitte einen Namen für das Chart angeben"))
     if not body.entity_ids:
         raise HTTPException(status_code=400, detail=tr("Bitte mindestens eine Entität auswählen"))
+    if len(body.entity_ids) > MAX_MULTI_QUERY_ENTITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=tr("Maximal {MAX_MULTI_QUERY_ENTITIES} Entitäten pro Abfrage", MAX_MULTI_QUERY_ENTITIES=MAX_MULTI_QUERY_ENTITIES),
+        )
     if body.range_key not in dict(_CHART_RANGE_OPTIONS):
         raise HTTPException(status_code=400, detail=tr("Ungültiger Zeitraum"))
     if body.resolution_preset not in _CHART_RESOLUTION_PRESETS:
@@ -3769,6 +3738,8 @@ def charts_create(body: _SaveChartBody) -> dict:
         raise HTTPException(status_code=400, detail=tr("Ungültige Legenden-Kennzahl"))
     if body.legend_style not in _CHART_LEGEND_STYLES:
         raise HTTPException(status_code=400, detail=tr("Ungültiger Legenden-Stil"))
+    if body.legend_size not in _CHART_LEGEND_SIZES:
+        raise HTTPException(status_code=400, detail=tr("Ungültige Legendengröße"))
     if body.chart_type not in CHART_EDITOR_CHART_TYPES:
         raise HTTPException(status_code=400, detail=tr("Ungültiger Diagrammtyp"))
     if body.decimals not in _ENTITY_CHART_DECIMALS:
@@ -3783,7 +3754,7 @@ def charts_create(body: _SaveChartBody) -> dict:
         entity_names, hidden_entity_ids=_hidden_for(body),
         resolution_preset=body.resolution_preset, dynamic_y_axis=body.dynamic_y_axis,
         chart_stats=body.chart_stats, legend_metrics=body.legend_metrics,
-        legend_style=body.legend_style, chart_type=body.chart_type,
+        legend_style=body.legend_style, legend_size=body.legend_size, chart_type=body.chart_type,
         decimals=body.decimals, show_values=body.show_values,
         average_line=body.average_line, area_fill=body.area_fill, show_points=body.show_points,
         stacked=body.stacked, normalize=body.normalize, average_style=body.average_style,
@@ -3791,16 +3762,20 @@ def charts_create(body: _SaveChartBody) -> dict:
         period_anchor=period_anchor_or_400(body.period_anchor), compare_settings=compare_settings_or_400(body.compare_settings),
         heatmap_states=heatmap_states_clean(body.heatmap_states, body.entity_ids),
         series_colors=series_colors_clean(body.series_colors, body.entity_ids),
+        stack_groups=stack_groups_clean(body.stack_groups, body.entity_ids),
     )
     return {"id": chart_id}
 
 
 @app.get("/charts/{chart_id}", response_class=HTMLResponse)
-def charts_view(request: Request, chart_id: int) -> HTMLResponse:
+def charts_view(request: Request, chart_id: int, from_dashboard: str | None = None) -> HTMLResponse:
     chart = index.get_saved_chart(chart_id)
     if chart is None:
         raise HTTPException(status_code=404, detail=tr("Chart nicht gefunden"))
-    return templates.TemplateResponse(request, "chart_editor.html", _chart_editor_context(chart))
+    return templates.TemplateResponse(
+        request, "chart_editor.html",
+        {**_chart_editor_context(chart), "back_dashboard": _back_dashboard(from_dashboard)},
+    )
 
 
 @app.post("/charts/{chart_id}")
@@ -3811,6 +3786,11 @@ def charts_update(chart_id: int, body: _SaveChartBody) -> dict:
         raise HTTPException(status_code=400, detail=tr("Bitte einen Namen für das Chart angeben"))
     if not body.entity_ids:
         raise HTTPException(status_code=400, detail=tr("Bitte mindestens eine Entität auswählen"))
+    if len(body.entity_ids) > MAX_MULTI_QUERY_ENTITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=tr("Maximal {MAX_MULTI_QUERY_ENTITIES} Entitäten pro Abfrage", MAX_MULTI_QUERY_ENTITIES=MAX_MULTI_QUERY_ENTITIES),
+        )
     if body.range_key not in dict(_CHART_RANGE_OPTIONS):
         raise HTTPException(status_code=400, detail=tr("Ungültiger Zeitraum"))
     if body.resolution_preset not in _CHART_RESOLUTION_PRESETS:
@@ -3819,6 +3799,8 @@ def charts_update(chart_id: int, body: _SaveChartBody) -> dict:
         raise HTTPException(status_code=400, detail=tr("Ungültige Legenden-Kennzahl"))
     if body.legend_style not in _CHART_LEGEND_STYLES:
         raise HTTPException(status_code=400, detail=tr("Ungültiger Legenden-Stil"))
+    if body.legend_size not in _CHART_LEGEND_SIZES:
+        raise HTTPException(status_code=400, detail=tr("Ungültige Legendengröße"))
     if body.chart_type not in CHART_EDITOR_CHART_TYPES:
         raise HTTPException(status_code=400, detail=tr("Ungültiger Diagrammtyp"))
     if body.decimals not in _ENTITY_CHART_DECIMALS:
@@ -3833,7 +3815,7 @@ def charts_update(chart_id: int, body: _SaveChartBody) -> dict:
         body.continuous, entity_names, hidden_entity_ids=_hidden_for(body),
         resolution_preset=body.resolution_preset,
         dynamic_y_axis=body.dynamic_y_axis, chart_stats=body.chart_stats, legend_metrics=body.legend_metrics,
-        legend_style=body.legend_style, chart_type=body.chart_type,
+        legend_style=body.legend_style, legend_size=body.legend_size, chart_type=body.chart_type,
         decimals=body.decimals, show_values=body.show_values,
         average_line=body.average_line, area_fill=body.area_fill, show_points=body.show_points,
         stacked=body.stacked, normalize=body.normalize, average_style=body.average_style,
@@ -3841,6 +3823,7 @@ def charts_update(chart_id: int, body: _SaveChartBody) -> dict:
         period_anchor=period_anchor_or_400(body.period_anchor), compare_settings=compare_settings_or_400(body.compare_settings),
         heatmap_states=heatmap_states_clean(body.heatmap_states, body.entity_ids),
         series_colors=series_colors_clean(body.series_colors, body.entity_ids),
+        stack_groups=stack_groups_clean(body.stack_groups, body.entity_ids),
     )
     return {"id": chart_id}
 
@@ -3876,13 +3859,14 @@ def charts_duplicate(chart_id: int) -> dict:
         resolution_preset=chart["resolution_preset"],
         dynamic_y_axis=chart["dynamic_y_axis"],
         chart_stats=chart["chart_stats"], legend_metrics=chart["legend_metrics"],
-        legend_style=chart["legend_style"], chart_type=chart["chart_type"],
+        legend_style=chart["legend_style"], legend_size=chart["legend_size"], chart_type=chart["chart_type"],
         decimals=chart["decimals"], show_values=chart["show_values"],
         average_line=chart["average_line"], area_fill=chart["area_fill"], show_points=chart["show_points"],
         stacked=chart["stacked"], normalize=chart["normalize"], average_style=chart["average_style"],
         horizontal=chart["horizontal"], donut_aggregation=chart["donut_aggregation"],
         period_anchor=chart["period_anchor"], compare_settings=chart["compare_settings"],
         heatmap_states=chart["heatmap_states"], series_colors=chart["series_colors"],
+        stack_groups=chart["stack_groups"],
     )
     return {"id": new_id}
 
@@ -3902,6 +3886,26 @@ def _require_dashboard_unlocked(dashboard_id: int) -> None:
     dashboard = index.get_dashboard(dashboard_id)
     if dashboard is not None and dashboard["locked"]:
         raise HTTPException(status_code=423, detail=tr("Dashboard ist fixiert — Layout-Änderungen sind gesperrt"))
+
+
+def _back_dashboard(from_dashboard: str | None) -> dict | None:
+    """Rücklink zum Dashboard, von dem aus eine Kachel geöffnet wurde (?from_dashboard=…).
+
+    Serverseitig statt über document.referrer (dynamic-back-link.js): unter HA-Ingress fehlt der
+    Referrer oft, dann fehlte der Rückweg zum Dashboard ganz. Gültig ist nur eine vorhandene
+    Dashboard-ID; alles andere (fremde Werte, gelöschtes Dashboard) ergibt keinen Link, nie einen Fehler.
+    Das Standard-Dashboard führt zur Übersichtsseite, die es als Startseite zeigt."""
+    if not from_dashboard or not from_dashboard.isdigit():
+        return None
+    dashboard = index.get_dashboard(int(from_dashboard))
+    if dashboard is None:
+        return None
+    if dashboard["is_default"]:
+        return {"path": "/uebersicht", "label": tr("← zurück zur Übersicht")}
+    return {
+        "path": f"/dashboards/{dashboard['id']}",
+        "label": tr("← zurück zum Dashboard „{name}“", name=dashboard["name"]),
+    }
 
 
 def _get_dashboard_or_404(dashboard_id: int) -> dict:
@@ -3981,9 +3985,9 @@ class _ResizeDashboardTileBody(BaseModel):
     dashboard_id: int = 1
     item_type: str
     item_id: int
-    # Obergrenze 6 (Präziser Modus) statt 3 — die eigentliche, vom aktuellen
-    # Modus abhängige Grenze prüft index.set_dashboard_pin_size() (max_size).
-    grid_cols: int = Field(ge=1, le=6)
+    # Obergrenzen des größten Falls (8 Spalten präzise bei 4 Kacheln pro Zeile) — die vom Dashboard
+    # abhängigen Grenzen prüft index.set_dashboard_pin_size() (dashboard_grid.size_limits()).
+    grid_cols: int = Field(ge=1, le=8)
     grid_rows: int = Field(ge=1, le=6)
 
 
@@ -4006,10 +4010,10 @@ def dashboard_size(body: _ResizeDashboardTileBody) -> dict:
         raise HTTPException(status_code=422, detail=tr("Ungültiger Dashboard-Kacheltyp"))
     _require_dashboard_unlocked(body.dashboard_id)
     dashboard = index.get_dashboard(body.dashboard_id)
-    max_size = 6 if dashboard and dashboard["precise_mode"] else 3
+    max_cols, max_rows = dashboard_grid.size_limits(dashboard)
     try:
         updated = index.set_dashboard_pin_size(
-            body.dashboard_id, body.item_type, body.item_id, body.grid_cols, body.grid_rows, max_size=max_size
+            body.dashboard_id, body.item_type, body.item_id, body.grid_cols, body.grid_rows, max_cols=max_cols, max_rows=max_rows
         )
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
@@ -4103,7 +4107,7 @@ def dashboard_unpin_entity(request: Request, pin_id: int, dashboard_id: int = 1)
 class _ResizeDashboardEntityTileBody(BaseModel):
     dashboard_id: int = 1
     pin_id: int
-    grid_cols: int = Field(ge=1, le=6)
+    grid_cols: int = Field(ge=1, le=8)
     grid_rows: int = Field(ge=1, le=6)
 
 
@@ -4111,10 +4115,10 @@ class _ResizeDashboardEntityTileBody(BaseModel):
 def dashboard_entity_size(body: _ResizeDashboardEntityTileBody) -> dict:
     _require_dashboard_unlocked(body.dashboard_id)
     dashboard = index.get_dashboard(body.dashboard_id)
-    max_size = 6 if dashboard and dashboard["precise_mode"] else 3
+    max_cols, max_rows = dashboard_grid.size_limits(dashboard)
     try:
         updated = index.set_dashboard_entity_pin_size(
-            body.dashboard_id, body.pin_id, body.grid_cols, body.grid_rows, max_size=max_size
+            body.dashboard_id, body.pin_id, body.grid_cols, body.grid_rows, max_cols=max_cols, max_rows=max_rows
         )
     except ValueError as err:
         raise HTTPException(status_code=422, detail=str(err)) from err
@@ -4388,6 +4392,31 @@ def dashboards_new(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "dashboard_editor.html", {"dashboard": None})
 
 
+def _dashboard_editor_context(dashboard: dict) -> dict:
+    """Beim Standard-Dashboard kommen die Optionen der Übersichtsseite dazu (früher unter Einstellungen → Darstellung)."""
+    context = {"dashboard": dashboard}
+    if dashboard["is_default"]:
+        context.update(overview_tiles.settings_context(index))
+    return context
+
+
+@app.post("/dashboards/overview-settings", response_class=HTMLResponse)
+async def dashboards_overview_settings(request: Request) -> HTMLResponse:
+    """Speichert eine Änderung der Übersichtsseiten-Optionen und liefert den Block neu zurück."""
+    form = await request.form()
+
+    def apply():
+        try:
+            overview_tiles.apply_form(index, form)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return templates.TemplateResponse(
+            request, "_dashboard_overview_options.html", overview_tiles.settings_context(index)
+        )
+
+    return await run_in_threadpool(apply)
+
+
 @app.get("/dashboards/{dashboard_id}", response_class=HTMLResponse)
 def dashboard_detail(request: Request, dashboard_id: int) -> HTMLResponse:
     dashboard = _get_dashboard_or_404(dashboard_id)
@@ -4402,7 +4431,7 @@ def dashboard_detail(request: Request, dashboard_id: int) -> HTMLResponse:
 def dashboards_edit(request: Request, dashboard_id: int) -> HTMLResponse:
     dashboard = _get_dashboard_or_404(dashboard_id)
     return templates.TemplateResponse(
-        request, "dashboard_editor.html", {"dashboard": dashboard}
+        request, "dashboard_editor.html", _dashboard_editor_context(dashboard)
     )
 
 
@@ -4552,7 +4581,7 @@ class _TableColumnBody(BaseModel):
     in_sum: bool = True
 
 
-_TABLE_ROW_AGGREGATIONS = ("auto", "avg", "min", "max", "sum")
+_TABLE_ROW_AGGREGATIONS = ("auto", "avg", "min", "max", "sum", "last")
 # Zeilenbeschriftung/Abschnittsname — dieselbe Zahl wie das maxlength-Attribut
 # des Felds in table_editor.html, hier zusätzlich serverseitig durchgesetzt
 # (ein Request kann das clientseitige maxlength umgehen).
@@ -4592,6 +4621,10 @@ class _TableRowBody(BaseModel):
     # (z. B. ein stillgelegtes Gerät), ohne dass man sie manuell über
     # "hidden" ein-/ausschalten muss.
     hide_if_empty: bool = False
+    # Nur für row_type "separator" relevant — blendet die Linie aus: die
+    # Trennlinie wird zur Leerzeile, hat aber weiter ihre Abschnittsgrenze
+    # für Summenzeilen und Anteile.
+    hide_line: bool = False
 
 
 class _TableStyleBody(BaseModel):
@@ -4771,11 +4804,14 @@ def tables_create(body: _SaveTableBody) -> dict:
 
 
 @app.get("/tables/{table_id}", response_class=HTMLResponse)
-def tables_view(request: Request, table_id: int) -> HTMLResponse:
+def tables_view(request: Request, table_id: int, from_dashboard: str | None = None) -> HTMLResponse:
     table = index.get_saved_table(table_id)
     if table is None:
         raise HTTPException(status_code=404, detail=tr("Tabelle nicht gefunden"))
-    return templates.TemplateResponse(request, "table_editor.html", _table_editor_context(table))
+    return templates.TemplateResponse(
+        request, "table_editor.html",
+        {**_table_editor_context(table), "back_dashboard": _back_dashboard(from_dashboard)},
+    )
 
 
 @app.post("/tables/{table_id}")
@@ -4849,6 +4885,7 @@ def entity_detail(
     range_key: str | None = Query(None, alias="range"),
     offset: int = 0,
     marked: bool = False,
+    from_dashboard: str | None = None,
 ) -> HTMLResponse:
     # URLs dieser Seite laufen über app_root: unter Ingress hat sie einen
     # dynamischen Pfad-Präfix, ein fest absoluter Pfad ("/api/query") würde
@@ -4877,6 +4914,7 @@ def entity_detail(
         "entity_detail.html",
         {
             "entity_id": entity_id,
+            "back_dashboard": _back_dashboard(from_dashboard),
             "friendly_name": entity["friendly_name"],
             "custom_name": entity["custom_name"] or "",
             "aggregation_type": entity["aggregation_type"],

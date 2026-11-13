@@ -14,13 +14,17 @@ Vorsprung gilt als „ok“, ein knapper als „prüfen“.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from typing import Any
 
 from .i18n import tr
 from .selection_topics import WEATHER_PLATFORMS, _DEVICE_TEMP, is_outdoor
 
 #: Rollen, für die Vorschläge berechnet werden (Reihenfolge wie in der Einrichtung).
-ROLE_KEYS = ("temperature", "precip_mm", "precip_dur", "humidity", "pressure", "wind", "gust", "radiation")
+ROLE_KEYS = (
+    "temperature", "precip_mm", "precip_dur", "humidity", "pressure", "wind", "gust", "radiation", "illuminance",
+    "illuminance_dawn", "wind_direction", "sun_elevation", "pv_power",
+)
 
 _TEMP_UNITS = {"°c", "°f", "k"}
 _PRESSURE_UNITS = {"hpa", "mbar", "kpa", "pa", "inhg"}
@@ -33,6 +37,18 @@ _TOTAL = re.compile(r"(total|gesamt|summe|jahr|year|lifetime)", re.IGNORECASE)
 _HUMIDITY = re.compile(r"(feucht|humid)", re.IGNORECASE)
 _RELATIVE = re.compile(r"(relativ|relative|meeresspiegel|sea)", re.IGNORECASE)
 _ABSOLUTE = re.compile(r"(absolut|absolute)", re.IGNORECASE)
+#: Mehrere Helligkeitssensoren an einer Station (Süd, Ost, West, Dämmerung): die Sonnenscheindauer braucht Süd.
+_SOUTH = re.compile(r"(s[üu]d|south|central|zentral)", re.IGNORECASE)
+_DAWN = re.compile(r"(dawn|d[äa]mmerung|twilight)", re.IGNORECASE)
+_MOON = re.compile(r"(moon|mond)", re.IGNORECASE)
+_DIRECTION = re.compile(r"(richtung|direction|bearing)", re.IGNORECASE)
+_WIND_WORD = re.compile(r"(wind)", re.IGNORECASE)
+_ELEVATION = re.compile(r"(sonnenh[öo]he|sonnenstand|elevation|altitude|sun height)", re.IGNORECASE)
+_AZIMUTH = re.compile(r"(azimut)", re.IGNORECASE)
+_PV = re.compile(r"(\bpv\b|solar|photovoltaik|wechselrichter|inverter)", re.IGNORECASE)
+_PV_NOT = re.compile(r"(prognose|forecast|prediction|erwartung|estimate|string|bezug|einspeis|grid|netz)", re.IGNORECASE)
+_PV_SMALL = re.compile(r"(balkon|stecker|plug|micro|mikro)", re.IGNORECASE)
+_POWER_UNITS = {"w", "kw", "mw"}
 _HEATING = re.compile(r"(heiz|w[äa]rmepumpe|waermepumpe|heat ?pump|heatpump|konvektor|heizstab|therme|fu(ß|ss)boden)", re.IGNORECASE)
 _HINT_FIELDS = ("name", "device", "area")
 
@@ -88,7 +104,7 @@ def _score(role: str, row: dict[str, Any], anchor: dict[str, Any] | None) -> tup
             add(3, tr("Wetter-Integration"))
         if not _outdoor_or_station(row):
             return 0, []  # eine Innentemperatur ist keine Außentemperatur
-    elif role in ("humidity", "pressure", "wind", "gust", "radiation"):
+    elif role in ("humidity", "pressure", "wind", "gust", "radiation", "illuminance", "illuminance_dawn"):
         if kind != "standard" or row["domain"] != "sensor":
             return 0, []
         if role == "humidity":
@@ -112,9 +128,45 @@ def _score(role: str, row: dict[str, Any], anchor: dict[str, Any] | None) -> tup
                     return 0, []
                 if gusty:
                     add(1, tr("„Böe“ im Namen"))
-        else:
+        elif role == "radiation":
             if dc == "irradiance" or unit == "w/m²":
                 add(3, tr("Strahlung"))
+        else:
+            if _MOON.search(text):
+                return 0, []  # die berechnete Mondhelligkeit ist kein Sensor
+            dawn = bool(_DAWN.search(text))
+            if (role == "illuminance_dawn") != dawn:
+                return 0, []  # der Dämmerungssensor ist eine eigene Rolle, kein Hauptsensor für Sonnenschein
+            if dc == "illuminance" or unit == "lx":
+                add(3, tr("Helligkeit"))
+            if dawn:
+                add(2, tr("Dämmerungs-Sensor"))
+            elif points and _SOUTH.search(text):
+                add(2, tr("Süd-Sensor"))
+    elif role in ("wind_direction", "sun_elevation", "pv_power"):
+        if kind != "standard" or row["domain"] != "sensor":
+            return 0, []
+        if role == "wind_direction":
+            if not (_DIRECTION.search(text) and _WIND_WORD.search(text)):
+                return 0, []
+            add(3, tr("„Windrichtung“ im Namen"))
+            if unit == "°":
+                add(1, tr("Einheit {unit}", unit=row.get("unit")))
+        elif role == "sun_elevation":
+            if not _ELEVATION.search(text) or _AZIMUTH.search(text):
+                return 0, []
+            add(3, tr("„Sonnenhöhe“ im Namen"))
+            if unit == "°":
+                add(1, tr("Einheit {unit}", unit=row.get("unit")))
+        else:
+            if not _PV.search(text) or _PV_NOT.search(text) or unit not in _POWER_UNITS:
+                return 0, []
+            add(3, tr("PV im Namen, Leistung"))
+            if dc == "power":
+                add(1, tr("Geräteklasse Leistung"))
+            if _PV_SMALL.search(text):
+                points -= 1  # ein Balkonkraftwerk ist selten die Anlage, deren Ertrag man mit der Helligkeit vergleicht
+                reasons.append(tr("kleine Anlage"))
     elif role == "precip_mm":
         if kind != "counter" or row["domain"] != "sensor":
             return 0, []
@@ -188,6 +240,48 @@ def _extras(rows: list[dict[str, Any]], taken: set[str]) -> list[dict[str, str]]
     return [row for _o, _e, row in found][:MAX_EXTRAS]
 
 
+def _catalog_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Zeile des Integrationskatalogs in der Form, die `_score` erwartet (Entität nicht archiviert)."""
+    return {
+        "entity_id": row["entity_id"], "domain": row["entity_id"].split(".", 1)[0],
+        "aggregation_type": "switch" if row["entity_id"].startswith("binary_sensor.") else (
+            "counter" if row.get("state_class") == "total_increasing" else "standard"),
+        "unit": row.get("unit"), "state_class": row.get("state_class"), "name": row.get("name"),
+        "device_class": row.get("device_class"), "platform": row.get("platform"),
+        "device": row.get("device"), "area": row.get("area"),
+    }
+
+
+def suggest_for_entities(
+    entity_ids: Collection[str], catalog: list[dict[str, Any]], filled: Collection[str] = (),
+    anchor_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Rollenvorschläge nur für die übergebenen Entitäten (z. B. die gerade im Assistenten übernommenen).
+
+    Grundlage sind allein die Metadaten des Katalogs, die Entitäten müssen nicht archiviert sein.
+    ``filled``: Rollen, die schon belegt sind; sie bekommen nie einen Vorschlag. ``anchor_id``: die
+    belegte Außentemperatur, damit „dasselbe Gerät wie die Außentemperatur“ auch dann zählt, wenn sie
+    selbst nicht zur Auswahl gehört. Rückgabe: ``{rolle: Vorschlag}``; ``confidence`` ist „ok“ nur bei
+    klarem Vorsprung vor den anderen Kandidaten der Auswahl, sonst „check“ (dann nichts vorbelegen).
+    """
+    wanted = set(entity_ids)
+    by_id = {row["entity_id"]: row for row in catalog}
+    rows = [_catalog_row(by_id[entity_id]) for entity_id in sorted(wanted) if entity_id in by_id]
+    labels = {row["entity_id"]: row["name"] or row["entity_id"] for row in rows}
+    anchor = _catalog_row(by_id[anchor_id]) if anchor_id in by_id else None
+    result: dict[str, dict[str, Any]] = {}
+    for role in ROLE_KEYS:
+        if role in filled:
+            continue
+        ranked = _rank(role, rows, anchor)
+        if not ranked:
+            continue
+        result[role] = _entry(ranked, labels)
+        if role == "temperature" and anchor is None:
+            anchor = ranked[0][1]
+    return result
+
+
 def suggest(
     archived: list[dict[str, Any]], labels: dict[str, str], catalog: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -235,17 +329,7 @@ def suggest(
     ][:6]
     missing = []
     if catalog:
-        outside = [
-            {
-                "entity_id": row["entity_id"], "domain": row["entity_id"].split(".", 1)[0],
-                "aggregation_type": "switch" if row["entity_id"].startswith("binary_sensor.") else (
-                    "counter" if row.get("state_class") == "total_increasing" else "standard"),
-                "unit": row.get("unit"), "state_class": row.get("state_class"), "name": row.get("name"),
-                "device_class": row.get("device_class"), "platform": row.get("platform"),
-                "device": row.get("device"), "area": row.get("area"),
-            }
-            for row in catalog if row["entity_id"] not in known
-        ]
+        outside = [_catalog_row(row) for row in catalog if row["entity_id"] not in known]
         for role in ROLE_KEYS:
             if role in roles:
                 continue

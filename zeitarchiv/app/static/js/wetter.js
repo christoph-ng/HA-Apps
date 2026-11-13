@@ -25,171 +25,26 @@
     }[key];
   }
 
-  function columnTitle(col, data) {
-    // Mit Stichtag stehen „Heute“ und „Gestern“ für andere Tage: dann das Datum selbst.
-    if (data && data.at && (col.key === 'heute' || col.key === 'gestern')) return fmtDate(formats.dmy, col.cur.start);
-    if (col.key === 'heute') return t('Heute');
-    if (col.key === 'gestern') return t('Gestern');
-    if (col.key === 'jahr') return t('Jahr');
-    return fmtDate(formats.month, col.cur.start);
-  }
-
-  function sameDay(a, b) {
-    const pa = ZT.parts(a), pb = ZT.parts(b);
-    return pa.year === pb.year && pa.month === pb.month && pa.day === pb.day;
-  }
-
-  // "01.11. – 02.11.2026"; ein einzelner Tag ohne Bereich. Ende ist exklusiv, daher end - 1 s.
-  function rangeText(start, end) {
-    if (end <= start) return '';
-    const last = end - 1;
-    if (sameDay(start, last)) return fmtDate(formats.dmy, start);
-    return `${fmtDate(formats.dm, start)} – ${fmtDate(formats.dmy, last)}`;
-  }
-
-  function delta(cur, previous, unit, decimals, withPercent) {
-    if (cur == null || previous == null) return '';
-    const diff = cur - previous;
-    const zero = Math.round(Math.abs(diff) * Math.pow(10, decimals)) === 0;
-    let text = (zero ? '± ' : diff > 0 ? '▲ +' : '▼ −') + num(Math.abs(diff), decimals);
-    // Die Einheit steht schon am Wert; nur „K“ bleibt, weil sie von „°C“ abweicht. Kürzer = schmalere Spalte.
-    if (unit === 'K') text += ' K';
-    if (withPercent && previous !== 0 && !zero) {
-      const percent = diff / previous * 100;
-      text += ' (' + (percent > 0 ? '+' : '−') + num(Math.abs(percent), 0) + ' %)';
-    }
-    return `<span class="wt-dl">${escapeHtml(text)}</span>`;
-  }
-
-  // Kennzahl-Zeilen je Art der Rolle. when: 'point' = Zeitpunkt (Stunde bzw. Datum),
-  // 'day' = ganzer Tag (in Tagesspalten ohne Zusatz).
-  function metricsFor(row, data) {
-    if (row.kind === 'kenntage') {
-      return [
-        {label: t('Frosttage'), field: 'frost', decimals: 0, unit: '', delta: true},
-        {label: t('Eistage'), field: 'eis', decimals: 0, unit: '', delta: true},
-        {label: t('Sommertage'), field: 'sommer', decimals: 0, unit: '', delta: true},
-        {label: t('Heiße Tage'), field: 'heiss', decimals: 0, unit: '', delta: true},
-      ];
-    }
-    if (row.kind === 'standard') {
-      // Strahlung fällt nachts auf 0: ein Minimum sagt dort nichts, Max und Ø genügen.
-      const minimum = row.key === 'radiation' ? [] : [{label: t('Min'), field: 'min', when: 'point', delta: true}];
-      return [
-        {label: t('Max'), field: 'max', when: 'point', delta: true},
-        ...minimum,
-        {label: 'Ø', field: 'avg', delta: true},
-      ];
-    }
-    if (row.kind === 'counter') {
-      return [
-        {label: t('Summe'), field: 'sum', decimals: 1, delta: true, percent: true},
-        {label: t('Regentage (ab {n} mm)', {n: num(data.rain_day_mm, 1)}), field: 'days', decimals: 0, unit: ''},
-        {label: t('Nassester Tag'), field: 'top', decimals: 1, when: 'day'},
-      ];
-    }
-    return [
-      {label: t('Regenminuten'), field: 'minutes', decimals: 0, unit: 'min', delta: true, percent: true},
-      {label: t('Regentage (ab {n} min)', {n: num(data.rain_day_minutes, 0)}), field: 'days', decimals: 0, unit: ''},
-      {label: t('Regenreichster Tag'), field: 'top', decimals: 0, unit: 'min', when: 'day'},
-    ];
-  }
-
-  // Zusatz in Klammern („(ab 10 min)“) klein und gedämpft hinter dem Namen: hält die erste Spalte schmal.
-  function metricLabelHtml(label) {
-    const i = label.indexOf(' (');
-    if (i < 0) return escapeHtml(label);
-    return `${escapeHtml(label.slice(0, i))} <small class="wt-qual">${escapeHtml(label.slice(i + 1))}</small>`;
-  }
-
-  function whenText(metric, summary, col) {
-    if (!metric.when || !summary) return '';
-    const ts = summary[metric.field + '_ts'];
-    if (ts == null) return '';
-    if (col.range === 'day') {
-      // Die Werte stammen aus Stundenzeilen: „0–1 Uhr“ ist ehrlicher als eine Minutenangabe wie „00:00“.
-      if (metric.when !== 'point') return '';
-      const hour = ZT.parts(ts).hour;
-      return t('{from}–{to} Uhr', {from: hour, to: hour + 1});
-    }
-    return fmtDate(formats.dm, ts);
-  }
-
-  function cellHtml(summary, fromTs, metric, row, col, vjCell, deltaHtml) {
-    const cls = (vjCell ? 'wt-vj' : 'wt-sep');
-    if (!summary || summary[metric.field] == null) {
-      const title = fromTs ? ` title="${escapeHtml(t('Daten ab {date}', {date: fmtDate(formats.dmy, fromTs)}))}"` : '';
-      return `<td class="wt-na ${cls}"${title}><span class="wt-v">–</span></td>`;
-    }
-    const decimals = metric.decimals != null ? metric.decimals : (row.decimals != null ? row.decimals : 1);
-    const unit = metric.unit != null ? metric.unit : row.unit;
-    // Tag von Max/Min in Zeitraum-Spalten als eigene kleine Zeile unter dem Wert; in Tagesspalten steht die Stunde
-    // im Tooltip der Zelle (data-tooltip-fixed, fixed-tooltip.js).
-    const when = whenText(metric, summary, col);
-    const inline = col.range !== 'day' && when;
-    const tip = when && !inline ? ` data-tooltip-fixed="${escapeHtml(when)}"` : '';
-    return `<td class="${cls}"${tip}><span class="wt-v">${escapeHtml(num(summary[metric.field], decimals))}${unit ? '&nbsp;' + escapeHtml(unit) : ''}</span>`
-      + (inline ? `<span class="wt-when">${escapeHtml(when)}</span>` : '') + (deltaHtml || '') + '</td>';
-  }
-
+  // Vergleichstabelle und Gruppen: element-table-render.js (dieselbe Datei zeichnet die Tabelle in der Lovelace-Karte).
+  const {weatherComparison: renderTable, inGroup} = window.ElementTableRender;
+  const {weatherMonthly, weatherMatrix, pastOpacity, legendEntry} = window.ElementChartRender;
   // Gruppen: „wind“ = Reiter „Wind & Sonne“, „klima“ = Zusatzsensoren (Schlüssel „temperature:N“) auf „Temperatur & Klima“,
   // alles andere steht in der Übersicht.
-  const WIND_KEYS = ['wind', 'gust', 'radiation'];
-  const groupOf = (key) => (WIND_KEYS.includes(key) ? 'wind' : (key.includes(':') ? 'klima' : 'basis'));
-  const inGroup = (key, group) => groupOf(key) === group;
   // Tabellen und Kachelreihen je Gruppe: x-ref-Namen wie in _wetter_view.html (tiles<Gruppe>, table[Wrap]<Gruppe>, Übersicht ohne Gruppenname).
   const GROUPS = ['basis', 'wind', 'klima'];
+  // Breite Darstellung (experimentell): höchstens sechs Kacheln pro Zeile, sonst würden es bei 1440 px acht schmale.
+  const WIDE_TILE_MAX_COLUMNS = document.documentElement.dataset.pageLayout === 'wide' ? 6 : 0;
+  // Heizperioden in der Monatstabelle: 3; mit breiter Darstellung ab 1200 px 4, ab 1440 px 5 (ab 1200 px passen auch fünf
+  // ohne Scrollen, aber die Spalten würden eng).
+  const WIDE_TABLE = window.matchMedia('(min-width:1200px)');
+  const WIDER_TABLE = window.matchMedia('(min-width:1440px)');
+  // Streudiagramm und Kacheln: 4 Perioden, mit breiter Darstellung ab 1440 px 5 (wie die Monatstabelle).
+  const heatChartCount = () => (document.documentElement.dataset.pageLayout === 'wide' && WIDER_TABLE.matches ? 5 : 4);
+  const heatSeasonCount = () => {
+    if (document.documentElement.dataset.pageLayout !== 'wide' || !WIDE_TABLE.matches) return 3;
+    return WIDER_TABLE.matches ? 5 : 4;
+  };
   const refName = (prefix, group) => prefix + (group === 'basis' && prefix !== 'tiles' ? '' : group.charAt(0).toUpperCase() + group.slice(1));
-
-  function renderTable(data, group, showDiff) {
-    const cols = data.columns;
-    if (!cols.length) return `<tbody><tr><td>${escapeHtml(t('Keine Spalte ausgewählt.'))}</td></tr></tbody>`;
-    const span = data.vorjahr ? 2 : 1;
-    if (!data.rows.some((r) => inGroup(r.key, group))) {
-      return `<tbody><tr><td class="wt-empty">${escapeHtml(t('Alle Blöcke dieser Gruppe sind in der Einrichtung ausgeblendet.'))}</td></tr></tbody>`;
-    }
-    // Zwei Zeilen: Titel mit Info-Tooltip (Zeitraum, „bis 15:47“), darunter Tag bzw. Jahr der Spalte und ihres Vorjahrs.
-    // Mit Stichtag steht das Datum schon im Titel; die zweite Zeile nennt dann den Wochentag.
-    const subText = (range, key) => {
-      if (key === 'heute' || key === 'gestern') return fmtDate(formats.dmy, range.start);
-      return String(ZT.parts(range.start).year);
-    };
-    let head = '<thead><tr><th></th>';
-    let sub = '<tr class="wt-subhead"><th></th>';
-    for (const col of cols) {
-      let tip = rangeText(col.cur.start, col.cur.end);
-      const dayCol = col.key === 'heute' || col.key === 'gestern';
-      if (col.key === 'heute' && !data.at) tip = t('bis {time}', {time: fmtDate(formats.hm, data.now)});
-      if (data.at && dayCol) tip = fmtDate(formats.weekday, col.cur.start);
-      head += `<th class="wt-cur wt-sep" data-tooltip-fixed="${escapeHtml(tip)}">${escapeHtml(columnTitle(col, data))}<span class="wt-info" aria-hidden="true">ⓘ</span></th>`;
-      const curSub = data.at && dayCol ? fmtDate(formats.weekday, col.cur.start) : subText(col.cur, col.key);
-      sub += `<th class="wt-cur wt-sep">${escapeHtml(curSub)}</th>`;
-      if (data.vorjahr) {
-        head += `<th class="wt-vj" data-tooltip-fixed="${escapeHtml(rangeText(col.vj.start, col.vj.end))}">${escapeHtml(t('Vorjahr'))}</th>`;
-        sub += `<th class="wt-vj">${escapeHtml(subText(col.vj, col.key))}</th>`;
-      }
-    }
-    let html = head + '</tr>' + sub + '</tr>';
-    html += '</thead><tbody>';
-
-    for (const row of data.rows.filter((r) => inGroup(r.key, group))) {
-      html += `<tr class="wt-grp"><th colspan="${1 + cols.length * span}">${escapeHtml(row.label)}</th></tr>`;
-      for (const metric of metricsFor(row, data)) {
-        html += `<tr><th scope="row">${metricLabelHtml(metric.label)}</th>`;
-        for (const col of cols) {
-          const cell = row.cells[col.key] || {};
-          const decimals = metric.decimals != null ? metric.decimals : (row.decimals != null ? row.decimals : 1);
-          const unit = metric.unit != null ? metric.unit : (row.unit === '°C' ? 'K' : row.unit);
-          const deltaHtml = showDiff && data.vorjahr && metric.delta && cell.cur && cell.vj
-            ? delta(cell.cur[metric.field], cell.vj[metric.field], unit, decimals, !!metric.percent) : '';
-          html += cellHtml(cell.cur, cell.cur_from, metric, row, col, false, deltaHtml);
-          if (data.vorjahr) html += cellHtml(cell.vj, cell.vj_from, metric, row, col, true, '');
-        }
-        html += '</tr>';
-      }
-    }
-    return html + '</tbody>';
-  }
 
   // ---- Diagramme (Phase 2) ------------------------------------------------------------------
   // ECharts-Instanzen liegen außerhalb des Alpine-Objekts: ECharts verlässt sich intern auf
@@ -198,6 +53,21 @@
 
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  // Ein CSS-Farbausdruck (auch color-mix) als „rgb(…)“, weil ECharts nur klassische Farbwerte versteht.
+  function resolveColor(expression) {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext('2d');
+      context.fillStyle = expression;
+      context.fillRect(0, 0, 1, 1);
+      const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
+      return `rgb(${r}, ${g}, ${b})`;
+    } catch (e) {
+      return expression;
+    }
   }
 
   function scaledFont(size) {
@@ -210,12 +80,19 @@
       cur: cssVar('--chart-1'), prev: cssVar('--chart-2'), cold: cssVar('--chart-3'),
       text: cssVar('--ink-muted'), faint: cssVar('--ink-faint'), grid: cssVar('--border'),
       ink: cssVar('--ink'), surface: cssVar('--surface'),
+      // Tagesklassen der Sonne, dieselben Töne wie die Pillen im Tagesbild.
+      sun: resolveColor(`color-mix(in srgb, ${cssVar('--chart-7')} 70%, ${cssVar('--surface')})`),
+      sunSoft: resolveColor(`color-mix(in srgb, ${cssVar('--chart-7')} 30%, ${cssVar('--surface')})`),
+      overcast: resolveColor(`color-mix(in srgb, ${cssVar('--ink-faint')} 40%, ${cssVar('--surface')})`),
     };
   }
 
   // Ein Diagramm folgt der Breite seines Kastens auch ohne Fenster-Ereignis (Reiter eben erst sichtbar, Scrollleiste erscheint,
   // Karte ändert ihre Breite): sonst blieb es bei der Breite des Zeichnens stehen und ließ rechts Leerraum.
   const observers = {};
+  // Abgewählte Legendeneinträge, je Diagramm; werden wie die übrigen Einstellungen im Browser gemerkt.
+  const legendState = {...(readStore().legends || {})};
+  const restoreLegend = (key, chart) => { if (legendState[key]) chart.setOption({legend: {selected: legendState[key]}}); };
 
   function chartFor(key, element) {
     if (charts[key] && charts[key].getDom() !== element) {
@@ -225,6 +102,8 @@
     }
     if (!charts[key]) {
       charts[key] = echarts.init(element);
+      // Die Legendenauswahl überlebt das Neuzeichnen (z. B. nach geänderter Heizgrenze), sonst springt sie auf den Urzustand.
+      charts[key].on('legendselectchanged', (event) => { legendState[key] = {...event.selected}; writeStore({legends: legendState}); });
       if (typeof ResizeObserver === 'function') {
         observers[key] = new ResizeObserver(() => { if (charts[key] && element.clientWidth) charts[key].resize(); });
         observers[key].observe(element);
@@ -250,14 +129,6 @@
   // Datum eines Platzes; in UTC formatiert, damit die Zeitzone des Browsers kein Datum verschiebt.
   const utcDayMonth = new Intl.DateTimeFormat(LOCALE, {day: '2-digit', month: '2-digit', timeZone: 'UTC'});
   // Spalten der Jahr×Tag-Matrix: ein Schaltjahr, damit der 29.02. eine eigene Spalte hat.
-  const MONTH_LENGTHS_LEAP = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  const MONTH_STARTS_LEAP = MONTH_LENGTHS_LEAP.map((_len, index) => MONTH_LENGTHS_LEAP.slice(0, index).reduce((a, b) => a + b, 0));
-  function leapSlotDate(slot) {
-    let month = 11;
-    while (MONTH_STARTS_LEAP[month] > slot) month--;
-    return {month: month + 1, day: slot - MONTH_STARTS_LEAP[month] + 1};
-  }
-
   const slotLabel = (slot) => {
     const {month, day} = slotDate(slot);
     return utcDayMonth.format(new Date(Date.UTC(2025, month - 1, day)));
@@ -288,6 +159,14 @@
     };
   }
 
+  // Gerundete Schrittweite (1, 2, 5 mal Zehnerpotenz) für eine Achse; mindestens 0,1.
+  function niceStep(raw) {
+    if (!(raw > 0)) return 1;
+    const power = Math.pow(10, Math.floor(Math.log10(raw)));
+    const unit = raw / power;
+    return Math.max(0.1, (unit <= 1 ? 1 : unit <= 2 ? 2 : unit <= 5 ? 5 : 10) * power);
+  }
+
   function nullable(values, scale) {
     return values.map((value) => (value == null ? null : value * scale));
   }
@@ -311,6 +190,26 @@
     }
   }
 
+  // Symbole der Wetterlage: feste Zeichenfolgen ohne Nutzdaten, daher als HTML einsetzbar.
+  const ICON_ATTR = 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+  const LAGE_ICONS = {
+    sun: `<svg viewBox="0 0 48 48" ${ICON_ATTR}><circle cx="24" cy="24" r="8.5" fill="currentColor" fill-opacity=".18"/><path d="M24 5v6M24 37v6M5 24h6M37 24h6M10.6 10.6l4.2 4.2M33.2 33.2l4.2 4.2M37.4 10.6l-4.2 4.2M14.8 33.2l-4.2 4.2"/></svg>`,
+    part: `<svg viewBox="0 0 48 48" ${ICON_ATTR}><circle cx="19" cy="18" r="6.5" fill="currentColor" fill-opacity=".18"/><path d="M19 4.5v3M6.5 18h3M9.9 8.9l2.1 2.1M28.1 8.9L26 11M30.5 18h3"/><path d="M17 40h20a7 7 0 0 0 .8-13.9A9 9 0 0 0 20.6 28 6 6 0 0 0 17 40z" fill="var(--surface)" stroke="var(--ink-muted)"/></svg>`,
+    cloud: `<svg viewBox="0 0 48 48" ${ICON_ATTR}><path d="M14 36h21a8 8 0 0 0 .9-15.9A11 11 0 0 0 15 22.5 7 7 0 0 0 14 36z" fill="currentColor" fill-opacity=".14"/></svg>`,
+    rain: `<svg viewBox="0 0 48 48" ${ICON_ATTR}><path d="M14 30h21a8 8 0 0 0 .9-15.9A11 11 0 0 0 15 16.5 7 7 0 0 0 14 30z" fill="currentColor" fill-opacity=".14"/><path d="M17 35l-2 6M25 35l-2 6M33 35l-2 6"/></svg>`,
+    moon: `<svg viewBox="0 0 48 48" ${ICON_ATTR}><path d="M38 28.5A15 15 0 0 1 19.5 10 15 15 0 1 0 38 28.5z" fill="currentColor" fill-opacity=".16"/><path d="M33 8v5M30.5 10.5h5"/></svg>`,
+    dusk: `<svg viewBox="0 0 48 48" ${ICON_ATTR}><path d="M12 34a12 12 0 0 1 24 0z" fill="currentColor" fill-opacity=".18"/><path d="M5 34h38M24 12v4M10 18l3 3M38 18l-3 3M14 40h20"/></svg>`,
+    wind: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><path d="M3 9h10a2.5 2.5 0 1 0-2.4-3.2M3 14h14a2.8 2.8 0 1 1-2.6 3.8M3 19h6"/></svg>`,
+    drop: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><path d="M12 3.5c3.6 4.2 6 7.2 6 10.2a6 6 0 0 1-12 0c0-3 2.4-6 6-10.2z" fill="currentColor" fill-opacity=".16"/></svg>`,
+    temp: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><path d="M10 14.2V5a2 2 0 1 1 4 0v9.2a4 4 0 1 1-4 0z"/><path d="M12 9v7"/></svg>`,
+    bright: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><circle cx="12" cy="12" r="4" fill="currentColor" fill-opacity=".16"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8"/></svg>`,
+    humid: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><path d="M12 3.5c3.6 4.2 6 7.2 6 10.2a6 6 0 0 1-12 0c0-3 2.4-6 6-10.2z" fill="currentColor" fill-opacity=".16"/><path d="M9.5 15.5l5-4M9.7 12.2h.01M14.3 15.3h.01"/></svg>`,
+    gauge: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><path d="M4.5 17a8.5 8.5 0 1 1 15 0"/><path d="M12 13.5l3.6-4.2"/><circle cx="12" cy="14" r="1.4" fill="currentColor"/></svg>`,
+    clock: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>`,
+    flame: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><path d="M12 3c.5 3-3.5 5-3.5 9.2a3.5 3.5 0 0 0 7 0c0-1.4-.6-2.4-1.3-3.3 2.4.9 4.3 3.3 4.3 6.1a6.5 6.5 0 0 1-13 0C5.5 9 12 7 12 3z" fill="currentColor" fill-opacity=".16"/></svg>`,
+    calendar: `<svg viewBox="0 0 24 24" ${ICON_ATTR}><rect x="4" y="5.5" width="16" height="14.5" rx="2.5" fill="currentColor" fill-opacity=".12"/><path d="M8 3.5v4M16 3.5v4M4 10h16"/></svg>`,
+  };
+
   window.wetterDashboard = function wetterDashboard(precipModes) {
     return {
       tab: 'overview',
@@ -319,29 +218,63 @@
       precip: null,
       precipError: '',
       tempCmp: null,
+      // Abgewählte Räume der Vergleichsdiagramme (Namen); neue Räume sind zunächst sichtbar.
+      roomsOff: [],
+      // Eingeklappte Etagen in der Tabelle „Zeiträume im Vergleich“ (Namen).
+      floorsClosed: [],
+      roomsClosed: [],
       tempDays: 30,
       tempError: '',
       monthly: null,
+      monthlyLoaded: false,  // einmal erfolgreich geladen: erst dann bleibt die Karte nach einem Ladefehler sichtbar
+      monthlyError: false,
       monthlyMetric: 'temperature',
       band: true,
       longterm: null,
       longError: '',
-      kenntageRange: 'all',
+      longRange: 'all',      // „Letzte 5 | Letzte 10 | Alle“ des Reiters Langzeit: gilt für Rekorde, Kenntage und die Jahres-Matrix
+      hasConditions: false,
+      conditions: null,
+      _conditionsSeq: 0,
+      hasSunhours: false,
+      sunhours: null,
+      sunhoursError: '',
+      daylength: null,
+      hasPv: false,
+      pv: null,
+      pvError: '',
+      pvSel: null,
+      _sunhoursSeq: 0,
+      hasDayimage: false,
+      dayimage: null,
+      dayimageError: '',
+      heatWide: false,       // kippt an den Breitengrenzen der Heiz-Tabelle und löst das Neuzeichnen der Kacheln aus
+      dayDlg: null,          // Dialog zu einer Tagesbild-Kachel: {cell, loading, error, data}
+      hasDaylight: false,
+      daylight: null,
+      daylightError: '',
+      _daylightSeq: 0,
       matrixMetric: 'avg',
       heat: null,
       heatOn: [],
       heatRoom: '20',
       heatLimit: '15',
       heatSeason: '',
+      heatBySun: false,
       heatError: '',
       matrix: null,
       tempYears: null,
+      tempYearsMetric: 'temperature',
+      tempYearsError: '',
       matrixError: '',
 
       columnKeys: COLUMN_KEYS,
       columns: [...COLUMN_KEYS],
+      yearKeys: [],  // wählbare einzelne Jahre (vom Server, neueste zuerst)
       vorjahr: true,
       diff: true,
+      // Nur der Mittelwert je Sensor statt Max, Min und Ø (Tabelle „Temperatur & Klima“).
+      avgOnly: false,
       mode: 'bis_jetzt',
       tiles: [],
       tilesLoaded: false,
@@ -351,24 +284,61 @@
       error: '',
       _seq: 0,
       _tilesSeq: 0,
+      _monthlySeq: 0,
+      _tempsSeq: 0,
+      _precipSeq: 0,
+      _matrixSeq: 0,
 
       init() {
         const saved = readStore();
-        if (Array.isArray(saved.columns)) this.columns = COLUMN_KEYS.filter((key) => saved.columns.includes(key));
+        if (Array.isArray(saved.columns)) this.columns = saved.columns.filter((key) => COLUMN_KEYS.includes(key) || /^j\d{4}$/.test(key));
         if (typeof saved.vorjahr === 'boolean') this.vorjahr = saved.vorjahr;
         if (typeof saved.diff === 'boolean') this.diff = saved.diff;
-        if (saved.kenntageRange === '5' || saved.kenntageRange === 'all') this.kenntageRange = saved.kenntageRange;
+        if (typeof saved.avgOnly === 'boolean') this.avgOnly = saved.avgOnly;
+        if (Array.isArray(saved.roomsOff)) this.roomsOff = saved.roomsOff.filter((name) => typeof name === 'string');
+        if (Array.isArray(saved.floorsClosed)) this.floorsClosed = saved.floorsClosed.filter((name) => typeof name === 'string');
+        if (Array.isArray(saved.roomsClosed)) this.roomsClosed = saved.roomsClosed.filter((name) => typeof name === 'string');
+        if (['5', '10', 'all'].includes(saved.kenntageRange)) this.longRange = saved.kenntageRange;  // alter Schlüssel: die Wahl bleibt erhalten
         if (saved.mode === 'bis_jetzt' || saved.mode === 'komplett') this.mode = saved.mode;
+        // Ausgeblendete Karten fehlen im Dokument: der erste vorhandene Reiter ist der Start, Diagramme ohne Karte laden nicht.
+        const firstTab = this.$root.querySelector('[role="tab"]');
+        if (firstTab) this.tab = firstTab.id.replace('wt-tab-', '');
+        if (this.tab !== 'overview') this.$nextTick(() => this.showTab(this.tab));
         this.loadTiles();
         this.loadTable();
-        this.loadMonthly();
-        const observer = new ResizeObserver(() => this.layoutTiles());
+        if (this.$root.querySelector('[x-ref="monthlyChart"]')) this.loadMonthly();
+        this.hasConditions = !!this.$root.querySelector('[data-wt-conditions]');
+        if (this.hasConditions) this.startConditions();
+        // Die Karte „Tageslicht“ gibt es nur mit zugeordneter Rolle; $refs sind in init() noch nicht angelegt.
+        this.hasSunhours = !!this.$root.querySelector('[x-ref="sunChart"]');
+        this.hasDayimage = !!this.$root.querySelector('[data-wt-dayimage]');
+        if (this.hasDayimage) this.loadDayimage();
+        this.hasDaylight = !!this.$root.querySelector('[x-ref="daylightChart"]');
+        this.hasPv = !!this.$root.querySelector('[x-ref="pvChart"]');
+        const observer = new ResizeObserver(() => { if (this.$root.isConnected) this.layoutTiles(); });
+        // Breite Darstellung: mehr Heizperioden in der Monatstabelle, sobald das Fenster breit genug ist.
+        const redrawTable = () => {
+          this.heatWide = !this.heatWide;
+          if (this.$root.isConnected && this.heat) { this.drawHeatTable(); this.drawHeatScatter(); }
+          if (this.$root.isConnected && this.precip) this.drawPrecipTable(palette());
+        };
+        WIDE_TABLE.addEventListener('change', redrawTable);
+        WIDER_TABLE.addEventListener('change', redrawTable);
         for (const group of GROUPS) {
           const ref = this.$refs[refName('tiles', group)];
           if (ref) observer.observe(ref);
         }
         // Stichtag-Leiste des App-Standards: bei jeder Änderung die Tabelle neu laden.
-        window.addEventListener('dashboard-stichtag', () => { this.loadTiles(); this.loadTable(); });
+        window.addEventListener('dashboard-stichtag', () => {
+          // Nach dem Austausch der Seite (Einrichtung gespeichert) darf das alte Objekt nicht mehr zeichnen.
+          if (!this.$root.isConnected) return;
+          this.loadTiles();
+          this.loadTable();
+          // Die Karte liegt im Reiter „Wind & Sonne“: dort sofort neu laden, sonst beim nächsten Öffnen.
+          if (this.hasDaylight) { this.daylight = null; if (this.tab === 'wind') this.loadDaylight(); }
+          if (this.hasSunhours) { this.sunhours = null; if (this.tab === 'wind') this.loadSunhours(); }
+          if (this.hasConditions) { this.conditions = null; this.loadConditions(); }
+        });
       },
 
       columnName,
@@ -376,7 +346,7 @@
       toggleColumn(key) {
         this.columns = this.columns.includes(key)
           ? this.columns.filter((k) => k !== key)
-          : COLUMN_KEYS.filter((k) => k === key || this.columns.includes(k));
+          : [...this.columns, key];
         this.saveAndLoad();
       },
 
@@ -413,12 +383,49 @@
         if (lastTable) this.paintTables(lastTable);
       },
 
+      // Klick oder Enter auf den Kopf einer Etage oder eines Raums klappt ihn ein oder aus; ein Handler je Tabelle genügt, sie wird neu gezeichnet.
+      bindFloors(table) {
+        if (table._floorsBound) return;
+        table._floorsBound = true;
+        const toggle = (event) => {
+          const head = event.target.closest('[data-floor], [data-room]');
+          if (!head) return;
+          if (event.type === 'keydown') {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+          }
+          if (head.dataset.room !== undefined) this.toggleTableRoom(head.dataset.room);
+          else this.toggleFloor(head.dataset.floor);
+        };
+        table.addEventListener('click', toggle);
+        table.addEventListener('keydown', toggle);
+      },
+
+      toggleTableRoom(name) {
+        this.roomsClosed = this.roomsClosed.includes(name) ? this.roomsClosed.filter((n) => n !== name) : [...this.roomsClosed, name];
+        writeStore({roomsClosed: this.roomsClosed});
+        if (lastTable) this.paintTables(lastTable);
+      },
+
+      toggleFloor(name) {
+        this.floorsClosed = this.floorsClosed.includes(name) ? this.floorsClosed.filter((n) => n !== name) : [...this.floorsClosed, name];
+        writeStore({floorsClosed: this.floorsClosed});
+        if (lastTable) this.paintTables(lastTable);
+      },
+
+      toggleAvg() {
+        this.avgOnly = !this.avgOnly;
+        writeStore({avgOnly: this.avgOnly});
+        if (lastTable) this.paintTables(lastTable);
+      },
+
       paintTables(data) {
         for (const group of GROUPS) {
           const table = this.$refs[refName('table', group)];
           const wrap = this.$refs[refName('tableWrap', group)];
           if (!table) continue;
-          table.innerHTML = renderTable(data, group, this.diff);
+          table.innerHTML = renderTable(data, group, this.diff, {avgOnly: this.avgOnly, closedFloors: this.floorsClosed, closedRooms: this.roomsClosed, interactive: true});
+          this.bindFloors(table);
           // Scroll-Hinweis des App-Standards (.tbl-wrap.is-scrollable), nur wenn die Tabelle wirklich breiter ist.
           wrap.classList.toggle('is-scrollable', wrap.scrollWidth > wrap.clientWidth + 1);
         }
@@ -457,6 +464,15 @@
         return t('Stand {time}', {time: this.tilesStand}) + ' · ' + t('Tiefstwert ▼ und Höchstwert ▲ von heute');
       },
 
+      // Icon einer Kachel nach ihrer Rolle (Zusatztemperaturen heißen „temperature:N“).
+      tileIcon(tile) {
+        const icons = {
+          temperature: 'temp', precip_mm: 'drop', precip_dur: 'rain', humidity: 'humid', pressure: 'gauge',
+          wind: 'wind', gust: 'wind', radiation: 'bright', illuminance: 'sun',
+        };
+        return icons[String(tile.key).split(':')[0]] || 'temp';
+      },
+
       tileValue(tile) {
         const unit = (text) => (text ? `<small>${escapeHtml(text)}</small>` : '');
         const decimals = tile.decimals != null ? tile.decimals : 1;
@@ -465,6 +481,9 @@
         }
         if (tile.kind === 'counter') {
           return tile.today ? escapeHtml(num(tile.today.sum, 1)) + unit(tile.unit) : '–';
+        }
+        if (tile.kind === 'sunshine') {
+          return tile.today ? escapeHtml(num(tile.today.hours, 1)) + unit('h') : '–';
         }
         return tile.today ? escapeHtml(num(tile.today.minutes, 0)) + unit('min') : '–';
       },
@@ -482,6 +501,10 @@
         if (tile.kind === 'counter') {
           const values = {value: num(tile.yesterday.sum, 1), unit: tile.unit || ''};
           return this.tilesAt ? t('Vortag {value} {unit}', values) : t('gestern {value} {unit}', values);
+        }
+        if (tile.kind === 'sunshine') {
+          const hours = {value: num(tile.yesterday.hours, 1)};
+          return this.tilesAt ? t('Vortag {value} h', hours) : t('gestern {value} h', hours);
         }
         const minutes = {value: num(tile.yesterday.minutes, 0)};
         return this.tilesAt ? t('Vortag {value} min', minutes) : t('gestern {value} min', minutes);
@@ -504,7 +527,7 @@
         for (const group of GROUPS) {
           const element = this.$refs[refName('tiles', group)];
           const count = this.tilesFor(group).length;
-          if (element && count && element.clientWidth) this.tileCols[group] = WetterLayout.tileColumns(count, element.clientWidth);
+          if (element && count && element.clientWidth) this.tileCols[group] = WetterLayout.tileColumns(count, element.clientWidth, WIDE_TILE_MAX_COLUMNS);
         }
       },
 
@@ -518,6 +541,77 @@
         return this.tiles.filter((tile) => inGroup(tile.key, group));
       },
 
+      // Kacheln der Karte „Wetterlage“ (3 × 2): Temperatur, Regen, Wind, Helligkeit, Luftfeuchte, Luftdruck, dann die übrigen Kacheln der Gruppe. Temperatur und Regen stehen in beiden Quellen;
+      // hier werden sie zu je einer Kachel zusammengeführt (Kurztext der Wetterlage plus Tief/Hoch bzw. Gestern-Vergleich).
+      displayTiles() {
+        const basis = this.tilesFor('basis');
+        const byKey = (key) => basis.find((tile) => tile.key === key);
+        const c = this.conditions;
+        const live = !!c && c.mode !== 'day';
+        const out = [];
+        const link = (tile) => (tile ? 'entities/' + encodeURIComponent(tile.entity_id) : '');
+
+        const temp = byKey('temperature');
+        if (temp) {
+          const adjective = live && c.temp && c.temp.unit === '°C' ? this.tempAdjective(c.temp.value).toLowerCase() : '';
+          out.push({
+            key: 'temperature', role: 'temperature', icon: 'temp', label: temp.label, big: false, href: link(temp), title: this.tileTitle(temp),
+            value: this.tileValue(temp), sub: [adjective, this.tileSub(temp)].filter(Boolean).join('\n'),
+          });
+        }
+
+        const mm = byKey('precip_mm');
+        const dur = byKey('precip_dur');
+        const rain = live ? this.conditionsRain() : null;
+        if (mm || dur || rain) {
+          const first = mm || dur;
+          const today = [];
+          if (mm && mm.today && (rain || first !== mm)) today.push(`${num(mm.today.sum, 1)} ${mm.unit || 'mm'}`);
+          if (dur && dur.today && (rain || first !== dur)) today.push(`${num(dur.today.minutes, 0)} min`);
+          const lines = [];
+          if (rain && rain.sub) lines.push(rain.sub);
+          if (today.length) lines.push(today.join(' · '));
+          const before = [mm, dur].map((tile) => (tile ? this.tileSub(tile) : '')).filter(Boolean);
+          if (before.length) lines.push(before.join(' · '));
+          out.push({
+            key: 'rain', role: 'precip_mm', icon: 'drop', label: t('Regen'), big: false, href: link(first), title: first ? this.tileTitle(first) : '',
+            value: rain ? escapeHtml(rain.text) : this.tileValue(first), sub: lines.join('\n'),
+          });
+        }
+
+        // Helligkeit und Wind kennt nur die Wetterlage; die Kacheln dort sind keine Verweise auf eine Entität.
+        const fromLage = {};
+        if (c) {
+          this.conditionsTiles().filter((tile) => tile.kind === 'sky' || tile.kind === 'wind').forEach((tile) => {
+            fromLage[tile.kind] = {
+              key: tile.kind, role: tile.kind === 'sky' ? 'illuminance' : 'wind', icon: tile.icon, label: tile.label, big: false, href: '',
+              title: '', value: escapeHtml(tile.value), sub: [tile.sub, tile.sub2].filter(Boolean).join('\n'),
+            };
+          });
+        }
+        // Reihenfolge für 3 × 2: Was man draußen spürt (Temperatur, Regen, Wind), darunter Licht und Luft.
+        if (fromLage.wind) out.push(fromLage.wind);
+        if (fromLage.sky) out.push(fromLage.sky);
+        // Wind und Helligkeit stehen schon als Kachel der Wetterlage da; dieselben Sensoren nicht noch einmal.
+        const skip = ['temperature', 'precip_mm', 'precip_dur', ...(fromLage.wind ? ['wind'] : []), ...(fromLage.sky ? ['illuminance'] : [])];
+        const rest = basis.filter((tile) => !skip.includes(tile.key));
+        const lead = ['humidity', 'pressure'];
+        [...rest.filter((tile) => lead.includes(tile.key)).sort((x, y) => lead.indexOf(x.key) - lead.indexOf(y.key)),
+          ...rest.filter((tile) => !lead.includes(tile.key))].forEach((tile) => {
+          out.push({
+            key: tile.key, role: tile.key, icon: this.tileIcon(tile), label: tile.label, big: false, href: 'entities/' + encodeURIComponent(tile.entity_id),
+            title: this.tileTitle(tile), value: this.tileValue(tile), sub: this.tileSub(tile),
+          });
+        });
+        // Kurzfassung für die Leiste: nur die erste Zeile; die ganze Angabe steht im Tooltip.
+        out.forEach((tile) => {
+          const lines = String(tile.sub || '').split('\n').filter(Boolean);
+          tile.k = lines[0] || '';
+          tile.title = lines.join(' · ');
+        });
+        return out;
+      },
+
       // ---- Reiter und Diagramme (Phase 2) ----------------------------------------------------
 
       showTab(tab) {
@@ -528,6 +622,9 @@
         if (tab === 'long' && !this.matrix) this.loadMatrix();
         if (tab === 'long' && !this.tempYears) this.loadTempYears();
         if (tab === 'heat' && !this.heat) this.loadHeat();
+        if (tab === 'wind' && this.hasSunhours) { if (!this.sunhours) this.loadSunhours(); else this.$nextTick(() => this.drawSunhours()); }
+        if (tab === 'wind' && this.hasPv) { if (!this.pv) this.loadPv(); else this.$nextTick(() => this.drawPv()); }
+        if (tab === 'wind' && this.hasDaylight) { if (!this.daylight) this.loadDaylight(); else this.$nextTick(() => this.drawDaylight()); this.loadDaylength(); }
         // Ein Diagramm in einem eben erst sichtbaren Reiter hat noch keine Größe.
         this.$nextTick(() => {
           this.layoutTiles();
@@ -558,13 +655,21 @@
 
       // Monatsvergleich
       async loadMonthly() {
+        const seq = ++this._monthlySeq;
+        this.monthlyError = false;
         try {
-          this.monthly = await this.fetchJson(
+          const data = await this.fetchJson(
             `wetterdashboard/monatsvergleich?metric=${this.monthlyMetric}&mode=${this.precipModes[0] || 'mm'}`,
           );
+          if (seq !== this._monthlySeq) return;  // eine neuere Anfrage hat überholt
+          this.monthly = data;
+          this.monthlyLoaded = true;
           this.$nextTick(() => this.drawMonthly());
         } catch (e) {
+          if (seq !== this._monthlySeq) return;
           this.monthly = null;
+          // Nach einem Ladefehler bleibt die Karte samt Kennzahl-Auswahl stehen (sonst käme man nur per Neuladen zurück).
+          this.monthlyError = this.monthlyLoaded;
         }
       },
 
@@ -594,6 +699,7 @@
         const m = this.monthly;
         if (!m) return '';
         const used = m.counts.filter((count) => count > 0);
+        if (m.metric === 'sun' && !used.length) return t('Summe der Sonnenstunden je Monat (Stunden über der Sonnen-Schwelle). Die Helligkeit gibt es erst seit Kurzem im Archiv, ein Durchschnitt der Vorjahre erscheint nach dem ersten abgeschlossenen Vorjahr.');
         if (!used.length) return t('Noch kein abgeschlossenes Vorjahr mit genug Werten für einen Durchschnitt.');
         const n = Math.min(...used);
         return n === Math.max(...used)
@@ -606,82 +712,921 @@
         const element = this.$refs.monthlyChart;
         if (!m || !element) return;
         const colors = palette();
-        const decimals = m.metric === 'temperature' ? 1 : (m.unit === 'min' ? 0 : 1);
-        const labels = Array.from({length: 12}, (_x, i) => monthName(i + 1, 'short'));
-        const yearKeys = Object.keys(m.years).map(Number).sort((a, b) => a - b);
-        const current = String(m.current_year);
-        const lastPast = yearKeys.filter((year) => year < m.current_year).pop();
-        const hasAvg = m.counts.some((count) => count > 0);
-        const series = [];
-        const legend = [];
-        if (this.band && hasAvg) {
-          series.push({
-            name: 'low', type: 'line', stack: 'band', data: m.low, symbol: 'none', silent: true,
-            lineStyle: {opacity: 0}, tooltip: {show: false},
-          }, {
-            name: 'band', type: 'line', stack: 'band', symbol: 'none', silent: true, lineStyle: {opacity: 0},
-            data: m.high.map((high, i) => (high == null || m.low[i] == null ? null : high - m.low[i])),
-            areaStyle: {color: colors.prev, opacity: 0.16},
-          });
-        }
-        for (const year of yearKeys) {
-          if (year >= m.current_year) continue;
-          const strong = year === lastPast;
-          series.push({
-            name: String(year), type: 'line', data: m.years[year], symbol: 'none', connectNulls: false,
-            lineStyle: {color: colors.prev, width: strong ? 2 : 1.2, opacity: strong ? 1 : 0.45},
-            itemStyle: {color: colors.prev},
-          });
-          if (strong) legend.push(String(year));
-        }
-        if (hasAvg) {
-          series.push({
-            name: 'Ø', type: 'line', data: m.avg, symbol: 'none',
-            lineStyle: {color: colors.text, width: 2, type: 'dashed'}, itemStyle: {color: colors.text},
-          });
-          legend.push('Ø');
-        }
-        if (m.years[current]) {
-          series.push({
-            name: current, type: 'line', data: m.years[current], symbol: 'circle', symbolSize: 7, z: 5,
-            lineStyle: {color: colors.cur, width: 3}, itemStyle: {color: colors.cur},
-          });
-          legend.unshift(current);
-        }
-        const unit = m.unit;
         const chart = chartFor('monthly', element);
-        chart.setOption({
-          animation: false, grid: gridFor(element), legend: legendBox(colors, legend),
-          xAxis: {type: 'category', data: labels, boundaryGap: false, ...axisStyle(colors)},
-          yAxis: {type: 'value', scale: m.metric === 'temperature', name: unit, nameTextStyle: {color: colors.text}, ...axisStyle(colors)},
-          tooltip: tooltipBox(colors, (params) => {
-            const i = params[0].dataIndex;
-            const cell = (value) => (value == null ? '–' : `${num(value, decimals)} ${unit}`);
-            const running = i === m.current_month - 1;
-            let html = `<b>${escapeHtml(monthName(i + 1, 'long'))}</b>`;
-            const now = m.years[current] ? m.years[current][i] : null;
-            html += `<br>${current}: ${cell(now)}${running && now != null ? ' ' + escapeHtml(t('(bisher)')) : ''}`;
-            if (lastPast != null) html += `<br>${lastPast}: ${cell(m.years[lastPast][i])}`;
-            if (m.avg[i] != null) {
-              html += `<br>Ø (${m.counts[i]}): ${cell(m.avg[i])}`;
-              if (now != null && !running) html += `<br>${escapeHtml(t('Abweichung'))}: ${num(now - m.avg[i], decimals)} ${unit === '°C' ? 'K' : unit}`;
-            }
-            return html;
-          }),
-          series,
-        }, true);
+        chart.setOption(weatherMonthly(m, {colors, band: this.band, narrow: element.clientWidth < 520, font: scaledFont}), true);
+        restoreLegend('monthly', chart);
         // Ein eben erst sichtbar gewordener Reiter hat beim Anlegen noch keine Breite gehabt.
+        requestAnimationFrame(() => chart.resize());
+      },
+
+      // ---- Wetterlage: Satz aus Himmel, Wind, Regen und Temperatur (immer der aktuelle Stand) ---------
+
+      // Lädt neu, solange die Seite offen ist; nach dem Austausch der Seite (Einrichtung gespeichert) hört das alte Objekt auf.
+      startConditions() {
+        this.loadConditions();
+        const timer = setInterval(() => {
+          if (!this.$root.isConnected) clearInterval(timer);
+          else if (!document.hidden) this.loadConditions();
+        }, 5 * 60 * 1000);
+        document.addEventListener('visibilitychange', () => {
+          if (!document.hidden && this.$root.isConnected) this.loadConditions();
+        });
+      },
+
+      async loadConditions() {
+        const stichtag = this.stichtag();
+        const seq = ++this._conditionsSeq;
+        try {
+          const data = await this.fetchJson(`wetterdashboard/wetterlage${stichtag ? `?date=${encodeURIComponent(stichtag)}` : ''}`);
+          if (seq === this._conditionsSeq) this.conditions = data.sky || data.wind || data.rain ? data : null;
+        } catch (e) {
+          // Die Zeile ist Beiwerk: ohne Antwort bleibt der letzte Stand stehen.
+        }
+      },
+
+      skyName(kind) {
+        return {
+          night: t('Nacht'), dusk: t('Dämmerung'), day: t('Tag'), overcast: t('trüb'), cloudy: t('bewölkt'),
+          fair: t('heiter'), sunny: t('sonnig'),
+        }[kind] || kind;
+      },
+
+      beaufortName(stage) {
+        return [
+          t('Windstille'), t('leiser Zug'), t('leichte Brise'), t('schwache Brise'), t('mäßige Brise'), t('frische Brise'),
+          t('starker Wind'), t('steifer Wind'), t('stürmischer Wind'), t('Sturm'), t('schwerer Sturm'),
+          t('orkanartiger Sturm'), t('Orkan'),
+        ][stage] || '';
+      },
+
+      conditionsRain() {
+        const rain = this.conditions && this.conditions.rain;
+        if (!rain) return null;
+        const mm = rain.mm_today ? ` · ${num(rain.mm_today, 1)} ${rain.mm_unit || 'mm'}` : '';
+        if (rain.raining) {
+          if (rain.minutes == null) return {text: t('Regen') + mm, sub: t('seit mehr als {n} h', {n: 48})};
+          const minutes = Math.round(rain.minutes);
+          const since = minutes < 120 ? t('Regen seit {n} min', {n: minutes}) : t('Regen seit {h} h {m} min', {h: Math.floor(minutes / 60), m: String(minutes % 60).padStart(2, '0')});
+          return {text: since + mm, sub: t('Beginn {time}', {time: fmtDate(formats.hm, rain.since)})};
+        }
+        let sub = '';
+        if (rain.raining === false) {
+          if (rain.last == null) sub = t('in den letzten {n} h kein Regen', {n: 48});
+          else {
+            const sameDay = fmtDate(formats.dm, rain.last) === fmtDate(formats.dm, this.conditions.now);
+            sub = t('zuletzt Regen um {time}', {time: (sameDay ? '' : fmtDate(formats.dm, rain.last) + ' ') + fmtDate(formats.hm, rain.last)});
+          }
+        }
+        if (rain.raining == null && rain.mm_today) return {text: t('heute {value} {unit}', {value: num(rain.mm_today, 1), unit: rain.mm_unit || 'mm'}), sub};
+        return {text: t('trocken'), sub};
+      },
+
+      conditionsTitle() {
+        const c = this.conditions;
+        if (c && c.mode === 'day') return t('Wetter am {date}', {date: utcDayMonth.format(new Date(`${c.date}T12:00:00Z`))});
+        return t('Wetterlage');
+      },
+
+      // Rückblick auf einen Tag: Beschreibung der Teile (Himmel, Wind, Regen, Temperatur) als Zeile und als Kacheln.
+      conditionsDayParts() {
+        const c = this.conditions;
+        const parts = {};
+        if (c.sky && c.sky.class) {
+          parts.sky = c.sky.sun_hours != null
+            ? {value: t('{h} Sonnenstunden', {h: num(c.sky.sun_hours, 1)}), sub: t('von {n} hellen Stunden', {n: c.sky.day_hours})}
+            : {value: t('{n} helle Stunden', {n: c.sky.day_hours}), sub: ''};
+        }
+        if (c.wind) {
+          parts.wind = {
+            value: this.beaufortName(c.wind.bft),
+            sub: t('Maximum: Stärke {bft} · {kmh} km/h', {bft: c.wind.bft, kmh: num(c.wind.kmh, 0)}),
+          };
+        }
+        if (c.rain) {
+          const dry = !c.rain.mm && !c.rain.minutes;
+          const mm = c.rain.mm ? `${num(c.rain.mm, 1)} ${c.rain.mm_unit || 'mm'}` : '';
+          const minutes = c.rain.minutes ? t('{n} min', {n: num(c.rain.minutes, 0)}) : '';
+          parts.rain = {value: dry ? t('trocken') : (mm || minutes), sub: dry ? '' : (mm && minutes ? minutes : '')};
+        }
+        if (c.temp) parts.temp = {value: this.conditionsTempText(), sub: ''};
+        return parts;
+      },
+
+      // Große Zeile: die allgemeine Wetterlage in einem Wort (Regen vor Himmel, ohne Himmelsdaten „trocken“), bei
+      // starkem Wind ergänzt; die Einzelheiten stehen in den Kacheln darunter und werden nicht wiederholt.
+      conditionsLine() {
+        const c = this.conditions;
+        if (!c) return '';
+        const day = c.mode === 'day';
+        const rainy = day ? !!(c.rain && (c.rain.mm || c.rain.minutes)) : !!(c.rain && c.rain.raining);
+        let main = '';
+        if (rainy) main = day ? t('regnerisch') : t('Regen');
+        else if (c.sky && c.sky.class) main = this.skyName(c.sky.class);
+        else if (c.rain && (day || c.rain.raining === false)) main = t('trocken');
+        main = main.charAt(0).toUpperCase() + main.slice(1);
+        const windy = c.wind && c.wind.bft >= 8 ? t('stürmisch') : c.wind && c.wind.bft >= 6 ? t('windig') : '';
+        const line = [main, windy].filter(Boolean).join(' · ');
+        if (line) return line;
+        const temp = this.conditionsTempText();
+        return temp || '';
+      },
+
+      conditionsTempText() {
+        const c = this.conditions;
+        if (!c || !c.temp) return '';
+        const dec = c.temp.decimals == null ? 1 : c.temp.decimals;
+        if (c.mode === 'day') {
+          return t('{min} bis {max} {unit}', {min: num(c.temp.min, dec), max: num(c.temp.max, dec), unit: c.temp.unit}).trim();
+        }
+        return `${num(c.temp.value, dec)} ${c.temp.unit}`.trim();
+      },
+
+      iconSvg: (name) => LAGE_ICONS[name] || '',
+
+      // Symbol und Farbe über dem Wort: Regen vor Himmelsklasse, ohne Himmelsdaten das Regen- oder kein Symbol.
+      conditionsHero() {
+        const c = this.conditions;
+        if (!c) return {icon: '', color: ''};
+        const day = c.mode === 'day';
+        const rainy = day ? !!(c.rain && (c.rain.mm || c.rain.minutes)) : !!(c.rain && c.rain.raining);
+        if (rainy) return {icon: 'rain', color: 'var(--chart-3)'};
+        const kind = c.sky && c.sky.class;
+        const map = {
+          night: ['moon', 'var(--chart-4)'], dusk: ['dusk', 'var(--chart-4)'], day: ['sun', 'var(--chart-7)'],
+          sunny: ['sun', 'var(--chart-7)'], fair: ['part', 'var(--chart-7)'], cloudy: ['cloud', 'var(--ink-muted)'],
+          overcast: ['cloud', 'var(--ink-muted)'],
+        };
+        const [icon, color] = map[kind] || ['', ''];
+        return {icon, color};
+      },
+
+      // Ein bis zwei Sätze unter dem Wort, aus den Werten der Kacheln; fehlt ein Teil, fehlt sein Satz.
+      // Der Satz als Liste ganzer Sätze: Die Karte bricht nur dazwischen um, nicht mitten in „3,4 °C“ oder einem Datum.
+      conditionsSentence() {
+        const c = this.conditions;
+        if (!c) return [];
+        const together = (text) => text
+          .replace(/(\d) (°C|°F|km\/h|m\/s|mph|kn|%|mm|lx|h|min)(?![\p{L}])/gu, '$1\u00a0$2')
+          .replace(/(\d{1,2}\.\d{1,2}\.) (\d{1,2}:\d{2})/g, '$1\u00a0$2');
+        if (c.mode === 'day') {
+          const p = this.conditionsDayParts();
+          const line = ['sky', 'temp', 'wind', 'rain'].filter((key) => p[key]).map((key) => (key === 'wind'
+            ? t('Wind bis Stärke {bft}', {bft: c.wind.bft}) : p[key].value)).join(' · ');
+          return line ? [together(line)] : [];
+        }
+        const parts = [];
+        const temp = c.temp ? this.conditionsTempText() : '';
+        const wind = c.wind ? [this.windPhrase(c.wind.bft), this.windFrom(c.wind.dir_deg)].filter(Boolean).join(' ') : '';
+        const adj = c.temp && c.temp.unit === '°C' ? this.tempAdjective(c.temp.value) : '';
+        if (temp && wind && adj) parts.push(t('{adj} bei {temp}, {wind}.', {adj, temp, wind}));
+        else if (temp && adj) parts.push(t('{adj} bei {temp}.', {adj, temp}));
+        else if (temp && wind) parts.push(t('{temp}, {wind}.', {temp, wind}));
+        else if (temp) parts.push(`${temp}.`);
+        else if (wind) parts.push(t('{wind}.', {wind}));
+        const rain = c.rain;
+        if (rain && rain.raining) {
+          if (rain.minutes == null) parts.push(t('Es regnet seit mehr als {n} h.', {n: 48}));
+          else {
+            const minutes = Math.round(rain.minutes);
+            parts.push(minutes < 120 ? t('Es regnet seit {n} min.', {n: minutes})
+              : t('Es regnet seit {h} h {m} min.', {h: Math.floor(minutes / 60), m: String(minutes % 60).padStart(2, '0')}));
+          }
+        } else if (rain && rain.raining === false) {
+          parts.push(rain.last != null
+            ? t('Aktuell trocken, zuletzt Regen um {time}.', {time: (fmtDate(formats.dm, rain.last) === fmtDate(formats.dm, c.now) ? '' : `${fmtDate(formats.dm, rain.last)} `) + fmtDate(formats.hm, rain.last)})
+            : t('Aktuell trocken.'));
+        }
+        return parts.map(together);
+      },
+
+      tempAdjective(value) {
+        if (value == null) return '';
+        if (value < 0) return t('Frostig');
+        if (value < 6) return t('Kalt');
+        if (value < 12) return t('Kühl');
+        if (value < 18) return t('Mild');
+        if (value < 25) return t('Warm');
+        return t('Heiß');
+      },
+
+      // Himmelsrichtung, aus der der Wind weht (acht Sektoren zu je 45°, Nord von 337,5° bis 22,5°).
+      windFrom(degrees) {
+        if (degrees == null) return '';
+        const names = [t('aus Norden'), t('aus Nordosten'), t('aus Osten'), t('aus Südosten'), t('aus Süden'), t('aus Südwesten'), t('aus Westen'), t('aus Nordwesten')];
+        return names[Math.floor(((degrees % 360) + 360 + 22.5) % 360 / 45)];
+      },
+
+      windPhrase(bft) {
+        if (bft <= 1) return t('kaum Wind');
+        if (bft <= 3) return t('schwacher Wind');
+        if (bft === 4) return t('mäßiger Wind');
+        if (bft === 5) return t('frischer Wind');
+        if (bft <= 7) return t('starker Wind');
+        return t('stürmischer Wind');
+      },
+
+      // Kleine Angaben unter dem Satz: Tagesbeginn oder Nachtbeginn und Sonnenstunden bis jetzt.
+      conditionsChips() {
+        const c = this.conditions;
+        if (!c || c.mode === 'day') return [];
+        const chips = [];
+        const light = c.light;
+        if (light) {
+          if (light.to != null && c.now >= light.to) chips.push({icon: 'clock', text: t('Nacht seit {time}', {time: fmtDate(formats.hm, light.to)})});
+          else chips.push({icon: 'clock', text: t('Tag seit {time}', {time: fmtDate(formats.hm, light.from)})});
+          if (light.yesterday_to != null && !(light.to != null && c.now >= light.to)) chips.push({icon: 'dusk', text: t('Gestern hell bis {time}', {time: fmtDate(formats.hm, light.yesterday_to)})});
+        }
+        if (c.sky && c.sky.sun_hours) chips.push({icon: 'bright', text: t('{h} Sonnenstunden', {h: num(c.sky.sun_hours, 1)})});
+        return chips;
+      },
+
+      conditionsTiles() {
+        const c = this.conditions;
+        if (!c) return [];
+        if (c.mode === 'day') {
+          const p = this.conditionsDayParts();
+          const labels = {sky: t('Sonnenschein'), wind: t('Wind'), rain: t('Regen'), temp: t('Temperatur')};
+          const icons = {sky: 'bright', wind: 'wind', rain: 'drop', temp: 'temp'};
+          return ['sky', 'wind', 'rain', 'temp'].filter((key) => p[key]).map((key) => ({
+            kind: key, icon: icons[key], label: labels[key], value: p[key].value, sub: p[key].sub, sub2: '',
+          }));
+        }
+        const tiles = [];
+        if (c.sky) {
+          // Die Klasse steht in der Überschrift; die Kachel zeigt die Messwerte dahinter.
+          const main = c.sky.value != null ? {n: c.sky.value, unit: c.sky.unit} : {n: c.sky.dawn, unit: 'lx'};
+          const sub = c.sky.value != null && c.sky.dawn != null ? t('Dämmerung {n} lx', {n: num(c.sky.dawn, 0)}) : '';
+          tiles.push({kind: 'sky', icon: 'bright', label: t('Helligkeit'), value: `${num(main.n, 0)} ${main.unit}`.trim(), sub, sub2: ''});
+        }
+        if (c.wind) {
+          tiles.push({
+            kind: 'wind', icon: 'wind', label: t('Wind'), value: this.beaufortName(c.wind.bft),
+            sub: t('Stärke {bft} · {kmh} km/h', {bft: c.wind.bft, kmh: num(c.wind.kmh, 0)}),
+            sub2: [this.windFrom(c.wind.dir_deg), c.wind.gust_kmh ? t('Böen bis {kmh} km/h', {kmh: num(c.wind.gust_kmh, 0)}) : ''].filter(Boolean).join(' · '),
+          });
+        }
+        const rain = this.conditionsRain();
+        if (rain) {
+          const wet = c.rain && !c.rain.raining && c.rain.mm_today;
+          tiles.push({
+            kind: 'rain', icon: 'drop', label: t('Regen'), value: rain.text, sub: rain.sub,
+            sub2: wet ? t('{value} {unit} heute', {value: num(c.rain.mm_today, 1), unit: c.rain.mm_unit || 'mm'}) : '',
+          });
+        }
+        if (c.temp) {
+          const dec = c.temp.decimals == null ? 1 : c.temp.decimals;
+          const span = c.temp.min != null && c.temp.max != null
+            ? t('heute {min} bis {max} {unit}', {min: num(c.temp.min, dec), max: num(c.temp.max, dec), unit: c.temp.unit}).trim() : '';
+          tiles.push({kind: 'temp', icon: 'temp', label: t('Temperatur'), value: this.conditionsTempText(), sub: span, sub2: ''});
+        }
+        return tiles;
+      },
+
+      // ---- Tageslicht (Dämmerungssensor): Kurve mit Nacht-, Dämmerungs- und Tagband -----------------
+
+      // ---- Sonnenstunden: Tagesverlauf der Süd-Helligkeit mit den Stunden über der Schwelle ----------
+
+      async loadSunhours() {
+        const stichtag = this.stichtag();
+        const seq = ++this._sunhoursSeq;
+        this.sunhoursError = '';
+        try {
+          const data = await this.fetchJson(`wetterdashboard/sonnenstunden${stichtag ? `?date=${encodeURIComponent(stichtag)}` : ''}`);
+          if (seq !== this._sunhoursSeq) return;  // ein neuerer Tag hat überholt
+          this.sunhours = data;
+          this.$nextTick(() => this.drawSunhours());
+        } catch (e) {
+          if (seq === this._sunhoursSeq) this.sunhoursError = t('Die Sonnenstunden konnten nicht geladen werden.');
+        }
+      },
+
+      sunhoursHead() {
+        const data = this.sunhours;
+        if (!data) return '';
+        if (!data.hours.length) return escapeHtml(t('Für diesen Tag liegen keine Werte vor.'));
+        let text = `<b>${escapeHtml(t('{h} Sonnenstunden', {h: num(data.sun_hours || 0, 1)}))}</b> ${escapeHtml(data.relative ? t('bei Schwelle {n} % des klaren Himmels', {n: num(data.threshold, 0)}) : t('bei Schwelle {n} lx', {n: num(data.threshold, 0)}))}`;
+        const peak = data.peak;
+        if (peak && peak.value > 0) {
+          text += ` · ${escapeHtml(data.relative ? t('Spitze um {time} Uhr: {value} %', {time: fmtDate(formats.hm, peak.start), value: num(peak.value, 0)}) : t('Spitze um {time} Uhr: {value} lx', {time: fmtDate(formats.hm, peak.start), value: num(peak.value, 0)}))}`;
+          if (data.saturation && peak.value >= data.saturation * 0.995) text += ` · ${escapeHtml(t('Süd mittags „ab {n} lx“ (Sensor sättigt)', {n: num(data.saturation, 0)}))}`;
+        }
+        return text;
+      },
+
+      // Ohne Argumente der Verlauf des Stichtags (Wind & Sonne); der Tagesbild-Dialog zeichnet seinen eigenen Tag.
+      drawSunhours(data = this.sunhours, element = this.$refs.sunChart, key = 'sunhours') {
+        if (!data || !element || !data.hours.length) return;
+        const colors = palette();
+        const byStart = new Map(data.hours.map((row) => [row[0], row]));
+        const points = [];
+        for (let stamp = data.start; stamp < Math.min(data.end, data.hours[data.hours.length - 1][0] + 3600); stamp += 3600) {
+          const row = byStart.get(stamp);
+          points.push([(stamp + 1800) * 1000, row ? row[1] : null]);
+        }
+        const peak = Math.max(data.threshold * 1.2, ...data.hours.map((row) => row[1]));
+        const chart = chartFor(key, element);
+        chart.setOption({
+          animation: false, grid: gridFor(element, {top: 16, right: 12}),
+          xAxis: {
+            type: 'value', min: data.start * 1000, max: data.end * 1000, interval: 3 * 3600 * 1000, ...axisStyle(colors),
+            splitLine: {show: false}, axisLabel: {color: colors.text, fontSize: scaledFont(11), formatter: (ms) => fmtDate(formats.hm, ms / 1000)},
+          },
+          yAxis: {
+            type: 'value', min: 0, max: peak, name: data.relative ? '%' : 'klx', nameTextStyle: {color: colors.text}, ...axisStyle(colors),
+            axisLabel: {color: colors.text, fontSize: scaledFont(11), formatter: (value) => num(data.relative ? value : value / 1000, 0)},
+          },
+          tooltip: {
+            trigger: 'axis', confine: true, backgroundColor: colors.surface, borderColor: colors.grid,
+            textStyle: {color: colors.ink, fontSize: scaledFont(12)},
+            formatter: (params) => {
+              const point = params[0].value;
+              if (point[1] == null) return '';
+              const stamp = point[0] / 1000 - 1800;
+              const sunny = point[1] >= data.threshold;
+              return `<b>${escapeHtml(fmtDate(formats.hm, stamp))}–${escapeHtml(fmtDate(formats.hm, stamp + 3600))}</b><br>${escapeHtml(num(point[1], 0))} ${data.relative ? '%' : 'lx'} · ${escapeHtml(sunny ? t('Sonne') : t('keine Sonne'))}`;
+            },
+          },
+          series: [{
+            type: 'line', data: points, symbol: 'circle', symbolSize: 5, connectNulls: false,
+            lineStyle: {color: colors.cur, width: 2.4}, itemStyle: {color: colors.cur},
+            markArea: {
+              silent: true,
+              data: data.hours.filter((row) => row[1] >= data.threshold).map((row) => [
+                {xAxis: row[0] * 1000, itemStyle: {color: cssVar('--chart-7'), opacity: 0.22}}, {xAxis: (row[0] + 3600) * 1000},
+              ]),
+            },
+            markLine: {
+              silent: true, symbol: 'none',
+              lineStyle: {color: colors.faint, type: 'dashed', width: 1},
+              label: {color: colors.text, fontSize: scaledFont(11), position: 'insideEndTop', formatter: data.relative ? t('Schwelle {n} %', {n: num(data.threshold, 0)}) : t('Schwelle {n} lx', {n: num(data.threshold, 0)})},
+              data: [{yAxis: data.threshold}],
+            },
+          }],
+        }, true);
+        requestAnimationFrame(() => chart.resize());
+      },
+
+      // ---- PV und Helligkeit (experimentell): Tagesertrag gegen die Erwartung aus der Süd-Helligkeit -------
+
+      async loadPv() {
+        this.pvError = '';
+        try {
+          this.pv = await this.fetchJson('wetterdashboard/pv');
+          for (const row of this.pv.days) row.hours = row.hours || [];
+          this.$nextTick(() => this.drawPv());
+        } catch (e) {
+          this.pvError = t('Der Vergleich von PV-Leistung und Helligkeit konnte nicht geladen werden.');
+        }
+      },
+
+      // Der gewählte Tag der Karte; ohne Auswahl der letzte.
+      pvDay() {
+        const days = this.pv ? this.pv.days : [];
+        if (!days.length) return null;
+        return days[this.pvSel != null && days[this.pvSel] ? this.pvSel : days.length - 1];
+      },
+
+      // Gibt es Tage, die mehr als die Grenze unter (low) oder über (high) der Erwartung liegen?
+      pvHas(kind) {
+        return !!(this.pv && this.pv.days.some((row) => row.flagged && (kind === 'low' ? row.deviation < 0 : row.deviation > 0)));
+      },
+
+      pvDayLabel(row) {
+        return new Intl.DateTimeFormat(LOCALE, {day: '2-digit', month: '2-digit', timeZone: 'UTC'}).format(new Date(`${row.date}T12:00:00Z`));
+      },
+
+      // Marke und Satz für den gewählten Tag: grün im Rahmen, bernsteinfarben darunter, blau darüber.
+      pvStatus() {
+        const data = this.pv;
+        const row = this.pvDay();
+        if (!data || !row) return {chip: '', text: '', kind: ''};
+        const values = {day: this.pvDayLabel(row), percent: num(Math.abs(row.deviation), 0), actual: num(row.actual, 1), expected: num(row.expected, 1)};
+        let chip;
+        let text;
+        let kind = 'ok';
+        if (!row.flagged) {
+          chip = t('{sign}{percent} % zur Erwartung', {sign: row.deviation > 0.5 ? '+' : row.deviation < -0.5 ? '−' : '±', percent: values.percent});
+          text = t('{day}: {actual} kWh, im Rahmen der Erwartung ({expected} kWh)', values);
+        } else if (row.deviation < 0) {
+          kind = 'low';
+          chip = t('{percent} % unter der Erwartung', values);
+          text = t('{day}: {actual} kWh, {percent} % unter der Erwartung ({expected} kWh)', values);
+        } else {
+          kind = 'high';
+          chip = t('{percent} % über der Erwartung', values);
+          text = t('{day}: {actual} kWh, {percent} % über der Erwartung ({expected} kWh)', values);
+        }
+        const flagged = data.days.filter((entry) => entry.flagged).length;
+        if (flagged) text += ` · ${t('{n} von {total} Tagen weichen um mehr als {limit} % ab', {n: flagged, total: data.days.length, limit: data.limit})}`;
+        return {chip, text, kind};
+      },
+
+      pvHourTitle() {
+        const row = this.pvDay();
+        return row ? t('Ertrag gegenüber Erwartung am {day}, je Stunde', {day: this.pvDayLabel(row)}) : '';
+      },
+
+      pvHourNote() {
+        const row = this.pvDay();
+        const hours = row ? row.hours : [];
+        if (hours.length < 2) return '';
+        const low = hours.reduce((a, b) => (b.ratio < a.ratio ? b : a));
+        const high = hours.reduce((a, b) => (b.ratio > a.ratio ? b : a));
+        return t('Um {low} Uhr liefert die Anlage {lowPct} % der Erwartung, um {high} Uhr {highPct} %.', {
+          low: low.hour, lowPct: num(low.ratio * 100, 0), high: high.hour, highPct: num(high.ratio * 100, 0),
+        });
+      },
+
+      pvSelect(index) {
+        if (this.pvSel === index) return;
+        this.pvSel = index;
+        this.drawPv();
+      },
+
+      drawPv() {
+        const data = this.pv;
+        if (!data) return;
+        const colors = palette();
+        const fmt = new Intl.DateTimeFormat(LOCALE, {day: '2-digit', month: '2-digit', timeZone: 'UTC'});
+        const warn = cssVar('--warning');
+        const good = cssVar('--positive');
+        const picked = data.days.indexOf(this.pvDay());
+        // Gleicher linker Rand in beiden Diagrammen, damit die Spalten untereinander liegen.
+        const left = 58;
+        const element = this.$refs.pvChart;
+        if (element) {
+          const labels = data.days.map((row) => fmt.format(new Date(`${row.date}T12:00:00Z`)));
+          const chart = chartFor('pv', element);
+          const barColor = (row) => (row.flagged ? (row.deviation < 0 ? warn : good) : colors.cur);
+          chart.setOption({
+            animation: false, grid: {left, right: 12, top: 26, bottom: 26, containLabel: false},
+            xAxis: [
+              {type: 'category', data: labels, ...axisStyle(colors), splitLine: {show: false}},
+              {type: 'category', data: labels, show: false},
+            ],
+            yAxis: {type: 'value', min: 0, ...axisStyle(colors), axisLabel: {color: colors.text, fontSize: scaledFont(11), formatter: (value) => `${value} kWh`}},
+            tooltip: tooltipBox(colors, (params) => {
+              const row = data.days[params[0].dataIndex];
+              return `<b>${escapeHtml(params[0].axisValue)}</b><br>${escapeHtml(t('Ertrag'))}: ${escapeHtml(num(row.actual, 1))} kWh`
+                + `<br>${escapeHtml(t('Erwartet nach Helligkeit'))}: ${escapeHtml(num(row.expected, 1))} kWh<br>${escapeHtml(row.deviation >= 0 ? '+' : '−')}${escapeHtml(num(Math.abs(row.deviation), 0))} %`;
+            }),
+            series: [
+              {
+                name: t('Ertrag'), type: 'bar', barWidth: '46%', cursor: 'pointer', xAxisIndex: 0,
+                markArea: picked >= 0 ? {silent: true, itemStyle: {color: colors.grid, opacity: 0.55}, data: [[{xAxis: labels[picked]}, {xAxis: labels[picked]}]]} : undefined,
+                data: data.days.map((row, i) => ({
+                  value: row.actual, itemStyle: {color: barColor(row)},
+                  label: i === picked ? {
+                    show: true, position: 'top', color: colors.ink, fontWeight: 600, fontSize: scaledFont(12),
+                    // Nur die Abweichung: die kWh stehen in der Marke darüber, und mehr passt nicht in die Spalte.
+                    formatter: () => `${row.deviation >= 0 ? '+' : '−'}${num(Math.abs(row.deviation), 0)} %`,
+                  } : {show: false},
+                })),
+              },
+              {
+                // Die Erwartung als gestrichelter Rahmen, etwas breiter als der Ertrag; so sieht man, was fehlt oder darüber liegt.
+                name: t('Erwartet nach Helligkeit'), type: 'bar', barWidth: '62%', xAxisIndex: 1, silent: true, z: 5,
+                itemStyle: {color: 'transparent', borderColor: colors.text, borderWidth: 1.5, borderType: 'dashed'},
+                data: data.days.map((row) => row.expected),
+              },
+            ],
+          }, true);
+          // Klick irgendwo in die Spalte eines Tages wählt ihn, nicht nur auf den Balken.
+          const zr = chart.getZr();
+          zr.off('click');
+          zr.on('click', (event) => {
+            const point = [event.offsetX, event.offsetY];
+            if (!chart.containPixel({gridIndex: 0}, point)) return;
+            const index = Math.round(chart.convertFromPixel({gridIndex: 0}, point)[0]);
+            if (index >= 0 && index < data.days.length) this.pvSelect(index);
+          });
+          requestAnimationFrame(() => chart.resize());
+        }
+        const hourElement = this.$refs.pvHourChart;
+        const day = this.pvDay();
+        if (hourElement && day && day.hours.length) {
+          const limit = data.limit;
+          const chart = chartFor('pvHour', hourElement);
+          // Abweichung von 100 % als Balken um die Nulllinie; die Achse trägt wieder Prozent.
+          chart.setOption({
+            animation: false, grid: {left, right: 12, top: 12, bottom: 26, containLabel: false},
+            xAxis: {type: 'category', data: day.hours.map((row) => t('{hour} Uhr', {hour: row.hour})), ...axisStyle(colors), splitLine: {show: false}, axisLabel: {color: colors.text, fontSize: scaledFont(11), hideOverlap: true}, axisPointer: {type: 'none'}},
+            yAxis: {type: 'value', min: -50, max: 50, interval: 25, ...axisStyle(colors), axisLabel: {color: colors.text, fontSize: scaledFont(11), formatter: (value) => `${value + 100} %`}},
+            tooltip: {
+              trigger: 'axis', confine: true, backgroundColor: colors.surface, borderColor: colors.grid,
+              textStyle: {color: colors.ink, fontSize: scaledFont(12)},
+              formatter: (params) => {
+                const row = day.hours[params[0].dataIndex];
+                return `<b>${escapeHtml(t('{hour} Uhr', {hour: row.hour}))}</b><br>${escapeHtml(num(row.ratio * 100, 0))} % ${escapeHtml(t('der Erwartung'))}`;
+              },
+            },
+            series: [{
+              type: 'bar', barMaxWidth: 26,
+              data: day.hours.map((row) => {
+                const deviation = Math.round(row.ratio * 100) - 100;
+                return {
+                  value: deviation,
+                  itemStyle: {color: deviation < -limit ? warn : colors.cur},
+                  label: Math.abs(deviation) >= limit * 0.4
+                    ? {show: true, position: deviation >= 0 ? 'top' : 'bottom', color: colors.text, fontSize: scaledFont(11), formatter: () => `${deviation + 100} %`}
+                    : {show: false},
+                };
+              }),
+              markArea: {silent: true, itemStyle: {color: good, opacity: 0.12}, data: [[{yAxis: -limit}, {yAxis: limit}]]},
+              markLine: {silent: true, symbol: 'none', lineStyle: {color: good, type: 'solid', width: 1.5}, label: {show: false}, data: [{yAxis: 0}]},
+            }],
+          }, true);
+          requestAnimationFrame(() => chart.resize());
+        }
+      },
+
+      // ---- Tagesbild: ein Streifen mit der Klasse je Tag --------------------------------------------
+
+      async loadDayimage() {
+        this.dayimageError = '';
+        try {
+          this.dayimage = await this.fetchJson('wetterdashboard/tagesbild');
+        } catch (e) {
+          this.dayimage = null;
+          this.dayimageError = t('Das Tagesbild konnte nicht geladen werden.');
+        }
+      },
+
+      dayimageKindName(kind) {
+        return {sunny: t('sonnig'), mixed: t('wechselhaft'), overcast: t('trüb')}[kind] || '';
+      },
+
+      dayimageCells() {
+        const data = this.dayimage;
+        if (!data) return [];
+        const picked = this.stichtag();
+        return data.days.slice().reverse().map((day) => {
+          const label = utcDayMonth.format(new Date(`${day.date}T12:00:00Z`));
+          const has = !!day.class;
+          const sub = has
+            ? t('{sun} von {bright} h Sonne', {sun: num(day.sun_hours, 1), bright: num(day.bright_hours, 0)})
+            : t('keine Klasse');
+          const title = has
+            ? t('{day}: {kind} · {sun} h Sonne von {bright} h hell', {
+              day: day.today ? t('{day} (bisher)', {day: label}) : label, kind: this.dayimageKindName(day.class),
+              sun: num(day.sun_hours, 1), bright: num(day.bright_hours, 1),
+            })
+            : t('{day}: keine Klasse (zu wenig helle Stunden oder keine Werte)', {day: label});
+          return {
+            ...day, picked: picked === day.date, title, sub, label: day.today ? t('{day} (bisher)', {day: label}) : label,
+            kindName: has ? this.dayimageKindName(day.class) : '–', percent: has ? Math.round(day.share * 100) : 0,
+          };
+        });
+      },
+
+      dayimageHead() {
+        const data = this.dayimage;
+        if (!data) return '';
+        const names = {sunny: t('sonnig'), mixed: t('wechselhaft'), overcast: t('trüb')};
+        const parts = ['sunny', 'mixed', 'overcast'].filter((kind) => data.counts[kind]).map((kind) => `${data.counts[kind]} ${names[kind]}`);
+        return parts.length ? t('Die letzten {n} Tage: {parts}', {n: data.days.length, parts: parts.join(' · ')}) : '';
+      },
+
+      // Ein Klick auf die Kachel öffnet den Dialog zum Tag; der Stichtag wird erst dort gesetzt.
+      async openDay(cell) {
+        this.dayDlg = {cell, loading: true, error: '', data: null};
+        this.$nextTick(() => this.$refs.dayDlg.showModal());
+        try {
+          const data = await this.fetchJson(`wetterdashboard/tagesbild/tag?date=${encodeURIComponent(cell.date)}`);
+          if (!this.dayDlg || this.dayDlg.cell.date !== cell.date) return;  // inzwischen geschlossen oder ein anderer Tag
+          this.dayDlg = {cell, loading: false, error: '', data};
+          this.$nextTick(() => this.drawSunhours(data.sun, this.$refs.dayChart, 'dayimage'));
+        } catch (e) {
+          if (this.dayDlg && this.dayDlg.cell.date === cell.date) {
+            this.dayDlg = {cell, loading: false, error: t('Der Tag konnte nicht geladen werden.'), data: null};
+          }
+        }
+      },
+
+      closeDay() {
+        if (this.$refs.dayDlg.open) this.$refs.dayDlg.close();
+      },
+
+      onDayClose() {
+        if (charts.dayimage) { charts.dayimage.dispose(); delete charts.dayimage; }
+        if (observers.dayimage) { observers.dayimage.disconnect(); delete observers.dayimage; }
+        this.dayDlg = null;
+      },
+
+      // Der Stichtag-Knopf des Dialogs: gewählt ist der Tag, wenn er der Stichtag ist (heute: kein Stichtag gesetzt).
+      dayDlgAction() {
+        const cell = this.dayDlg && this.dayDlg.cell;
+        if (!cell) return null;
+        if (cell.picked) return cell.today ? null : {label: t('Zurück zu heute'), today: true};
+        return {label: cell.today ? t('Zurück zu heute') : t('Als Stichtag setzen'), today: cell.today};
+      },
+
+      applyDay() {
+        const cell = this.dayDlg.cell;
+        Alpine.store('dashStichtag').set(cell.today ? null : cell.date);
+        this.closeDay();
+      },
+
+      dayDlgTitle() {
+        const cell = this.dayDlg && this.dayDlg.cell;
+        return cell ? cell.label : '';
+      },
+
+      // Eckwerte des Tages: nur, was die belegten Rollen liefern.
+      dayDlgFacts() {
+        const c = this.dayDlg && this.dayDlg.data && this.dayDlg.data.conditions;
+        if (!c) return [];
+        const facts = [];
+        if (c.temp) {
+          const d = c.temp.decimals;
+          facts.push({label: t('Temperatur'), value: `${num(c.temp.min, d)} … ${num(c.temp.max, d)} ${c.temp.unit}`.trim(), sub: t('Tiefst- und Höchstwert')});
+        }
+        if (c.rain) {
+          const mm = c.rain.mm != null ? `${num(c.rain.mm, 1)} ${c.rain.mm_unit}`.trim() : null;
+          const minutes = c.rain.minutes != null ? t('{n} min', {n: num(c.rain.minutes, 0)}) : null;
+          facts.push({label: t('Niederschlag'), value: mm || minutes, sub: mm && minutes ? minutes : ''});
+        }
+        if (c.wind) facts.push({label: t('Wind'), value: `${num(c.wind.kmh, 0)} km/h`, sub: t('Maximum, Stärke {bft}', {bft: c.wind.bft})});
+        // Vierte Kachel: die erste Größe, die zugeordnet ist (Luftdruck, Luftfeuchte, Spitzenhelligkeit).
+        if (c.pressure) {
+          const p = c.pressure;
+          const trend = {rising: t('Tendenz: steigend'), falling: t('Tendenz: fallend'), steady: t('Tendenz: stabil')}[p.trend];
+          facts.push({label: t('Luftdruck'), value: `${num(p.avg, p.decimals)} ${p.unit}`.trim(), sub: trend || ''});
+        } else if (c.humidity) {
+          const h = c.humidity;
+          facts.push({
+            label: t('Luftfeuchte'), value: `Ø ${num(h.avg, h.decimals)} ${h.unit}`.trim(),
+            sub: `${num(h.min, h.decimals)} – ${num(h.max, h.decimals)} ${h.unit}`.trim(),
+          });
+        } else if (c.light) {
+          const l = c.light;
+          facts.push({
+            label: t('Spitzenhelligkeit'), value: `${num(l.max, 0)} ${l.unit}`.trim(),
+            sub: t('um {time}', {time: fmtDate(formats.hm, l.max_ts)}),
+          });
+        }
+        return facts;
+      },
+
+      async loadDaylight() {
+        const stichtag = this.stichtag();
+        const seq = ++this._daylightSeq;
+        this.daylightError = '';
+        try {
+          const data = await this.fetchJson(`wetterdashboard/tageslicht${stichtag ? `?date=${encodeURIComponent(stichtag)}` : ''}`);
+          if (seq !== this._daylightSeq) return;  // ein neuerer Tag hat überholt
+          this.daylight = data;
+          this.$nextTick(() => this.drawDaylight());
+          if (!this.daylength) this.loadDaylength();
+        } catch (e) {
+          if (seq === this._daylightSeq) this.daylightError = t('Das Tageslicht konnte nicht geladen werden.');
+        }
+      },
+
+      daylightClock(stamp) {
+        return stamp == null ? '–' : fmtDate(formats.hm, stamp);
+      },
+
+      daylightDuration(seconds, approx) {
+        if (seconds == null) return '–';
+        const minutes = Math.round(seconds / 60);
+        const text = t('{h} h {m} min', {h: Math.floor(minutes / 60), m: String(minutes % 60).padStart(2, '0')});
+        return (approx ? '≈ ' : '') + text;
+      },
+
+      daylightMinutes(seconds, approx) {
+        return seconds == null ? '–' : (approx ? '≈ ' : '') + t('{n} min', {n: num(seconds / 60, 0)});
+      },
+
+      daylightSpan(day) {
+        if (day.from == null) return '–';
+        if (day.ongoing) return t('ab {time}', {time: this.daylightClock(day.from)});
+        return day.to == null ? this.daylightClock(day.from) : `${this.daylightClock(day.from)}–${this.daylightClock(day.to)}`;
+      },
+
+      daylightHead() {
+        const day = this.daylight && this.daylight.day;
+        if (!day) return '';
+        if (!day.resolution) return t('Für diesen Tag liegen keine Werte vor.');
+        if (this.daylightStartedBright()) {
+          const start = this.daylightClock(day.points[0][0]);
+          return day.to == null
+            ? t('Hell seit Beginn der Aufzeichnung um {start} Uhr; der Tagesbeginn davor fehlt.', {start})
+            : t('Hell bis {to} Uhr; die Aufzeichnung setzt erst um {start} Uhr ein, der Tagesbeginn fehlt.', {to: this.daylightClock(day.to), start});
+        }
+        if (day.from == null) return t('Der Sensor erreichte an diesem Tag {n} lx nicht.', {n: num(this.daylight.day_lx, 0)});
+        const values = {span: this.daylightSpan(day), length: this.daylightDuration(day.length, day.approx)};
+        return day.ongoing ? t('Hell {span}, bisher {length} Tageslicht', values) : t('Hell {span} Uhr, {length} Tageslicht', values);
+      },
+
+      // Die Aufzeichnung setzt schon über der Tag-Schwelle ein (Sensor erst seit Kurzem im Archiv): kein Anstieg
+      // sichtbar, der Tagesbeginn ist unbekannt, nicht „nie erreicht“.
+      daylightStartedBright() {
+        const data = this.daylight;
+        const day = data && data.day;
+        return !!(day && day.resolution === 'fine' && day.from == null && day.points && day.points.length
+          && day.points[0][1] >= data.day_lx);
+      },
+
+      daylightStats() {
+        const data = this.daylight;
+        if (!data || !data.day.resolution) return [];
+        const day = data.day;
+        const basis = day.approx ? t('Stundenraster, auf eine Stunde genau') : t('Minutenwerte');
+        return [
+          {
+            kind: 'day', icon: 'sun', label: t('Tag ab / bis'),
+            value: day.from == null ? (day.to != null && this.daylightStartedBright() ? `– / ${this.daylightClock(day.to)}` : '–') : (day.to == null ? this.daylightClock(day.from) : `${this.daylightClock(day.from)} / ${this.daylightClock(day.to)}`),
+            sub: this.daylightStartedBright() ? t('Aufzeichnung ab {time}', {time: this.daylightClock(day.points[0][0])}) : basis,
+          },
+          {kind: 'length', icon: 'clock', label: t('Tageslänge'), value: this.daylightDuration(day.length, day.approx), sub: t('über {n} lx', {n: num(data.day_lx, 0)})},
+          {
+            kind: 'dawn', icon: 'dusk', label: t('Dämmerung morgens'), value: this.daylightMinutes(day.morning, day.approx),
+            sub: day.dawn != null ? t('ab {time} (über {n} lx)', {time: this.daylightClock(day.dawn), n: num(data.night_lx, 0)}) : '',
+          },
+          {
+            kind: 'dusk', icon: 'dusk', label: t('Dämmerung abends'), value: this.daylightMinutes(day.evening, day.approx),
+            sub: day.dusk != null ? t('bis {time} (unter {n} lx)', {time: this.daylightClock(day.dusk), n: num(data.night_lx, 0)}) : '',
+          },
+        ];
+      },
+
+      daylightNote() {
+        const day = this.daylight && this.daylight.day;
+        if (!day || day.resolution !== 'hour') return '';
+        return t('Für diesen Tag liegen nur Stundenwerte vor. Eine Stunde zählt als Tag, wenn ihr Mittel die Tag-Schwelle erreicht; die Zeiten sind auf eine Stunde genau.');
+      },
+
+      // Tage ohne Werte stehen nicht in der Tabelle, ein Satz nennt stattdessen, seit wann es Daten gibt.
+      daylightHistoryNote() {
+        const data = this.daylight;
+        if (!data) return '';
+        const empty = data.compare.filter((row) => !row.resolution).length;
+        if (!empty) return '';
+        const known = data.compare.filter((row) => row.resolution);
+        const since = known.length ? utcDayMonth.format(new Date(`${known[known.length - 1].date}T12:00:00Z`)) : '';
+        return since
+          ? t('Für {n} frühere Tage liegen keine Werte vor: Der Sensor wird erst seit dem {date} archiviert.', {n: empty, date: since})
+          : t('Für die letzten Tage liegen keine Werte vor.');
+      },
+
+      daylightRows() {
+        const data = this.daylight;
+        if (!data) return [];
+        const rows = data.compare.filter((row) => row.resolution);
+        return rows.map((row, i) => {
+          const running = !!row.ongoing;
+          // Änderung zum Vortag nur bei minutengenauen Tagen, auf Stundenwerten wäre sie nur Rauschen.
+          const prev = rows[i + 1];
+          let delta = '';
+          if (!running && !row.approx && row.length != null && prev && !prev.ongoing && !prev.approx && prev.length != null) {
+            const minutes = Math.round((row.length - prev.length) / 60);
+            delta = (minutes > 0 ? '+' : minutes < 0 ? '−' : '±') + t('{n} min', {n: num(Math.abs(minutes), 0)});
+          }
+          return {
+            date: row.date, current: row.date === data.day.date, running, delta,
+            day: utcDayMonth.format(new Date(`${row.date}T12:00:00Z`)),
+            span: this.daylightSpan(row),
+            length: running ? t('läuft') : this.daylightDuration(row.length, row.approx),
+            morning: this.daylightMinutes(row.morning, row.approx),
+            evening: this.daylightMinutes(row.evening, row.approx),
+            sunFrom: row.sun_from == null ? '–' : `${num(row.sun_from, 1)}°`,
+            sunTo: row.sun_to == null ? '–' : `${num(row.sun_to, 1)}°`,
+          };
+        });
+      },
+
+      // Jahresverlauf der Tageslänge: eine Linie je Jahr über denselben Kalendertagen, stundengenau.
+      async loadDaylength() {
+        if (this.daylength) { this.$nextTick(() => this.drawDaylength()); return; }
+        try {
+          this.daylength = await this.fetchJson('wetterdashboard/tageslaenge');
+          this.$nextTick(() => this.drawDaylength());
+        } catch (e) {
+          this.daylength = null;
+        }
+      },
+
+      daylengthNote() {
+        const data = this.daylength;
+        if (!data || !data.days.length) return '';
+        const years = [...new Set(data.days.map((row) => row[0].slice(0, 4)))];
+        const longest = data.days.reduce((a, b) => (b[1] > a[1] ? b : a));
+        const full = new Intl.DateTimeFormat(LOCALE, {day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC'});
+        const at = (iso) => full.format(new Date(`${iso}T12:00:00Z`));
+        const text = t('Der Sensor zeigt von {first} bis {last} Tage mit Werten, am längsten {hours} h am {day}.', {
+          first: at(data.days[0][0]), last: at(data.days[data.days.length - 1][0]), hours: num(longest[1], 0), day: at(longest[0]),
+        });
+        return years.length > 1 ? text : `${text} ${t('Ein Vorjahr zum Vergleichen gibt es noch nicht.')}`;
+      },
+
+      drawDaylength() {
+        const data = this.daylength;
+        const element = this.$refs.daylengthChart;
+        if (!data || !element) return;
+        const colors = palette();
+        // Alle Jahre auf ein Schaltjahr (2000) abbilden, damit gleiche Kalendertage übereinander liegen.
+        const byYear = new Map();
+        for (const [iso, hours] of data.days) {
+          const year = iso.slice(0, 4);
+          if (!byYear.has(year)) byYear.set(year, []);
+          byYear.get(year).push([Date.UTC(2000, Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10))), hours, iso]);
+        }
+        // Neuestes Jahr zuerst, wie in den anderen Jahresdiagrammen: Legende und Farben (das neueste in der ersten Farbe).
+        const years = [...byYear.keys()].sort().reverse();
+        const latest = years[0];
+        // Achse ab dem nächsten Vielfachen von 3 h unter der kürzesten Tageslänge: im Winter bei uns ab 6 h,
+        // weiter im Norden bleibt Platz bis 0 h.
+        const shortest = Math.min(...data.days.map((row) => row[1]));
+        const floor = Math.max(0, Math.floor((shortest - 1) / 3) * 3);
+        const chart = chartFor('daylength', element);
+        chart.setOption({
+          animation: false, grid: gridFor(element, {top: 28, right: 12}), legend: legendBox(colors, years),
+          xAxis: {
+            type: 'time', min: Date.UTC(2000, 0, 1), max: Date.UTC(2000, 11, 31), ...axisStyle(colors), splitLine: {show: false},
+            axisLabel: {color: colors.text, fontSize: scaledFont(11), formatter: (ms) => monthName(new Date(ms).getUTCMonth() + 1, 'short')},
+          },
+          yAxis: {type: 'value', min: floor, max: 18, interval: 3, ...axisStyle(colors), axisLabel: {color: colors.text, fontSize: scaledFont(11), formatter: (value) => `${value} h`}},
+          tooltip: {
+            trigger: 'item', confine: true, backgroundColor: colors.surface, borderColor: colors.grid,
+            textStyle: {color: colors.ink, fontSize: scaledFont(12)},
+            formatter: (param) => `<b>${escapeHtml(utcDayMonth.format(new Date(`${param.data[2]}T12:00:00Z`)))}.${escapeHtml(param.data[2].slice(0, 4))}</b><br>${escapeHtml(this.daylightDuration(param.data[1] * 3600, true))}`,
+          },
+          series: years.map((year, index) => ({
+            name: year, type: 'line', symbol: 'none', data: byYear.get(year), connectNulls: false,
+            lineStyle: {width: year === latest ? 2.6 : 1.6, opacity: year === latest ? 1 : 0.6},
+            itemStyle: {color: this.heatColor(index)},
+          })),
+        }, true);
+        requestAnimationFrame(() => chart.resize());
+      },
+
+      drawDaylight() {
+        const data = this.daylight;
+        const element = this.$refs.daylightChart;
+        if (!data || !element) return;
+        const day = data.day;
+        const colors = palette();
+        const kindName = (value) => (value >= data.day_lx ? t('Tag') : value >= data.night_lx ? t('Dämmerung') : t('Nacht'));
+        const bandColor = {
+          night: {color: colors.ink, opacity: 0.14},
+          dusk: {color: cssVar('--chart-3'), opacity: 0.2},
+          day: {color: cssVar('--chart-7'), opacity: 0.22},
+        };
+        const peak = Math.max(1000, ...day.points.map((point) => point[1]));
+        const chart = chartFor('daylight', element);
+        chart.setOption({
+          animation: false, grid: gridFor(element, {top: 16, right: 12}),
+          xAxis: {
+            type: 'value', min: day.start * 1000, max: day.end * 1000, interval: 3 * 3600 * 1000, ...axisStyle(colors),
+            splitLine: {show: false}, axisLabel: {color: colors.text, fontSize: scaledFont(11), formatter: (ms) => fmtDate(formats.hm, ms / 1000)},
+          },
+          yAxis: {type: 'value', min: 0, max: peak, name: 'lx', nameTextStyle: {color: colors.text}, ...axisStyle(colors)},
+          tooltip: {
+            trigger: 'axis', confine: true, backgroundColor: colors.surface, borderColor: colors.grid,
+            textStyle: {color: colors.ink, fontSize: scaledFont(12)},
+            formatter: (params) => {
+              const point = params[0].value;
+              let html = `<b>${escapeHtml(fmtDate(formats.hm, point[0] / 1000))}</b><br>${escapeHtml(num(point[1], 0))} lx · ${escapeHtml(kindName(point[1]))}`;
+              const hour = (day.hours || []).find((row) => row[0] * 1000 + 1800000 === point[0]);
+              if (hour) html += `<br>${escapeHtml(t('Max {n} lx', {n: num(hour[2], 0)}))}`;
+              return html;
+            },
+          },
+          series: [{
+            type: 'line', data: day.points.map((point) => [point[0] * 1000, point[1]]), symbol: day.resolution === 'hour' ? 'circle' : 'none',
+            symbolSize: 5, lineStyle: {color: colors.cur, width: 2.4}, itemStyle: {color: colors.cur},
+            markArea: {
+              silent: true,
+              data: day.bands.map(([from, to, kind]) => [
+                {xAxis: from * 1000, itemStyle: bandColor[kind]}, {xAxis: to * 1000},
+              ]),
+            },
+            markLine: {
+              silent: true, symbol: 'none',
+              lineStyle: {color: colors.faint, type: 'dashed', width: 1},
+              label: {color: colors.text, fontSize: scaledFont(11), position: 'insideEndTop'},
+              data: [
+                {yAxis: data.night_lx, label: {formatter: t('Nacht unter {n} lx', {n: num(data.night_lx, 0)})}},
+                {yAxis: data.day_lx, label: {formatter: t('Tag ab {n} lx', {n: num(data.day_lx, 0)})}},
+              ],
+            },
+          }],
+        }, true);
         requestAnimationFrame(() => chart.resize());
       },
 
       // Temperaturen im Vergleich (Reiter „Temperatur & Klima“)
       async loadTemps() {
         this.tempError = '';
+        const seq = ++this._tempsSeq;
         try {
-          this.tempCmp = await this.fetchJson(`wetterdashboard/temperaturen?days=${this.tempDays}`);
+          const data = await this.fetchJson(`wetterdashboard/temperaturen?days=${this.tempDays}`);
+          if (seq !== this._tempsSeq) return;  // eine neuere Anfrage hat überholt
+          this.tempCmp = data;
           this.$nextTick(() => this.drawTemps());
         } catch (e) {
-          this.tempError = t('Die Temperaturen konnten nicht geladen werden.');
+          if (seq === this._tempsSeq) this.tempError = t('Die Temperaturen konnten nicht geladen werden.');
         }
       },
 
@@ -692,13 +1637,54 @@
 
       drawTemps() {
         const data = this.tempCmp;
-        const element = this.$refs.tempChart;
-        if (!data || !element) return;
+        if (!data) return;
+        const off = this.roomsOff;
+        if (data.series.length) this.drawComparison('temps', this.$refs.tempChart, data, WetterRooms.visible(data.series, off), '°C', 1);
+        if (data.humidity && data.humidity.length) this.drawComparison('humid', this.$refs.humidChart, data, WetterRooms.visible(data.humidity, off), '%', 0);
+      },
+
+      // Räume der weiteren Sensoren für die Auswahl über den Diagrammen; ab zwei Räumen sichtbar.
+      roomChips() {
+        const rooms = this.tempCmp ? WetterRooms.roomsOf(this.tempCmp) : [];
+        if (rooms.length < 2) return [];
+        // Mit Etagen aus Home Assistant stehen die Räume gruppiert, vor der ersten eines Etagenblocks der Name der Etage.
+        const floors = WetterRooms.floorsOf(this.tempCmp);
+        const grouped = floors.some((entry) => entry.floor);
+        const order = grouped ? floors.flatMap((entry) => entry.rooms.map((room) => ({room, floor: entry.floor}))) : rooms.map((room) => ({room, floor: ''}));
+        const seen = new Set();
+        let last = null;
+        const chips = [];
+        for (const {room, floor} of order) {
+          if (seen.has(room)) continue;
+          seen.add(room);
+          chips.push({name: room, label: room || t('Ohne Raum'), floorLabel: grouped && floor !== last ? (floor || t('Ohne Etage')) : '', on: !this.roomsOff.includes(room)});
+          last = floor;
+        }
+        return chips;
+      },
+
+      toggleRoom(name) {
+        this.roomsOff = this.roomsOff.includes(name) ? this.roomsOff.filter((n) => n !== name) : [...this.roomsOff, name];
+        writeStore({roomsOff: this.roomsOff});
+        this.drawTemps();
+      },
+
+      showAllRooms() {
+        this.roomsOff = [];
+        writeStore({roomsOff: []});
+        this.drawTemps();
+      },
+
+      // Linien je Sensor über die letzten Tage; die Einheit steht an der Achse (Temperatur und Feuchte nie gemischt).
+      drawComparison(name, element, data, series, fallbackUnit, decimals) {
+        if (!element) return;
         const colors = palette();
         const labels = data.dates.map((iso) => utcDayMonth.format(new Date(`${iso}T00:00:00Z`)));
-        const unit = (data.series[0] && data.series[0].unit) || '°C';
-        const names = data.series.map((row) => row.label);
-        const chart = chartFor('temps', element);
+        const unit = (series[0] && series[0].unit) || fallbackUnit;
+        // Die Farbe richtet sich nach der Stelle in der ganzen Liste (_i), nicht nach der in der Auswahl.
+        const colorOf = (row, index) => this.heatColor(row._i != null ? row._i : index);
+        const names = series.map((row) => row.label);
+        const chart = chartFor(name, element);
         chart.setOption({
           animation: false, grid: gridFor(element, {right: 8}), legend: legendBox(colors, names),
           xAxis: {type: 'category', data: labels, boundaryGap: false, ...axisStyle(colors), splitLine: {show: false}},
@@ -706,16 +1692,16 @@
           tooltip: tooltipBox(colors, (params) => {
             let html = `<b>${escapeHtml(labels[params[0].dataIndex])}</b>`;
             for (const param of params) {
-              const value = param.value == null ? '–' : `${num(param.value, 1)} ${unit}`;
+              const value = param.value == null ? '–' : `${num(param.value, decimals)} ${unit}`;
               html += `<br>${param.marker}${escapeHtml(param.seriesName)}: ${escapeHtml(value)}`;
             }
             return html;
           }),
-          series: data.series.map((row, index) => ({
+          series: series.map((row, index) => ({
             name: row.label, type: 'line', data: row.values, symbol: 'none', connectNulls: false,
             z: index === 0 ? 5 : 2,
-            lineStyle: {color: this.heatColor(index), width: index === 0 ? 3 : 2},
-            itemStyle: {color: this.heatColor(index)},
+            lineStyle: {color: colorOf(row, index), width: index === 0 ? 3 : 2},
+            itemStyle: {color: colorOf(row, index)},
           })),
         }, true);
         chart.resize();
@@ -724,11 +1710,14 @@
       // Niederschlag
       async loadPrecip() {
         this.precipError = '';
+        const seq = ++this._precipSeq;
         try {
-          this.precip = await this.fetchJson(`wetterdashboard/niederschlag?mode=${this.precipMode}`);
+          const data = await this.fetchJson(`wetterdashboard/niederschlag?mode=${this.precipMode}`);
+          if (seq !== this._precipSeq) return;  // eine neuere Anfrage hat überholt
+          this.precip = data;
           this.$nextTick(() => this.drawPrecip());
         } catch (e) {
-          this.precipError = t('Der Niederschlag konnte nicht geladen werden.');
+          if (seq === this._precipSeq) this.precipError = t('Der Niederschlag konnte nicht geladen werden.');
         }
       },
 
@@ -781,26 +1770,26 @@
         const kpis = [];
         const asDate = (iso) => utcDayMonth.format(new Date(iso + 'T12:00:00Z'));
         if (p.mode === 'dur') {
-          kpis.push({label: t('Regenminuten'), value: escapeHtml(num(p.total, 0)) + '<small>min</small>', sub: ''});
+          kpis.push({icon: 'rain', label: t('Regenminuten'), value: escapeHtml(num(p.total, 0)) + '<small>min</small>', sub: ''});
         }
         kpis.push({
-          label: p.mode === 'dur' ? t('Regentage (ab {n} min)', {n: num(p.threshold, 0)}) : t('Regentage (ab {n} mm)', {n: num(p.threshold, 1)}),
+          icon: 'drop', label: p.mode === 'dur' ? t('Regentage (ab {n} min)', {n: num(p.threshold, 0)}) : t('Regentage (ab {n} mm)', {n: num(p.threshold, 1)}),
           value: escapeHtml(String(p.wet_days)), sub: t('seit Jahresbeginn'),
         });
         if (p.wettest) {
           kpis.push({
-            label: p.mode === 'dur' ? t('Regenreichster Tag') : t('Nassester Tag'),
+            icon: 'rain', label: p.mode === 'dur' ? t('Regenreichster Tag') : t('Nassester Tag'),
             value: escapeHtml(num(p.wettest.value * this.precipScale(), 1)) + `<small>${escapeHtml(this.precipUnit())}</small>`,
             sub: asDate(p.wettest.date),
           });
         }
         kpis.push({
-          label: t('Längste Trockenphase'),
+          icon: 'sun', label: t('Längste Trockenphase'),
           value: escapeHtml(String(p.longest_dry_days)) + `<small>${escapeHtml(t('Tage'))}</small>`,
           sub: p.longest_dry_end ? t('bis {date}', {date: asDate(p.longest_dry_end)}) : '',
         });
         if (p.current_dry_days > 0) {
-          kpis.push({label: t('Aktuell trocken'), value: escapeHtml(String(p.current_dry_days)) + `<small>${escapeHtml(t('Tage'))}</small>`, sub: ''});
+          kpis.push({icon: 'sun', label: t('Aktuell trocken'), value: escapeHtml(String(p.current_dry_days)) + `<small>${escapeHtml(t('Tage'))}</small>`, sub: ''});
         }
         return kpis;
       },
@@ -820,6 +1809,10 @@
         const high = nullable(p.high, scale);
         const hasAvg = p.avg_years.length >= 2;
         const dailyMax = Math.max(0, ...p.daily.filter((v) => v != null)) * scale;
+        // Rechte Achse für die Balken: nur das untere Drittel der Höhe, damit sie die Summenlinien nicht verdecken.
+        const dayStep = niceStep(dailyMax / 3);
+        const dayTop = Math.max(dayStep, Math.ceil(dailyMax / dayStep) * dayStep);
+        const bandName = t('Spanne {from}–{to}', {from: p.avg_years[0], to: p.avg_years[p.avg_years.length - 1]});
         const series = [];
         const legend = [String(p.year)];
         if (hasAvg) {
@@ -827,15 +1820,24 @@
             name: 'low', type: 'line', stack: 'band', data: low, symbol: 'none', silent: true,
             lineStyle: {opacity: 0}, tooltip: {show: false},
           }, {
-            name: 'band', type: 'line', stack: 'band', symbol: 'none', silent: true, lineStyle: {opacity: 0},
+            name: bandName, type: 'line', stack: 'band', symbol: 'none', silent: true, lineStyle: {opacity: 0},
+            itemStyle: {color: colors.prev, opacity: 0.35},
             data: high.map((h, i) => (h == null || low[i] == null ? null : h - low[i])),
             areaStyle: {color: colors.prev, opacity: 0.16},
           }, {
             name: 'Ø', type: 'line', data: avg, symbol: 'none',
             lineStyle: {color: colors.text, width: 2, type: 'dashed'}, itemStyle: {color: colors.text},
           });
-          legend.push('Ø');
         }
+        // Ältere Jahre in immer blasseren Tönen, alle in der Legende (neueste zuerst: Vorjahr, dann ältere).
+        const olderYears = Object.keys(p.older || {}).sort().reverse();
+        olderYears.slice().reverse().forEach((year) => {
+          series.push({
+            name: year, type: 'line', data: nullable(p.older[year], scale), symbol: 'none', silent: true,
+            lineStyle: {color: colors.prev, width: 1.2, opacity: pastOpacity(olderYears.indexOf(year) + 1)},
+            itemStyle: {color: colors.prev}, tooltip: {show: false},
+          });
+        });
         if (previous) {
           series.push({
             name: String(p.previous_year), type: 'line', data: previous, symbol: 'none',
@@ -843,6 +1845,10 @@
           });
           legend.push(String(p.previous_year));
         }
+        olderYears.forEach((year, index) => legend.push(legendEntry(year, colors.prev, pastOpacity(index + 1))));
+        // Reihenfolge der Legende wie im Monatsvergleich: laufendes Jahr, Vorjahr, ältere Jahre, Ø.
+        if (hasAvg) legend.push('Ø', {...legendEntry(bandName, colors.prev, 0.35), icon: 'rect'});
+        legend.push({...legendEntry(t('Tageswert'), colors.cur, 0.5), icon: 'rect'});
         series.push({
           name: String(p.year), type: 'line', data: cumulative, symbol: 'none', z: 5,
           lineStyle: {color: colors.cur, width: 3}, itemStyle: {color: colors.cur},
@@ -852,7 +1858,7 @@
         });
         const chart = chartFor('precip', element);
         chart.setOption({
-          animation: false, grid: gridFor(element, {right: 8}), legend: legendBox(colors, legend),
+          animation: false, grid: gridFor(element, {right: 34, ...(element.clientWidth < 520 ? {top: 100} : {})}), legend: legendBox(colors, legend),
           xAxis: {
             type: 'category', data: labels, boundaryGap: false, ...axisStyle(colors),
             axisLabel: {
@@ -864,11 +1870,15 @@
           },
           yAxis: [
             {type: 'value', min: 0, name: unit, nameTextStyle: {color: colors.text}, ...axisStyle(colors)},
-            {type: 'value', min: 0, max: Math.max(dailyMax * 4, 1), show: false, splitLine: {show: false}},
+            {
+              type: 'value', min: 0, max: dayTop * 3, interval: dayStep, splitLine: {show: false},
+              axisLine: {show: false}, axisTick: {show: false},
+              axisLabel: {color: colors.text, fontSize: scaledFont(11), formatter: (value) => (value <= dayTop ? num(value, dayStep < 1 ? 1 : 0) : '')},
+            },
           ],
           tooltip: tooltipBox(colors, (params) => {
             const i = params[0].dataIndex;
-            const cell = (value) => (value == null ? '–' : `${num(value, 1)} ${unit}`);
+            const cell = (value) => (value == null ? '–' : `${num(value, 1)} ${escapeHtml(unit)}`);
             let html = `<b>${escapeHtml(labels[i])}</b>`;
             html += `<br>${escapeHtml(t('Tageswert'))}: ${cell(p.daily[i] == null ? null : p.daily[i] * scale)}`;
             html += `<br>${p.year}: ${cell(cumulative[i])}`;
@@ -880,36 +1890,144 @@
         }, true);
         // Ein eben erst sichtbar gewordener Reiter hat beim Anlegen noch keine Breite gehabt.
         requestAnimationFrame(() => chart.resize());
+        this.drawPrecipTable(colors);
+      },
+
+      // Tabelle „Niederschlag je Monat“: laufendes Jahr und Vorjahre, Ø und Abweichung, dazu die Regentage.
+      // Jahresspalten wie beim Heizen: 4, mit breiter Darstellung ab 1440 px 5 (das laufende Jahr zählt mit).
+      drawPrecipTable(colors) {
+        const table = this.$refs.precipTable;
+        const p = this.precip;
+        if (!table || !p || !p.months) return;
+        const scale = this.precipScale();
+        const amount = (value) => (value == null ? '–' : escapeHtml(num(value * scale, 1)));
+        const base = cssVar('--surface-alt');
+        const first = p.avg_years.length >= 2 ? p.avg_years[0] : null;
+        const last = p.avg_years[p.avg_years.length - 1];
+        // Vorjahre, die es gibt (neueste zuerst); eine leere Spalte zeigen wir nie.
+        const past = [...new Set(p.months.flatMap((row) => Object.keys(row.past || {})))]
+          .sort().reverse().slice(0, heatChartCount() - 1);
+        const head = [
+          t('Monat'), String(p.year), ...past,
+          first == null ? t('Ø') : t('Ø {from}–{to}', {from: first, to: last}), t('Abweichung'), t('Regentage'),
+        ];
+        // Abweichung vom Ø in Prozent, gefärbt wie die Monatsmatrix (Niederschlag: nass blau, trocken ocker).
+        const deviation = (value, ref) => {
+          if (value == null || ref == null || ref === 0) return '<td></td>';
+          const diff = (value - ref) / ref;
+          const rounded = Math.round(Math.abs(diff) * 100);
+          const share = Math.round(Math.min(1, Math.abs(diff) / 0.6) * 80);
+          const sign = rounded === 0 ? '±' : (diff > 0 ? '+' : '−');
+          const style = ` style="background:color-mix(in srgb, ${diff < 0 ? colors.prev : colors.cold} ${share}%, ${base})"`;
+          return `<td class="wt-pm-dev"><span${style}>${sign}${rounded} %</span></td>`;
+        };
+        let html = `<thead><tr>${head.map((label, i) => `<th${i ? ' class="wt-pm-n"' : ''}>${escapeHtml(label)}</th>`).join('')}</tr></thead><tbody>`;
+        let sumCur = 0;
+        let sumAvg = 0;
+        let sumWet = 0;
+        let sumComplete = true;
+        const sumPast = Object.fromEntries(past.map((year) => [year, 0]));
+        const pastComplete = Object.fromEntries(past.map((year) => [year, true]));
+        for (const row of p.months) {
+          const known = row.current != null;
+          const tag = row.running
+            ? ` <span class="wt-pm-tag">${escapeHtml(t('läuft, bis {date}', {date: this.precipDateText()}))}</span>` : '';
+          html += `<tr class="${row.running ? 'wt-pm-run' : (known ? '' : 'wt-pm-off')}"><td>${escapeHtml(monthName(row.month, 'long'))}${tag}</td>`
+            + `<td class="wt-pm-n">${amount(row.current)}</td>`
+            + past.map((year) => `<td class="wt-pm-n">${amount((row.past || {})[year])}</td>`).join('')
+            + `<td class="wt-pm-n">${amount(row.avg)}</td>`
+            + `${deviation(row.current, row.avg)}<td class="wt-pm-n">${row.wet_days == null ? '' : row.wet_days}</td></tr>`;
+          if (!known) continue;
+          sumCur += row.current;
+          sumWet += row.wet_days;
+          if (row.avg == null) sumComplete = false; else sumAvg += row.avg;
+          for (const year of past) {
+            const value = (row.past || {})[year];
+            if (value == null) pastComplete[year] = false; else sumPast[year] += value;
+          }
+        }
+        // Summe bis heute; ein Jahr oder der Ø nur, wenn für jeden Monat davor ein Wert vorliegt (sonst wäre die Summe zu niedrig).
+        html += `<tr class="wt-pm-sum"><td>${escapeHtml(t('Summe bis {date}', {date: this.precipDateText()}))}</td>`
+          + `<td class="wt-pm-n">${amount(sumCur)}</td>`
+          + past.map((year) => `<td class="wt-pm-n">${pastComplete[year] ? amount(sumPast[year]) : '–'}</td>`).join('')
+          + `<td class="wt-pm-n">${amount(sumComplete ? sumAvg : p.avg_to_date)}</td>${deviation(sumCur, sumComplete ? sumAvg : p.avg_to_date)}`
+          + `<td class="wt-pm-n">${sumWet}</td></tr></tbody>`;
+        table.innerHTML = html;
+      },
+
+      // Erläuterung unter der Tabelle: Vergleichszeitraum und Schwelle der Regentage.
+      precipTableNote() {
+        const p = this.precip;
+        if (!p) return '';
+        const threshold = p.mode === 'dur' ? `${num(p.threshold, 0)} min` : `${num(p.threshold, 1)} mm`;
+        return t('Farbe: Abweichung vom Ø. Stand {date}: Laufender Monat und Summe zählen bis dahin, Vorjahr und Ø gelten für denselben Zeitraum. Regentage: ab {threshold}.', {date: this.precipDateText(), threshold});
       },
 
       // Langzeit
       async loadLongterm() {
         this.longError = '';
         try {
-          this.longterm = await this.fetchJson('wetterdashboard/langzeit');
+          this.longterm = await this.fetchJson(`wetterdashboard/langzeit?years=${this.longYearsParam()}`);
           this.$nextTick(() => this.drawKenntage());
         } catch (e) {
           this.longError = t('Die Langzeitwerte konnten nicht geladen werden.');
         }
       },
 
-      // Jahre der Karte „Kenntage je Jahr“: alle oder die letzten fünf.
+      // Jahre der Karte „Kenntage je Jahr“: alle oder die letzten fünf bzw. zehn.
       kenntageYears() {
         const years = this.longterm ? Object.keys(this.longterm.kenntage).sort() : [];
-        return this.kenntageRange === '5' ? years.slice(-5) : years;
+        return this.longRange === 'all' ? years : years.slice(-Number(this.longRange));
       },
 
-      setKenntageRange(range) {
-        this.kenntageRange = range;
+      // Jahre-Auswahl des Reiters Langzeit wie im Energiedashboard: „Letzte 5“, „Letzte 10“, „Alle (n)“; immer, sobald Jahre geladen sind;
+      // „Letzte 10“ erst ab mehr als zehn. Ein gemerkter Wert, der nichts mehr kürzt, zeigt „Alle“. Sie gilt für die ganze Seite.
+      longCount() {
+        return this.longterm ? Object.keys(this.longterm.kenntage).length : 0;
+      },
+
+      longOptions() {
+        const count = this.longCount();
+        return [
+          {value: '5', label: t('Letzte 5')},
+          ...(count > 10 ? [{value: '10', label: t('Letzte 10')}] : []),
+          {value: 'all', label: t('Alle ({n})', {n: count})},
+        ];
+      },
+
+      showLongChoice() {
+        return this.longCount() > 0;
+      },
+
+      longShownRange() {
+        return this.longRange !== 'all' && Number(this.longRange) < this.longCount() ? this.longRange : 'all';
+      },
+
+      // Anzahl der Jahre für den Server (Rekorde); 0 heißt alle.
+      longYearsParam() {
+        return this.longRange === 'all' ? 0 : Number(this.longRange);
+      },
+
+      setLongRange(range) {
+        this.longRange = range;
         writeStore({kenntageRange: range});
         this.drawKenntage();
+        this.drawMatrix();
+        this.loadLongterm();  // die Rekorde zählen nur die gewählten Jahre: neu vom Server
+      },
+
+      // Die Matrix nur mit den gewählten (neuesten) Jahren; die Zeilen stehen neuestes Jahr zuerst.
+      limitedMatrix(m) {
+        const rows = this.longRange === 'all' ? m.years.length : Number(this.longRange);
+        if (rows >= m.years.length) return m;
+        return {...m, years: m.years.slice(0, rows), cells: m.cells.filter((cell) => cell[1] < rows), missing: m.missing.filter((cell) => cell[1] < rows)};
       },
 
       kenntageNote() {
         const all = this.longterm ? this.longterm.kenntage : {};
         const days = Object.values(all).reduce((sum, year) => sum + year.days.reduce((a, b) => a + b, 0), 0);
         if (!days) return t('Noch keine Tage mit ausreichend Werten (mindestens 18 Stunden je Tag).');
-        return t('Frosttag: Tiefstwert unter 0 °C, Eistag: Höchstwert unter 0 °C, Sommertag: Höchstwert ab 25 °C, heißer Tag: ab 30 °C. Gezählt sind {days} abgeschlossene Tage mit mindestens 18 Stunden Werten; der laufende Tag zählt nicht.', {days});
+        return t('Frosttag: Tiefstwert unter 0 °C, Eistag: Höchstwert unter 0 °C, Sommertag: Höchstwert ab 25 °C, heißer Tag: ab 30 °C. Gezählt sind {days} abgeschlossene Tage mit mindestens 18 Stunden Werten; der laufende Tag zählt nicht. Sonnentage und trübe Tage richten sich nach dem Sonnenanteil des Tages wie im Tagesbild.', {days});
       },
 
       // Fußnote zum laufenden Jahr (mit „*“ an der Jahreszahl markiert).
@@ -928,17 +2046,27 @@
           {key: 'eis', name: t('Eistage'), color: cssVar('--chart-4')},
           {key: 'sommer', name: t('Sommertage'), color: cssVar('--chart-7')},
           {key: 'heiss', name: t('Heiße Tage'), color: cssVar('--chart-5')},
+          {key: 'sunny', name: t('Sonnentage'), color: cssVar('--chart-7'), sun: true},
+          {key: 'overcast', name: t('Trübe Tage'), color: cssVar('--ink-faint'), sun: true},
         ];
+      },
+
+      // Zähltabelle einer Art: Temperatur-Kenntage oder die der Sonne (dort fehlen Jahre vor dem Archivbeginn der Helligkeit).
+      kenntageSource(key) {
+        const sun = key === 'sunny' || key === 'overcast';
+        const source = this.longterm ? (sun ? this.longterm.sun_kenntage : this.longterm.kenntage) : null;
+        return source || {};
       },
 
       // Ø je Jahr über die abgeschlossenen Jahre der Auswahl (das laufende Jahr zählt nicht).
       kenntageAverage(key) {
         if (!this.longterm) return null;
         const current = String(this.longterm.current_year);
-        const past = this.kenntageYears().filter((year) => year !== current);
+        const source = this.kenntageSource(key);
+        const past = this.kenntageYears().filter((year) => year !== current && source[year]);
         if (!past.length) return null;
         const sum = (list) => list.reduce((a, b) => a + b, 0);
-        return sum(past.map((year) => sum(this.longterm.kenntage[year][key]))) / past.length;
+        return sum(past.map((year) => sum(source[year][key]))) / past.length;
       },
 
       kenntageAvg(key) {
@@ -949,10 +2077,11 @@
       drawKenntage() {
         const years = this.kenntageYears();
         const colors = palette();
-        const data = this.longterm ? this.longterm.kenntage : {};
         const current = this.longterm ? String(this.longterm.current_year) : '';
         const sum = (list) => list.reduce((a, b) => a + b, 0);
         for (const kind of this.kenntageKinds()) {
+          const data = this.kenntageSource(kind.key);
+          const empty = {[kind.key]: Array(12).fill(0), days: Array(12).fill(0)};
           const element = this.$refs[`kenntageChart${kind.key.charAt(0).toUpperCase()}${kind.key.slice(1)}`];
           if (!element) continue;
           if (!years.length) {
@@ -974,17 +2103,18 @@
             // Je Balken: Summe des Jahres, darunter die Verteilung auf die Monate.
             tooltip: {...tooltipBox(colors, (param) => {
               const year = years[param.dataIndex];
-              const months = data[year][kind.key].map((count, i) => (count ? `${monthName(i + 1, 'short')} ${count}` : '')).filter(Boolean);
+              const counts = data[year] || empty;
+              const months = counts[kind.key].map((count, i) => (count ? `${monthName(i + 1, 'short')} ${count}` : '')).filter(Boolean);
               const lines = [];
               for (let i = 0; i < months.length; i += 4) lines.push(escapeHtml(months.slice(i, i + 4).join(' · ')));
-              return `<b>${escapeHtml(kind.name)} ${escapeHtml(year)}</b><br>${escapeHtml(t('{n} Tage', {n: sum(data[year][kind.key])}))}`
+              return `<b>${escapeHtml(kind.name)} ${escapeHtml(year)}</b><br>${escapeHtml(t('{n} Tage', {n: sum(counts[kind.key])}))}`
                 + (lines.length ? `<br>${lines.join('<br>')}` : '')
-                + `<br>${escapeHtml(t('{days} Tage ausgewertet', {days: sum(data[year].days)}))}`;
+                + `<br>${escapeHtml(t('{days} Tage ausgewertet', {days: sum(counts.days)}))}`;
             }), trigger: 'item'},
             series: [{
               name: kind.name, type: 'bar', barMaxWidth: 28,
               itemStyle: {color: kind.color, borderRadius: [3, 3, 0, 0]},
-              data: years.map((year) => ({value: sum(data[year][kind.key]), itemStyle: year === current ? {opacity: 0.55} : {}})),
+              data: years.map((year) => ({value: sum((data[year] || empty)[kind.key]), itemStyle: year === current ? {opacity: 0.55} : {}})),
               markLine: average == null ? undefined : {
                 silent: true, symbol: 'none', label: {show: false},
                 lineStyle: {color: colors.text, type: 'dashed', width: 1}, data: [{yAxis: Math.round(average * 10) / 10}],
@@ -996,18 +2126,50 @@
         }
       },
 
-      // Mitteltemperatur je Monat und Jahr (Tabelle, Farbe = Abweichung vom Mittel dieses Monats über die abgeschlossenen Jahre)
+      // Monatswerte je Jahr (Tabelle, Farbe = Abweichung vom Mittel dieses Monats über die abgeschlossenen Jahre).
+      // Temperatur ist ein Mittel (Abweichung in K), Niederschlag und Sonne sind Summen (Abweichung in Prozent).
       async loadTempYears() {
+        const metric = this.tempYearsMetric;
+        this.tempYearsError = '';
         try {
-          this.tempYears = await this.fetchJson('wetterdashboard/monatsvergleich?metric=temperature');
+          const data = await this.fetchJson(
+            `wetterdashboard/monatsvergleich?metric=${metric}&mode=${this.precipModes[0] || 'mm'}`,
+          );
+          if (metric !== this.tempYearsMetric) return;
+          this.tempYears = data;
           this.$nextTick(() => this.drawTempYears());
         } catch (e) {
-          this.tempYears = null;
+          if (metric !== this.tempYearsMetric) return;
+          // Fehlt die Temperatur, entfällt die Kachel wie bisher; bei den anderen Kennzahlen bleibt die Auswahl bedienbar.
+          if (metric === 'temperature') this.tempYears = null;
+          else this.tempYearsError = t('Die Monatswerte konnten nicht geladen werden.');
         }
       },
 
+      setTempYearsMetric(metric) {
+        if (metric === this.tempYearsMetric) return;
+        this.tempYearsMetric = metric;
+        this.loadTempYears();
+      },
+
       tempYearsNote() {
-        return t('Oben die Mitteltemperatur, darunter die Abweichung vom Mittel dieses Monats über alle abgeschlossenen Jahre im Archiv (in Kelvin). Die letzte Zeile ist das Mittel.');
+        const m = this.tempYears;
+        if (!m || m.metric === 'temperature') {
+          return t('Oben die Mitteltemperatur, darunter die Abweichung vom Mittel dieses Monats über alle abgeschlossenen Jahre im Archiv (in Kelvin). Die letzte Zeile ist das Mittel.');
+        }
+        if (m.metric === 'sun') {
+          return t('Oben die Sonnenstunden des Monats (Stunden über der Sonnen-Schwelle), darunter die Abweichung vom Mittel dieses Monats über alle abgeschlossenen Jahre im Archiv (in Prozent). Leer sind Monate mit zu wenig Werten; der laufende Monat (*) zeigt nur den bisherigen Stand, ohne Vergleich. Die letzte Spalte ist die Summe kompletter Jahre, die letzte Zeile das Mittel.');
+        }
+        return m.unit === 'min'
+          ? t('Oben die Regenstunden des Monats, darunter die Abweichung vom Mittel dieses Monats über alle abgeschlossenen Jahre im Archiv (in Prozent). Der laufende Monat (*) zeigt nur den bisherigen Stand, ohne Vergleich. Die letzte Spalte ist die Summe kompletter Jahre, die letzte Zeile das Mittel.')
+          : t('Oben die Niederschlagssumme des Monats, darunter die Abweichung vom Mittel dieses Monats über alle abgeschlossenen Jahre im Archiv (in Prozent). Leer sind Monate mit zu wenig Werten; der laufende Monat (*) zeigt nur den bisherigen Stand, ohne Vergleich. Die letzte Spalte ist die Summe kompletter Jahre, die letzte Zeile das Mittel.');
+      },
+
+      tempYearsLegend() {
+        const metric = this.tempYearsMetric;
+        if (metric === 'precip') return {low: t('trockener'), high: t('nasser als im Mittel der Jahre im Archiv')};
+        if (metric === 'sun') return {low: t('weniger Sonne'), high: t('mehr Sonne als im Mittel der Jahre im Archiv')};
+        return {low: t('kälter'), high: t('wärmer als im Mittel der Jahre im Archiv')};
       },
 
       drawTempYears() {
@@ -1016,64 +2178,98 @@
         if (!data || !table) return;
         const colors = palette();
         const current = String(data.current_year);
-        const years = Object.keys(data.years).sort().slice(-10);
+        const isSum = data.metric !== 'temperature';
+        // Regensensor ein/aus liefert Minuten; als Monatswert sind Stunden lesbarer.
+        const factor = isSum && data.unit === 'min' ? 1 / 60 : 1;
+        const unit = factor !== 1 ? 'h' : (data.unit || '°C');
+        const decimals = !isSum || factor !== 1 ? 1 : 0;
+        const scaled = (value) => (value == null ? null : value * factor);
+        const rows = {};
+        for (const [year, values] of Object.entries(data.years)) rows[year] = values.map(scaled);
+        const avg = data.avg.map(scaled);
+        const years = Object.keys(rows).sort().slice(-10);
         const mean = (values) => values.reduce((a, b) => a + b, 0) / values.length;
         const present = (list) => list.filter((value) => value != null);
-        // Jahres-Ø nur aus vorhandenen Monaten und erst ab sechs davon; als Vergleich zählen nur komplette, abgeschlossene Jahre.
-        const yearMean = (year) => { const values = present(data.years[year]); return values.length >= 6 ? mean(values) : null; };
+        // Temperatur: Jahres-Ø nur aus vorhandenen Monaten und erst ab sechs davon. Summen: nur kompletter, abgeschlossener
+        // Jahre (sonst wäre die Summe zu niedrig). Als Vergleich zählen jeweils nur komplette, abgeschlossene Jahre.
+        const yearValue = (year) => {
+          const values = present(rows[year]);
+          if (isSum) return year < current && values.length === 12 ? values.reduce((a, b) => a + b, 0) : null;
+          return values.length >= 6 ? mean(values) : null;
+        };
         const reference = (() => {
-          const full = Object.keys(data.years).filter((y) => y < current && present(data.years[y]).length === 12);
-          return full.length >= 2 ? mean(full.map(yearMean)) : null;
+          const full = Object.keys(rows).filter((y) => y < current && present(rows[y]).length === 12);
+          return full.length >= 2 ? mean(full.map(yearValue)) : null;
         })();
-        const unit = data.unit || '°C';
-        const sign = (value) => (Math.round(Math.abs(value) * 10) === 0 ? '±' : (value > 0 ? '+' : '−')) + num(Math.abs(value), 1);
+        const factorLimit = data.metric === 'sun' ? 0.4 : 0.6;
+        const round = Math.pow(10, decimals);
+        const zero = (value) => Math.round(Math.abs(value) * round) === 0;
+        const sign = (value) => (zero(value) ? '±' : (value > 0 ? '+' : '−')) + num(Math.abs(value), decimals);
+        // Abweichung: Kelvin bei der Temperatur, sonst Prozent des Mittels.
+        const signRel = (value) => (Math.round(Math.abs(value) * 100) === 0 ? '±' : (value > 0 ? '+' : '−')) + num(Math.abs(value) * 100, 0) + ' %';
         // Mittelwerte ohne „-0,0“: ein Wert, der auf null rundet, heißt 0,0.
-        const plain = (value) => num(Math.round(Math.abs(value) * 10) === 0 ? 0 : value, 1);
-        const cold = colors.cold, hot = colors.prev, base = cssVar('--surface-alt');
+        const plain = (value) => num(zero(value) ? 0 : value, decimals);
+        const low = data.metric === 'sun' ? colors.overcast : (data.metric === 'precip' ? colors.prev : colors.cold);
+        const high = data.metric === 'sun' ? colors.sun : (data.metric === 'precip' ? colors.cold : colors.prev);
+        const base = cssVar('--surface-alt');
+        const deltaOf = (value, ref) => (isSum ? (value - ref) / ref : value - ref);
         const cell = (value, ref, title, strong) => {
           if (value == null) return `<td class="wt-tm-na">–</td>`;
           const tip = title ? ` data-tooltip-fixed="${escapeHtml(title)}"` : '';
-          // Ohne Vergleichswert (weniger als zwei abgeschlossene Jahre für diesen Monat) bleibt die Zelle ungefärbt und einzeilig.
-          if (ref == null) return `<td class="wt-tm-plain${strong ? ' wt-tm-year' : ''}"${tip}>${escapeHtml(plain(value))}</td>`;
-          const diff = value - ref;
-          const share = Math.round(Math.min(1, Math.abs(diff) / 3.2) * 80);
-          const style = ` style="background:color-mix(in srgb, ${diff < 0 ? cold : hot} ${share}%, ${base})"`;
-          return `<td${style}${tip}${strong ? ' class="wt-tm-year"' : ''}><span class="wt-tm-v">${escapeHtml(plain(value))}</span><span class="wt-tm-d">${escapeHtml(sign(diff))}</span></td>`;
+          // Ohne Vergleichswert (weniger als zwei abgeschlossene Jahre für diesen Monat, Mittel null) bleibt die Zelle ungefärbt und einzeilig.
+          if (ref == null || (isSum && ref === 0)) return `<td class="wt-tm-plain${strong ? ' wt-tm-year' : ''}"${tip}>${escapeHtml(plain(value))}</td>`;
+          const diff = deltaOf(value, ref);
+          const share = Math.round(Math.min(1, Math.abs(diff) / (isSum ? factorLimit : 3.2)) * 80);
+          const style = ` style="background:color-mix(in srgb, ${diff < 0 ? low : high} ${share}%, ${base})"`;
+          return `<td${style}${tip}${strong ? ' class="wt-tm-year"' : ''}><span class="wt-tm-v">${escapeHtml(plain(value))}</span><span class="wt-tm-d">${escapeHtml(isSum ? signRel(diff) : sign(diff))}</span></td>`;
         };
         let html = `<thead><tr><th></th>${Array.from({length: 12}, (_x, i) => `<th>${escapeHtml(monthName(i + 1, 'short'))}</th>`).join('')}`
-          + `<th class="wt-tm-year">${escapeHtml(t('Jahr Ø'))}</th></tr></thead><tbody>`;
+          + `<th class="wt-tm-year">${escapeHtml(isSum ? t('Jahr Σ') : t('Jahr Ø'))}</th></tr></thead><tbody>`;
         for (const year of years.slice().reverse()) {
           const running = year === current;
           html += `<tr><th>${escapeHtml(year)}${running ? '*' : ''}</th>`;
-          data.years[year].forEach((value, i) => {
-            const ref = data.counts[i] >= 2 ? data.avg[i] : null;
-            const title = value == null ? '' : (ref == null
-              ? t('{month} {year}: {value} {unit}', {month: monthName(i + 1, 'short'), year, value: num(value, 1), unit})
-              : t('{month} {year}: {value} {unit} ({delta} K zum Mittel)', {month: monthName(i + 1, 'short'), year, value: num(value, 1), unit, delta: sign(value - ref)}));
+          rows[year].forEach((value, i) => {
+            const month = monthName(i + 1, 'short');
+            // Der laufende Monat einer Summe ist ein Teilwert und wird nicht gegen volle Monate verglichen.
+            const partial = isSum && running && i + 1 === data.current_month;
+            const ref = !partial && data.counts[i] >= 2 ? avg[i] : null;
+            const title = value == null ? '' : (partial
+              ? t('{month} {year}: {value} {unit} bisher', {month, year, value: num(value, decimals), unit})
+              : (ref == null || (isSum && ref === 0)
+                ? t('{month} {year}: {value} {unit}', {month, year, value: num(value, decimals), unit})
+                : (isSum
+                  ? t('{month} {year}: {value} {unit} ({delta} zum Mittel)', {month, year, value: num(value, decimals), unit, delta: signRel(deltaOf(value, ref))})
+                  : t('{month} {year}: {value} {unit} ({delta} K zum Mittel)', {month, year, value: num(value, decimals), unit, delta: sign(value - ref)}))));
             html += cell(value, ref, title, false);
           });
-          const ya = yearMean(year);
-          const complete = !running && present(data.years[year]).length === 12;
-          html += cell(ya, complete ? reference : null, ya == null ? '' : t('Jahresmittel {year}: {value} {unit}', {year, value: num(ya, 1), unit}), true);
+          const yv = yearValue(year);
+          const complete = !running && present(rows[year]).length === 12;
+          const yearTitle = yv == null ? '' : (isSum
+            ? t('Jahressumme {year}: {value} {unit}', {year, value: num(yv, decimals), unit})
+            : t('Jahresmittel {year}: {value} {unit}', {year, value: num(yv, decimals), unit}));
+          html += cell(yv, complete ? reference : null, yearTitle, true);
           html += '</tr>';
         }
-        html += `<tr class="wt-tm-avg"><th>Ø</th>${data.avg.map((value, i) => `<td>${value == null || data.counts[i] < 2 ? '–' : escapeHtml(plain(value))}</td>`).join('')}`
+        html += `<tr class="wt-tm-avg"><th>Ø</th>${avg.map((value, i) => `<td>${value == null || data.counts[i] < 2 ? '–' : escapeHtml(plain(value))}</td>`).join('')}`
           + `<td class="wt-tm-year">${reference == null ? '–' : escapeHtml(plain(reference))}</td></tr></tbody>`;
         table.innerHTML = html;
         const scale = this.$refs.tempYearsScale;
-        if (scale) scale.style.background = `linear-gradient(90deg, ${cold}, ${base}, ${hot})`;
+        if (scale) scale.style.background = `linear-gradient(90deg, ${low}, ${base}, ${high})`;
       },
 
       // Jahr×Tag-Matrix
       async loadMatrix() {
         this.matrixError = '';
+        const seq = ++this._matrixSeq;
         try {
-          this.matrix = await this.fetchJson(
+          const data = await this.fetchJson(
             `wetterdashboard/matrix?metric=${this.matrixMetric}&mode=${this.precipModes[0] || 'mm'}`,
           );
+          if (seq !== this._matrixSeq) return;  // eine neuere Anfrage hat überholt
+          this.matrix = data;
           this.$nextTick(() => this.drawMatrix());
         } catch (e) {
-          this.matrixError = t('Die Jahresübersicht konnte nicht geladen werden.');
+          if (seq === this._matrixSeq) this.matrixError = t('Die Jahresübersicht konnte nicht geladen werden.');
         }
       },
 
@@ -1085,7 +2281,7 @@
 
       // Eine Zeile je Jahr: 20 Pixel plus Platz für Achse und Farbskala.
       matrixHeight() {
-        const years = this.matrix ? this.matrix.years.length : 3;
+        const years = this.matrix ? this.limitedMatrix(this.matrix).years.length : 3;
         return `height: ${Math.max(160, years * 20 + 90)}px`;
       },
 
@@ -1093,11 +2289,12 @@
         const m = this.matrix;
         if (!m) return '';
         if (!m.years.length) return t('Noch keine Tageswerte.');
+        if (m.metric === 'sun') return t('Neuestes Jahr oben, eine Spalte je Kalendertag, gefärbt nach der Tagesklasse (sonnig, wechselhaft, trüb) wie im Tagesbild. Graue Felder sind Tage ohne Klasse (zu wenig helle Stunden oder keine Werte), leer ist es vor dem Archivbeginn und ab heute. Ein Klick öffnet den Tag in der Entität.');
         return t('Neuestes Jahr oben, eine Spalte je Kalendertag. Graue Felder sind Tage ohne ausreichende Werte (mindestens 18 Stunden), leer ist es vor dem Archivbeginn und ab heute. Ein Klick öffnet den Tag in der Entität.');
       },
 
       drawMatrix() {
-        const m = this.matrix;
+        const m = this.matrix ? this.limitedMatrix(this.matrix) : null;
         const element = this.$refs.matrixChart;
         if (!m || !element) return;
         if (!m.years.length || m.min == null) {
@@ -1105,56 +2302,8 @@
           return;
         }
         const colors = palette();
-        const isPrecip = m.metric === 'precip';
-        const decimals = isPrecip && m.unit === 'min' ? 0 : 1;
-        const unit = m.unit;
-        const inRange = isPrecip
-          ? [colors.surface, colors.cold]
-          : [colors.cold, colors.surface, colors.prev];
-        const hidden = {itemStyle: {borderWidth: 0}};
         const chart = chartFor('matrix', element);
-        chart.setOption({
-          animation: false,
-          grid: {left: 8, right: 16, top: 6, bottom: 52, containLabel: true},
-          xAxis: {
-            type: 'category', data: Array.from({length: 366}, (_x, i) => i), splitArea: {show: false},
-            axisLine: {lineStyle: {color: colors.grid}}, axisTick: {show: false},
-            axisLabel: {
-              color: colors.text, fontSize: scaledFont(11),
-              interval: (index) => MONTH_STARTS_LEAP.includes(index),
-              formatter: (_value, index) => monthName(leapSlotDate(index).month, element.clientWidth < 520 ? 'narrow' : 'short'),
-            },
-          },
-          yAxis: {
-            type: 'category', data: m.years.map(String), inverse: true,
-            axisLine: {show: false}, axisTick: {show: false}, axisLabel: {color: colors.text, fontSize: scaledFont(11)},
-          },
-          visualMap: {
-            type: 'continuous', min: m.min, max: m.max, seriesIndex: 1, calculable: false, orient: 'horizontal',
-            left: 'center', bottom: 4, itemWidth: 12, itemHeight: 140, inRange: {color: inRange},
-            textStyle: {color: colors.text, fontSize: scaledFont(11)},
-            text: [`${num(m.max, decimals)} ${unit}`, `${num(m.min, decimals)} ${unit}`],
-          },
-          tooltip: {
-            confine: true, backgroundColor: colors.surface, borderColor: colors.grid,
-            textStyle: {color: colors.ink, fontSize: scaledFont(12)},
-            formatter: (param) => {
-              const [slot, row, value] = param.data;
-              const when = this.matrixDate(m.years[row], slot);
-              const label = new Intl.DateTimeFormat(LOCALE, {day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC'}).format(when);
-              return param.seriesIndex === 0
-                ? `<b>${escapeHtml(label)}</b><br>${escapeHtml(t('Zu wenige Werte'))}`
-                : `<b>${escapeHtml(label)}</b><br>${escapeHtml(num(value, decimals))} ${escapeHtml(unit === '°C' ? '°C' : unit)}`;
-            },
-          },
-          series: [
-            {
-              type: 'heatmap', data: m.missing.map(([slot, row]) => [slot, row, 0]), silent: false, ...hidden,
-              itemStyle: {color: colors.grid, borderWidth: 0},
-            },
-            {type: 'heatmap', data: m.cells, ...hidden},
-          ],
-        }, true);
+        chart.setOption(weatherMatrix(m, {colors, narrow: element.clientWidth < 520, font: scaledFont}), true);
         chart.off('click');
         chart.on('click', (param) => {
           if (param.seriesIndex !== 1) return;
@@ -1187,9 +2336,10 @@
           this.heatOn = data.counters.map((_c, i) => (Array.isArray(saved.on) && saved.on.length === data.counters.length ? !!saved.on[i] : true));
           this.heatRoom = String(saved.room || data.room).replace('.', ',');
           this.heatLimit = String(saved.limit || data.limit).replace('.', ',');
+          this.heatBySun = !!saved.bySun;
           this.heat = data;
           const periods = this.heatPeriods();
-          this.heatSeason = String(periods.length > 1 && WetterHeating.currentPeriod(data.today) === periods[0] ? periods[1] : (periods[0] || ''));
+          this.heatSeason = String(periods[0] || '');
           this.$nextTick(() => this.drawHeat());
         } catch (e) {
           this.heatError = t('Die Heizwerte konnten nicht geladen werden.');
@@ -1225,7 +2375,7 @@
         this.drawHeat();
       },
 
-      // Wärmste und kälteste Periode für Kopfsatz und Tabelle: running = die laufende Heizperiode.
+      // Wärmste und kälteste Periode für die Tabelle: running = die laufende Heizperiode.
       heatPeriodInfo() {
         const periods = this.heatPeriods();
         const current = WetterHeating.currentPeriod(this.heat.today);
@@ -1235,66 +2385,179 @@
         return {periods, current, running, complete};
       },
 
-      heatHeadline() {
-        if (!this.heat) return '';
+      // Kacheln über dem Streudiagramm: Verbrauch, kWh je Gradtag, Gradtagzahl und Heiztage der gewählten Heizperiode.
+      // Eine laufende Periode zählt bis gestern und wird mit demselben Ausschnitt der Vorperiode verglichen, sonst wäre
+      // jede laufende Periode gegen eine ganze automatisch „viel weniger“.
+      heatKpis() {
+        if (!this.heat || !this.heatSeason) return [];
+        const o = this.heatOpts();
+        const period = Number(this.heatSeason);
+        const {now, before} = WetterHeating.summary(this.heat.days, o, period, this.heat.today);
+        if (!now.n) return [];
+        const other = WetterHeating.label(period - 1);
+        const change = (a, b) => {
+          if (a == null || b == null || !(b > 0)) return '';
+          const percent = (a / b - 1) * 100;
+          const sign = Math.round(Math.abs(percent)) === 0 ? '±' : (percent > 0 ? '+' : '−');
+          return t('{delta} % zu {other}', {delta: sign + num(Math.abs(percent), 0), other});
+        };
+        const active = this.heat.counters.map((c, i) => ({c, i})).filter(({i}) => this.heatOn[i]);
+        const parts = active.length > 1 ? active.map(({c, i}) => `${c.name} ${num(now.perCounter[i] || 0, 0)}`).join(' · ') : '';
+        return [
+          {
+            icon: 'flame', accent: 'var(--chart-2)', label: active.length > 1 ? t('Verbrauch gesamt') : t('Verbrauch'),
+            value: escapeHtml(num(now.kwh, 0)) + '<small>kWh</small>', sub: parts || change(now.kwh, before && before.kwh),
+          },
+          {
+            icon: 'gauge', accent: 'var(--chart-3)', label: t('kWh je Gradtag'),
+            value: escapeHtml(now.q == null ? '–' : num(now.q, 2)), sub: change(now.q, before && before.q),
+          },
+          {
+            icon: 'temp', accent: 'var(--chart-1)', label: t('Gradtagzahl'),
+            value: escapeHtml(num(now.gt, 0)) + '<small>Kd</small>', sub: change(now.gt, before && before.gt),
+          },
+          {
+            icon: 'calendar', accent: 'var(--chart-8)', label: t('Heiztage'),
+            value: escapeHtml(String(now.heatDays)), sub: t('unter {limit} °C Heizgrenze', {limit: num(o.limit, 0)}),
+          },
+        ];
+      },
+
+      // Eine Zeile je Heizperiode unter dem Streudiagramm: Anstieg in kWh je Kelvin, Tage, R² im Tooltip.
+      // Liest heatWide, damit Alpine die Kacheln neu zeichnet, wenn das Fenster die 1440-px-Grenze überschreitet.
+      heatChartSeasons() {
+        return this.heatWide === undefined ? 4 : heatChartCount();
+      },
+
+      heatSlopes() {
+        if (!this.heat) return [];
         const o = this.heatOpts();
         const info = this.heatPeriodInfo();
-        const q = (period) => {
-          const [from, to] = WetterHeating.periodRange(period);
-          return WetterHeating.stat(this.heat.days, o, from, to).q;
-        };
-        let text = '';
-        if (info.complete.length) {
-          const latest = info.complete[0];
-          const a = q(latest);
-          const b = info.complete[1] != null ? q(info.complete[1]) : null;
-          if (a != null && b != null) {
-            const change = (a / b - 1) * 100;
-            const values = {period: WetterHeating.label(latest), value: num(a, 2), percent: num(Math.abs(change), 0), other: WetterHeating.label(info.complete[1]), before: num(b, 2)};
-            text = Math.round(Math.abs(change)) === 0
-              ? t('Heizperiode {period}: {value} kWh je Gradtag, genauso viel wie {other} ({before})', values)
-              : change < 0
-                ? t('Heizperiode {period}: {value} kWh je Gradtag, {percent} % weniger als {other} ({before})', values)
-                : t('Heizperiode {period}: {value} kWh je Gradtag, {percent} % mehr als {other} ({before})', values);
-          } else if (a != null) {
-            text = t('Heizperiode {period}: {value} kWh je Gradtag', {period: WetterHeating.label(latest), value: num(a, 2)});
-          }
-        }
-        if (info.running) {
-          const cut = WetterHeating.cutRange(info.current, this.heat.today);
-          const now = WetterHeating.stat(this.heat.days, o, cut.from, cut.to);
-          const earlier = info.complete[0] != null ? WetterHeating.cutRange(info.complete[0], this.heat.today) : null;
-          const before = earlier ? WetterHeating.stat(this.heat.days, o, earlier.from, earlier.to) : null;
-          if (now.q != null && before && before.q != null) {
-            const change = (now.q / before.q - 1) * 100;
-            const part = t('{period} bisher {value} kWh je Gradtag ({percent} % {direction} als im gleichen Ausschnitt von {other})', {
-              period: WetterHeating.label(info.current), value: num(now.q, 2), percent: num(Math.abs(change), 0),
-              direction: change < 0 ? t('weniger') : t('mehr'), other: WetterHeating.label(info.complete[0]),
-            });
-            text = text ? `${text}. ${part}` : part;
-          }
-        }
-        return text || t('Noch nicht genug Heiztage für einen Vergleich.');
+        const rows = [];
+        this.heatPeriods().slice(0, this.heatChartSeasons()).forEach((period, index) => {
+          const line = WetterHeating.fit(this.heat.days, o, period, this.heatFitFrom(o));
+          if (!line) return;
+          const running = info.running && period === info.current;
+          rows.push({
+            period, label: WetterHeating.label(period), color: this.heatColor(index), value: `${num(-line.slope, 2)} kWh/K`,
+            sub: running ? `${t('{n} Tage', {n: line.n})} · ${t('bisher')}` : t('{n} Tage', {n: line.n}),
+            title: `R² ${num(line.r2, 2)}`,
+          });
+        });
+        return rows;
+      },
+
+      // Die Kennzahl kWh je Kelvin gilt nur im Bereich, in dem der Verbrauch ungefähr linear fällt (ab 0 °C bis zur
+      // Heizgrenze). Liegt die Heizgrenze selbst bei 5 °C oder darunter, bleibt es bei allen Tagen darunter.
+      heatFitFrom(o) {
+        return o.limit > 5 ? 0 : -Infinity;
       },
 
       heatReadout() {
-        if (!this.heat) return '';
+        if (!this.heatSlopes().length) return '';
         const o = this.heatOpts();
-        const parts = [];
-        for (const period of this.heatPeriods().slice(0, 4)) {
-          const line = WetterHeating.fit(this.heat.days, o, period);
-          if (line) parts.push(t('{period}: {value} kWh je Kelvin ({n} Tage, R² {r2})', {period: WetterHeating.label(period), value: num(-line.slope, 2), n: line.n, r2: num(line.r2, 2)}));
-        }
-        parts.push(t('Gerade nur über Tage unter der Heizgrenze'));
-        return parts.join(' · ');
+        return this.heatFitFrom(o) === 0
+          ? t('Ein Punkt je Tag (kWh pro Tag). Die Linien zeigen den geglätteten Verlauf; kWh je Kelvin gilt für 0 bis {limit} °C, darunter verläuft der Verbrauch oft flacher.', {limit: num(o.limit, 0)})
+          : t('Ein Punkt je Tag (kWh pro Tag). Die Linien zeigen den geglätteten Verlauf; kWh je Kelvin gilt für Tage unter der Heizgrenze.');
       },
 
       drawHeat() {
         if (!this.heat) return;
-        writeStore({heat: {on: this.heatOn, room: this.heatRoom, limit: this.heatLimit}});
+        writeStore({heat: {on: this.heatOn, room: this.heatRoom, limit: this.heatLimit, bySun: this.heatBySun}});
         this.drawHeatScatter();
+        this.drawHeatSun();
         this.drawHeatTable();
         this.drawHeatShare();
+      },
+
+      heatHasSun() {
+        return !!(this.heat && this.heat.sun && Object.keys(this.heat.sun).length);
+      },
+
+      heatSunNames() {
+        return {sunny: t('sonnig'), mixed: t('wechselhaft'), overcast: t('trüb')};
+      },
+
+      // Punkte nach Tagesklasse statt nach Heizperiode: Farbe und Form je Klasse, damit es auch ohne Farbe lesbar bleibt.
+      heatSunSeries(o, colors) {
+        const names = this.heatSunNames();
+        const style = {
+          sunny: {color: colors.sun, symbol: 'circle'},
+          mixed: {color: cssVar('--chart-4'), symbol: 'diamond'},
+          overcast: {color: colors.cold, symbol: 'rect'},
+        };
+        const groups = {sunny: [], mixed: [], overcast: [], none: []};
+        for (const day of this.heat.days) {
+          const kind = this.heat.sun[day[0]] || 'none';
+          groups[kind].push([day[1], Math.round(WetterHeating.dayKwh(day, o.on) * 100) / 100, day[0]]);
+        }
+        const series = WetterHeating.SUN_CLASSES.map((kind) => ({
+          name: names[kind], type: 'scatter', data: groups[kind], symbolSize: 8, symbol: style[kind].symbol,
+          itemStyle: {color: style[kind].color, opacity: 0.9},
+        }));
+        series.push({
+          name: t('ohne Klasse'), type: 'scatter', data: groups.none, symbolSize: 4, itemStyle: {color: colors.faint, opacity: 0.4},
+        });
+        return {series, legend: [...WetterHeating.SUN_CLASSES.map((kind) => names[kind]), t('ohne Klasse')]};
+      },
+
+      // Urteil über sonnige gegen trübe Tage: kurze Marke (Chip) plus ein Satz mit den Tagezahlen.
+      heatSunVerdict() {
+        if (!this.heatHasSun()) return {chip: '', text: '', status: ''};
+        const stats = WetterHeating.classStats(this.heat.days, this.heatOpts(), this.heat.sun);
+        const base = stats.overcast;
+        const sunny = stats.sunny;
+        const min = WetterHeating.MIN_CLASS_DAYS;
+        const result = WetterHeating.compare(sunny, base);
+        const days = {a: sunny.n, b: base.n};
+        if (result.status === 'few') {
+          return {status: 'few', chip: t('Zu wenig Tage'),
+            text: t('Zu wenig Tage für einen Vergleich (mindestens {min} sonnige und trübe Heiztage, jetzt {a} und {b}).', {...days, min})};
+        }
+        if (result.status === 'unclear') {
+          return {status: 'unclear', chip: t('Kein klarer Unterschied'),
+            text: t('Sonnige und trübe Tage brauchen je Gradtag etwa gleich viel ({a} gegen {b} Tage).', days)};
+        }
+        const values = {...days, percent: num(Math.abs(result.percent), 0)};
+        return {
+          status: 'clear',
+          chip: `${result.percent < 0 ? '−' : '+'}${num(Math.abs(result.percent), 0)} % ${t('gegen trüb')}`,
+          text: result.percent < 0
+            ? t('An sonnigen Tagen braucht das Haus {percent} % weniger je Gradtag als an trüben ({a} gegen {b} Tage).', values)
+            : t('An sonnigen Tagen braucht das Haus {percent} % mehr je Gradtag als an trüben ({a} gegen {b} Tage).', values),
+        };
+      },
+
+      // Anteilsleiste über alle Heiztage, darunter eine Kachel je Klasse mit kWh/Gt als Hauptzahl.
+      drawHeatSun() {
+        const box = this.$refs.heatSunTiles;
+        if (!box || !this.heatHasSun()) return;
+        const stats = WetterHeating.classStats(this.heat.days, this.heatOpts(), this.heat.sun);
+        const names = this.heatSunNames();
+        const kinds = WetterHeating.SUN_CLASSES;
+        const total = kinds.reduce((sum, kind) => sum + stats[kind].n, 0);
+        const percent = (n) => (total ? Math.round(n / total * 100) : 0);
+        let html = '';
+        if (total) {
+          html += `<div class="wt-ts-share" aria-hidden="true">${kinds.map((kind) => (stats[kind].n
+            ? `<i data-kind="${kind}" style="flex:${stats[kind].n}"></i>` : '')).join('')}</div>`
+            + `<div class="wt-ts-sharelab"><span>${escapeHtml(t('Verteilung der {n} Heiztage', {n: num(total, 0)}))}</span>`
+            + `<span>${escapeHtml(kinds.map((kind) => `${percent(stats[kind].n)} %`).join(' · '))}</span></div>`;
+        }
+        html += '<div class="wt-ts-tiles">';
+        for (const kind of kinds) {
+          const g = stats[kind];
+          const sub = g.n
+            ? t('{n} Tage · Ø {temp} °C · {kwh} kWh/Tag', {n: g.n, temp: g.temp == null ? '–' : num(g.temp, 1), kwh: g.kwh == null ? '–' : num(g.kwh, 1)})
+            : t('Keine Tage');
+          html += `<div class="wt-ts${g.n && g.n < 30 ? ' is-thin' : ''}" data-kind="${kind}">`
+            + `<span class="wt-ts-k"><i></i>${escapeHtml(names[kind])}</span>`
+            + `<span class="wt-ts-v">${g.q == null ? '–' : escapeHtml(num(g.q, 2))}<small>kWh/Gt</small></span>`
+            + `<span class="wt-ts-s">${escapeHtml(sub)}</span>`
+            + (g.n && g.n < 30 ? `<span class="wt-ts-warn">${escapeHtml(t('wenig Tage, kaum aussagekräftig'))}</span>` : '')
+            + '</div>';
+        }
+        box.innerHTML = html + '</div>';
       },
 
       drawHeatScatter() {
@@ -1302,32 +2565,54 @@
         if (!element) return;
         const o = this.heatOpts();
         const colors = palette();
-        const periods = this.heatPeriods().slice(0, 4);
+        const periods = this.heatPeriods().slice(0, this.heatChartSeasons());
+        const sunMode = this.heatBySun && this.heatHasSun();
         const series = [];
-        const legend = [];
-        periods.forEach((period, index) => {
+        let legend = [];
+        if (sunMode) {
+          const built = this.heatSunSeries(o, colors);
+          series.push(...built.series);
+          legend = built.legend;
+          series[0].markLine = {
+            silent: true, symbol: 'none', lineStyle: {color: colors.faint, type: 'dashed'},
+            label: {formatter: () => `${t('Heizgrenze')} ${num(o.limit, 0)} °C`, color: colors.text, fontSize: scaledFont(11)},
+            data: [{xAxis: o.limit}],
+          };
+        }
+        (sunMode ? [] : periods).forEach((period, index) => {
           const color = this.heatColor(index);
           const name = WetterHeating.label(period);
-          legend.push(name);
+          // Das Legendenzeichen in voller Deckkraft: die Punkte älterer Perioden sind blass, ihre Farbe soll lesbar bleiben.
+          legend.push(legendEntry(name, color));
           const points = this.heat.days
             .filter((day) => WetterHeating.periodOf(day[0]) === period)
             .map((day) => [day[1], Math.round(WetterHeating.dayKwh(day, o.on) * 100) / 100, day[0]]);
-          const line = WetterHeating.fit(this.heat.days, o, period);
           series.push({
-            name, type: 'scatter', data: points, symbolSize: index === 0 ? 7 : 5,
-            itemStyle: {color, opacity: index === 0 ? 0.9 : 0.5},
+            // Die aktuelle Heizperiode kräftig, ältere deutlich dezenter: sonst verschwindet sie im Brei der Vorjahre.
+            name, type: 'scatter', data: points, symbolSize: index === 0 ? 7 : 4,
+            itemStyle: {color, opacity: index === 0 ? 0.9 : 0.3},
             markLine: index === 0 ? {
               silent: true, symbol: 'none', lineStyle: {color: colors.faint, type: 'dashed'},
               label: {formatter: () => `${t('Heizgrenze')} ${num(o.limit, 0)} °C`, color: colors.text, fontSize: scaledFont(11)},
               data: [{xAxis: o.limit}],
             } : undefined,
           });
-          if (line) {
-            const from = Math.min(...points.filter((p) => p[0] < o.limit).map((p) => p[0]));
+          // Geglättete Kurve; ohne genug Tage (laufende Periode, Frühherbst) die Ausgleichsgerade über den Datenbereich.
+          const curve = WetterHeating.smooth(this.heat.days, o, period);
+          let data = curve;
+          if (!data) {
+            const line = WetterHeating.fit(this.heat.days, o, period);
+            if (line) {
+              const below = points.filter((p) => p[0] < o.limit).map((p) => p[0]);
+              const from = Math.min(...below);
+              const to = Math.max(...below);
+              data = [[from, line.intercept + line.slope * from], [to, line.intercept + line.slope * to]];
+            }
+          }
+          if (data) {
             series.push({
-              name: `${name} `, type: 'line', symbol: 'none', silent: true, z: 4,
-              data: [[from, line.intercept + line.slope * from], [o.limit, line.intercept + line.slope * o.limit]],
-              lineStyle: {color, width: 2.2}, tooltip: {show: false},
+              name: `${name} `, type: 'line', symbol: 'none', silent: true, z: 4, data,
+              lineStyle: {color, width: index === 0 ? 2.4 : 1.3, opacity: index === 0 ? 1 : 0.7}, tooltip: {show: false},
             });
           }
         });
@@ -1336,7 +2621,9 @@
           animation: false, grid: gridFor(element, {right: 20, bottom: 24}), legend: legendBox(colors, legend),
           xAxis: {
             type: 'value', name: t('Tages-Ø Außentemperatur (°C)'), nameLocation: 'middle', nameGap: 26,
-            nameTextStyle: {color: colors.text}, ...axisStyle(colors), min: (value) => Math.floor(value.min / 5) * 5,
+            nameTextStyle: {color: colors.text}, ...axisStyle(colors),
+            // Auf die Daten zugeschnitten (in 2-°C-Schritten) statt fester Fünferschritte: sonst bleibt links und rechts viel leere Fläche.
+            min: (value) => Math.floor(value.min / 2) * 2, max: (value) => Math.ceil(value.max / 2) * 2,
           },
           // Einheit an den Teilstrichen statt als Achsenname: der Name landete in diesem Diagramm mitten in der Legende.
           yAxis: {
@@ -1353,6 +2640,7 @@
           },
           series,
         }, true);
+        restoreLegend('heat', chart);
         requestAnimationFrame(() => chart.resize());
       },
 
@@ -1362,41 +2650,60 @@
         const o = this.heatOpts();
         const days = this.heat.days;
         const info = this.heatPeriodInfo();
-        const shown = info.periods.slice(0, 3);
+        const shown = info.periods.slice(0, heatSeasonCount());
         if (!shown.length) {
           table.innerHTML = `<tbody><tr><td>${escapeHtml(t('Noch keine Heiztage.'))}</td></tr></tbody>`;
           return;
         }
         const tag = this.heatTag();
-        const cells = (st) => (st && st.n
-          ? `<td class="wt-sep">${escapeHtml(num(st.gt, 0))}</td><td>${escapeHtml(num(st.kwh, 0))}</td><td><b>${st.q == null ? '–' : escapeHtml(num(st.q, 2))}</b></td>`
-          : '<td class="wt-na wt-sep">–</td><td class="wt-na">–</td><td class="wt-na">–</td>');
-        const change = (a, b) => (a && b && a.q && b.q
-          ? `<td class="wt-sep wt-dl">${a.q / b.q - 1 >= 0 ? '+' : '−'}${escapeHtml(num(Math.abs(a.q / b.q - 1) * 100, 0))} %</td>`
-          : '<td class="wt-na wt-sep">–</td>');
+        const isRun = (p) => info.running && p === info.current;
+        // Eine Zelle je Periode: kWh/Gt als Hauptzahl, darunter gedämpft Gradtage und kWh.
+        const cell = (st, p) => (st && st.n
+          ? `<td${isRun(p) ? ' class="wt-run"' : ''}><span class="wt-hv">${st.q == null ? '–' : escapeHtml(num(st.q, 2))}</span>`
+            + `<span class="wt-hs">${escapeHtml(num(st.gt, 0))} Gt · ${escapeHtml(num(st.kwh, 0))} kWh</span></td>`
+          : `<td class="wt-na${isRun(p) ? ' wt-run' : ''}">–</td>`);
+        const cells = (list) => list.map((st, i) => cell(st, shown[i])).join('');
+        // Veränderung als Pille: unter 1,5 % neutral, weniger kWh/Gt grün, mehr kWh/Gt rot.
+        const change = (a, b) => {
+          if (!(a && b && a.q && b.q)) return '<td class="wt-na">–</td>';
+          const pct = (a.q / b.q - 1) * 100;
+          const abs = Math.abs(pct);
+          const kind = abs < 1.5 ? 'wt-pill-n' : (pct > 0 ? 'wt-pill-bad' : 'wt-pill-good');
+          const text = abs < 0.5 ? '±0 %' : `${pct > 0 ? '+' : '−'}${num(abs, 0)} %`;
+          return `<td><span class="wt-pill ${kind}">${escapeHtml(text)}</span></td>`;
+        };
         // Spalte Δ: die zwei letzten abgeschlossenen Heizperioden; in der Zeile „bis gestern“ die laufende gegen die letzte.
         const [newer, older] = [info.complete[0], info.complete[1]];
-        let html = '<thead><tr class="wt-g"><th></th>'
-          + shown.map((p) => `<th colspan="3" class="wt-sep">${escapeHtml(WetterHeating.label(p))}${info.running && p === info.current ? ' · ' + escapeHtml(t('läuft')) : ''}</th>`).join('')
-          + '<th class="wt-sep">Δ</th></tr><tr><th></th>'
-          + shown.map(() => `<th class="wt-sep"><span class="wt-sb">${escapeHtml(tag)}</span></th><th><span class="wt-sb">kWh</span></th><th><span class="wt-sb">kWh/Gt</span></th>`).join('')
-          + `<th class="wt-sep wt-sb">${newer != null && older != null ? escapeHtml(t('kWh/Gt {a} gegenüber {b}', {a: WetterHeating.label(newer), b: WetterHeating.label(older)})) : ''}</th></tr></thead><tbody>`;
+        // Die Spalte Δ gibt es nur, wenn zwei abgeschlossene Heizperioden zum Vergleichen da sind.
+        const delta = newer != null && older != null && shown.includes(newer) && shown.includes(older);
+        let html = '<thead><tr><th></th>'
+          + shown.map((p) => `<th${isRun(p) ? ' class="wt-run"' : ''}>${escapeHtml(WetterHeating.label(p))}${isRun(p) ? ' · ' + escapeHtml(t('läuft')) : ''}`
+            + `<span class="wt-sb">kWh/Gt</span></th>`).join('')
+          + (delta ? `<th class="wt-dh">Δ<span class="wt-sb">${escapeHtml(t('kWh/Gt {a} gegenüber {b}', {a: WetterHeating.label(newer), b: WetterHeating.label(older)}))}</span></th>` : '')
+          + '</tr></thead><tbody>';
+        const deltaCell = (a, b) => (delta ? change(a, b) : '');
+        // Monate, in denen keine der gezeigten Heizperioden Werte hat (noch nicht erreicht), bleiben weg.
         for (const month of WetterHeating.MONTHS) {
           const stats = shown.map((p) => WetterHeating.stat(days, o, ...WetterHeating.monthRange(p, month)));
+          if (!stats.some((st) => st && st.n)) continue;
           const byPeriod = (p) => stats[shown.indexOf(p)];
-          html += `<tr><th scope="row">${escapeHtml(monthName(month, 'short'))}</th>${stats.map(cells).join('')}${change(byPeriod(newer), byPeriod(older))}</tr>`;
+          const current = info.running ? stats[shown.indexOf(info.current)] : null;
+          const future = info.running && shown.includes(info.current) && !(current && current.n);
+          html += `<tr${future ? ' class="wt-future"' : ''}><th scope="row">${escapeHtml(monthName(month, 'short'))}</th>${cells(stats)}${deltaCell(byPeriod(newer), byPeriod(older))}</tr>`;
         }
         const totals = shown.map((p) => WetterHeating.stat(days, o, ...WetterHeating.periodRange(p)));
         const totalOf = (p) => totals[shown.indexOf(p)];
-        html += `<tr class="wt-sum"><th scope="row">${escapeHtml(t('Heizperiode'))}</th>${totals.map(cells).join('')}${change(totalOf(newer), totalOf(older))}</tr>`;
-        if (info.running) {
+        html += `<tr class="wt-sum"><th scope="row">${escapeHtml(t('Heizperiode'))}</th>${cells(totals)}${deltaCell(totalOf(newer), totalOf(older))}</tr>`;
+        // Die Zeile „1.10. bis heute“ ist ohne zweite Heizperiode nur eine Wiederholung der Summe.
+        if (info.running && shown.length > 1) {
           const cutOf = (p) => WetterHeating.cutRange(p, this.heat.today);
           const cuts = shown.map((p) => WetterHeating.stat(days, o, cutOf(p).from, cutOf(p).to));
           const label = cutOf(info.current).label;
           const first = info.current === shown[0] ? cuts[0] : null;
           const previous = info.complete[0] != null && shown.includes(info.complete[0]) ? cuts[shown.indexOf(info.complete[0])] : null;
           if (label) {
-            html += `<tr class="wt-cut"><th scope="row">${escapeHtml(t('1.10.–{day}.{month}.', {day: label.day, month: label.month}))}</th>${cuts.map(cells).join('')}${change(first, previous)}</tr>`;
+            html += `<tr class="wt-cut"><th scope="row">${escapeHtml(t('Gleicher Zeitraum'))}`
+              + `<span class="wt-sb">${escapeHtml(t('1.10.–{day}.{month}.', {day: label.day, month: label.month}))}</span></th>${cells(cuts)}${deltaCell(first, previous)}</tr>`;
           }
         }
         table.innerHTML = html + '</tbody>';
@@ -1450,21 +2757,71 @@
         return {
           warmest_day: t('Wärmster Tag (Ø)'), coldest_day: t('Kältester Tag (Ø)'), highest: t('Höchster Wert'),
           lowest: t('Tiefster Wert'), strongest_gust: t('Stärkste Böe'), wettest_day: t('Nassester Tag'),
-          rainiest_day: t('Regenreichster Tag'),
+          rainiest_day: t('Regenreichster Tag'), sunniest_day: t('Sonnigster Tag'), sunniest_month: t('Sonnigster Monat'),
+          longest_sunny_streak: t('Längste sonnige Folge'), longest_overcast_streak: t('Längste trübe Folge'),
         }[key] || key;
       },
 
       recordValue(record) {
+        if (record.key.endsWith('_streak')) return escapeHtml(num(record.value, 0)) + `<small>${escapeHtml(t('Tage'))}</small>`;
         return escapeHtml(num(record.value, 1)) + (record.unit ? `<small>${escapeHtml(record.unit)}</small>` : '');
       },
 
       recordDate(record) {
-        return new Intl.DateTimeFormat(LOCALE, {day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC'})
-          .format(new Date(record.date + 'T12:00:00Z'));
+        const fmt = (options) => new Intl.DateTimeFormat(LOCALE, {...options, timeZone: 'UTC'});
+        const at = (iso) => new Date(iso + 'T12:00:00Z');
+        const full = (iso) => fmt({day: '2-digit', month: '2-digit', year: 'numeric'}).format(at(iso));
+        if (record.key === 'sunniest_month') return fmt({month: 'long', year: 'numeric'}).format(at(record.date));
+        if (record.end) {
+          // Läuft die Folge noch, endet sie heute; im selben Jahr genügt beim Beginn Tag und Monat.
+          if (record.ongoing) return t('{from} bis heute', {from: full(record.date)});
+          const sameYear = record.date.slice(0, 4) === record.end.slice(0, 4);
+          return t('{from} bis {to}', {from: sameYear ? fmt({day: '2-digit', month: '2-digit'}).format(at(record.date)) : full(record.date), to: full(record.end)});
+        }
+        return full(record.date);
+      },
+
+      // Rekorde in drei Gruppen: große Kennzahlen (heroes) und kompakte Zeilen (rows). Ein Rekord, der in der Antwort fehlt,
+      // fehlt auch hier; fehlt eine ganze Gruppe, entfällt sie.
+      recordGroups() {
+        const records = this.longterm ? this.longterm.records : [];
+        const pick = (keys) => keys.map((k) => records.find((r) => r.key === k)).filter(Boolean);
+        const groups = [
+          ['temperature', ['highest', 'lowest'], ['warmest_day', 'coldest_day']],
+          ['wind', ['strongest_gust', 'wettest_day', 'rainiest_day'], []],
+          ['sun', ['sunniest_day'], ['sunniest_month', 'longest_sunny_streak', 'longest_overcast_streak']],
+        ];
+        return groups
+          .map(([key, heroes, rows]) => ({key, heroes: pick(heroes), rows: pick(rows)}))
+          .filter((group) => group.heroes.length || group.rows.length);
+      },
+
+      // Ton eines Rekords: Wärme rot, Kälte blau, alles andere in der Gruppenfarbe.
+      recordTone(key) {
+        return {highest: 'hot', warmest_day: 'hot', lowest: 'cold', coldest_day: 'cold'}[key] || '';
+      },
+
+      // Die beiden Folgen als Balken im Verhältnis zur längeren; sonst kein Balken.
+      recordBar(record) {
+        if (!record.key.endsWith('_streak')) return null;
+        const streaks = (this.longterm ? this.longterm.records : []).filter((r) => r.key.endsWith('_streak'));
+        const longest = Math.max(...streaks.map((r) => r.value), 0);
+        return longest ? Math.max(4, Math.round(record.value / longest * 100)) : null;
+      },
+
+      recordHasLink(record) {
+        return record.key !== 'sunniest_month';
       },
 
       recordLink(record) {
         return `entities/${encodeURIComponent(record.entity_id)}?range=day&offset=${record.offset_days}`;
+      },
+
+      // Kurzer Zusatz zum Titel „Rekorde“: ab wann gezählt wird (hängt an der Jahresauswahl).
+      recordsScope() {
+        const l = this.longterm;
+        if (!l || !l.records_since) return '';
+        return t('seit {year}', {year: l.records_since.slice(0, 4)});
       },
 
       recordsNote() {
@@ -1472,7 +2829,7 @@
         if (!l || !l.records_since) return '';
         const since = new Intl.DateTimeFormat(LOCALE, {day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC'})
           .format(new Date(l.records_since + 'T12:00:00Z'));
-        return t('Seit Archivbeginn ({date}, {days} Tage). Ein einzelner Messfehler kann einen Rekord setzen; über „Tag öffnen“ lässt sich der Tag prüfen.', {date: since, days: l.records_days});
+        return t('Gezählt ab {date} ({days} Tage), passend zur Jahresauswahl oben. Ein einzelner Messfehler kann einen Rekord setzen; über „Tag öffnen“ lässt sich der Tag prüfen.', {date: since, days: l.records_days});
       },
 
       async loadTiles() {
@@ -1507,6 +2864,7 @@
           const data = await res.json();
           if (seq !== this._seq) return;  // eine neuere Anfrage hat überholt
           lastTable = data;
+          this.yearKeys = (data.years || []).map((year) => `j${year}`);
           this.paintTables(data);
         } catch (e) {
           if (seq === this._seq) this.error = t('Die Tabelle konnte nicht geladen werden.');

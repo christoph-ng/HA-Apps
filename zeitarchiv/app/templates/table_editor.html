@@ -7,21 +7,36 @@
 {% block content %}
   {% from "_icons.html" import custom_name_icon %}
   
-  <div class="page" x-data="tableEditor()">
-    <h1>{{ _("Tabellen") }}</h1>
-    <p class="sub" data-dynamic-back data-app-root="{{ app_root }}">{{ _("Mehrere Größen über mehrere Zeiträume nebeneinander vergleichen. &middot;") }} <a href="{{ app_root }}/tables">{{ _("&larr; zurück zu Tabellen") }}</a></p>
+  <div class="page page-wide" x-data="tableEditor()">
+    <h1 class="popup-hide">{{ _("Tabellen") }}</h1>
+    <p class="sub" data-dynamic-back data-app-root="{{ app_root }}">{{ _("Mehrere Größen über mehrere Zeiträume nebeneinander vergleichen. &middot;") }} <a href="{{ app_root }}/tables">{{ _("&larr; zurück zu Tabellen") }}</a>{% if back_dashboard %} &middot; <a href="{{ app_root }}{{ back_dashboard.path }}" data-back-dashboard>{{ back_dashboard.label }}</a>{% endif %}</p>
 
     <div class="settings-panel">
         <div class="chart-title-row">
-          <h2 x-text="editing ? (tableId ? t('Tabelle bearbeiten') : t('Neue Tabelle')) : (name || t('Neue Tabelle'))"></h2>
-          <div style="display:flex;gap:8px;">
-            <button type="button" class="btn" x-show="rows.length && columns.length" data-tooltip="{{ _('Aktuell berechnete Tabelle als CSV herunterladen') }}" @click="exportCsv()">{{ _("CSV") }}</button>
+          <h2 class="popup-hide" x-text="editing ? (tableId ? t('Tabelle bearbeiten') : t('Neue Tabelle')) : (name || t('Neue Tabelle'))"></h2>
+          <div style="display:flex;gap:8px;align-items:center;">
             {% if table_id %}
-            <button type="button" class="btn" x-show="!editing" @click="editing = true">{{ _("Anpassen") }}</button>
+            <span class="refresh-wrap" x-show="rows.length && columns.length" x-cloak @click.outside="refreshMenuOpen = false">
+              <button type="button" class="refresh-chip" :class="{paused: refreshPause()}" aria-haspopup="menu" :aria-expanded="refreshMenuOpen"
+                      :title="refreshChipTitle()" @click="refreshMenuOpen = !refreshMenuOpen; refreshAge = Math.round((Date.now() - _lastRefresh) / 1000)">
+                <span class="refresh-dot"></span><span x-text="refreshChipText()"></span>
+              </button>
+              <div class="menu-popover menu-popover-narrow refresh-menu" x-show="refreshMenuOpen" x-cloak role="menu">
+                <div class="refresh-info" x-text="refreshInfo()"></div>
+                <button type="button" class="menu-row" role="menuitem" @click="refreshNow()">{{ _("Jetzt aktualisieren") }}</button>
+                <button type="button" class="menu-row" role="menuitem" @click="refreshOn = !refreshOn">
+                  <span>{{ _("Automatisch aktualisieren") }}</span><span class="refresh-state" x-text="refreshOn ? t('An') : t('Aus')"></span>
+                </button>
+              </div>
+            </span>
+            {% endif %}
+            <button type="button" class="btn popup-hide" x-show="rows.length && columns.length" data-tooltip="{{ _('Aktuell berechnete Tabelle als CSV herunterladen') }}" @click="exportCsv()">{{ _("CSV") }}</button>
+            {% if table_id %}
+            <button type="button" class="btn popup-hide" x-show="!editing" @click="editing = true">{{ _("Anpassen") }}</button>
             {% endif %}
           </div>
         </div>
-        {% if table_id %}{% include "_dashboard_usage.html" %}{% endif %}
+        {% if table_id %}<div class="popup-hide">{% include "_dashboard_usage.html" %}</div>{% endif %}
         <p class="sub" x-show="editing">{{ _("Zeilen (Entität/Gruppe/Formel/Trennlinie) × Spalten (Zeitraum) — dieselbe Perioden-Logik wie bei Charts, nur tabellarisch statt grafisch. Zeigt beim Ansehen immer aktuelle Werte, kein eingefrorener Schnappschuss.") }}</p>
 
         <template x-if="editing">
@@ -90,6 +105,12 @@
                       </template>
                     </div>
                   </span>
+                  <span class="tbl-range-hint" role="note" x-show="rangeLabelMismatch(col)" x-cloak>
+                    <span x-text="t('Die Beschriftung sagt „{name}“, der Zeitraum ist aber {type}.', {name: RANGE_LABELS[rangeLabelMismatch(col)], type: RANGE_LABELS[col.range_key]})"></span>
+                    <button type="button" class="tbl-range-hint-fix"
+                            @click="col.range_key = rangeLabelMismatch(col); clampOffset(col); load()"
+                            x-text="t('Auf {name} stellen', {name: RANGE_LABELS[rangeLabelMismatch(col)]})"></button>
+                  </span>
                   <span class="tbl-field-label" x-text="t('Versatz ({unit})', {unit: versatzUnit(col)})"></span>
                   <input type="number" max="0" x-model.number="col.offset" @change="clampOffset(col); load()">
                   <label class="cbx">
@@ -141,17 +162,21 @@
                         </div>
                       </span>
 
-                      <span class="dd-picker-wrap tbl-value-picker" x-show="row.row_type === 'entity'"
+                      {# x-if statt x-show bei den typabhängigen Feldern: sie werden nur für Zeilen des passenden Typs gebaut. #}
+                      <template x-if="row.row_type === 'entity'">
+                      <span class="dd-picker-wrap tbl-value-picker"
                             x-data="entityPicker(ENTITY_OPTIONS, row.entity_ids[0] || '', (id) => { row.entity_ids = id ? [id] : []; load(); })"
                             @click.outside="open = false">
                         <button type="button" class="btn"
                                 :class="{'dd-picker-btn-clearable': entityId}"
-                                @click="toggleOpen($refs.rowEntitySearch)"
+                                @click="toggleOpen(() => $refs.rowEntitySearch)"
                                 @mouseenter="hoverSelf($el)" @mouseleave="clearHover()"
                                 x-text="entityId ? label(entityId) : t('Entität wählen …')"></button>
                         <button type="button" class="dd-picker-clear" x-show="entityId" x-cloak
                                 @click.stop="clearSelection()" data-tooltip="{{ _('Auswahl leeren') }}" aria-label="{{ _('Auswahl leeren') }}">✕</button>
-                        <div class="dd-picker-popover dd-picker-popover-alpine tbl-group-popover" x-show="open" x-cloak>
+                        {# x-if statt x-show: die gefilterte Entitätenliste entsteht nur, solange der Picker offen ist. #}
+                        <template x-if="open">
+                        <div class="dd-picker-popover dd-picker-popover-alpine tbl-group-popover">
                           <input type="search" x-ref="rowEntitySearch" x-model="search" placeholder="{{ _('Suchen …') }}">
                           <template x-for="opt in filtered()" :key="opt.entity_id">
                             <div class="dd-picker-row" :class="{active: entityId === opt.entity_id}"
@@ -163,6 +188,7 @@
                             </div>
                           </template>
                         </div>
+                        </template>
                         <template x-teleport="body">
                           <div class="entity-tooltip entity-tooltip-floating"
                                :style="`display:${hoverTip ? 'block' : 'none'}; top:${hoverPos.top}px; left:${hoverPos.left}px; transform:translateY(-100%);`">
@@ -171,11 +197,16 @@
                           </div>
                         </template>
                       </span>
+                      </template>
 
-                      <div class="tbl-group-wrap tbl-value-picker" x-show="row.row_type === 'group'" @click.outside="row.pickerOpen = false">
+                      <template x-if="row.row_type === 'group'">
+                      <div class="tbl-group-wrap tbl-value-picker" @click.outside="row.pickerOpen = false">
                         <button type="button" class="tbl-group-btn" @click="row.pickerOpen = !row.pickerOpen"
                                 x-text="row.entity_ids.length ? (row.entity_ids.length === 1 ? t('1 Entität ausgewählt') : t('{count} Entitäten ausgewählt', {count: row.entity_ids.length})) : t('Entitäten wählen …')"></button>
-                        <div class="tbl-group-popover" x-show="row.pickerOpen" x-cloak>
+                        {# x-if statt x-show: die Liste aller Entitäten wird nur für das gerade geöffnete Popover gebaut,
+                           nicht für jede Gruppenzeile ständig mit (Öffnen des Editors, siehe CHANGELOG_INTERNAL). #}
+                        <template x-if="row.pickerOpen">
+                        <div class="tbl-group-popover">
                           <input type="search" placeholder="{{ _('Suchen …') }}" x-model="row.search">
                           {% for opt in entity_options %}
                           <label class="tbl-group-row" x-show='!row.search || {{ (opt.label ~ " " ~ opt.entity_id) | lower | tojson }}.includes(row.search.toLowerCase())'>
@@ -186,7 +217,9 @@
                           </label>
                           {% endfor %}
                         </div>
+                        </template>
                       </div>
+                      </template>
 
                       <!-- Platzhalter, damit das Beschriftungsfeld in JEDER Zeile an
                            derselben Stelle steht. Summenzeile und Trennlinie tragen
@@ -196,7 +229,8 @@
                       <span class="tbl-row-gap tbl-row-gap-value" aria-hidden="true"
                             x-show="row.row_type === 'summary' || row.row_type === 'separator'"></span>
 
-                      <span class="dd-picker-wrap tbl-agg-picker" x-show="row.row_type === 'entity' || row.row_type === 'group'" @click.outside="row.aggPickerOpen = false">
+                      <template x-if="row.row_type === 'entity' || row.row_type === 'group'">
+                      <span class="dd-picker-wrap tbl-agg-picker" @click.outside="row.aggPickerOpen = false">
                         <button type="button" class="btn" @click="row.aggPickerOpen = !row.aggPickerOpen"
                                 :data-tooltip="AGG_TITLES[row.aggregation]" x-text="AGG_SHORT_LABELS[row.aggregation] + ' ▾'"></button>
                         <div class="dd-picker-popover dd-picker-popover-alpine" x-show="row.aggPickerOpen" x-cloak>
@@ -207,7 +241,10 @@
                         </div>
                       </span>
 
-                      <span class="dd-picker-wrap tbl-agg-picker" x-show="row.row_type === 'summary'" @click.outside="row.aggPickerOpen = false">
+                      </template>
+
+                      <template x-if="row.row_type === 'summary'">
+                      <span class="dd-picker-wrap tbl-agg-picker" @click.outside="row.aggPickerOpen = false">
                         <button type="button" class="btn" @click="row.aggPickerOpen = !row.aggPickerOpen"
                                 data-tooltip="{{ _('Summe oder Durchschnitt aller Entität-/Gruppen-Zeilen seit der letzten Trennlinie') }}" x-text="AGG_SHORT_LABELS[row.aggregation] + ' ▾'"></button>
                         <div class="dd-picker-popover dd-picker-popover-alpine" x-show="row.aggPickerOpen" x-cloak>
@@ -217,12 +254,17 @@
                           </template>
                         </div>
                       </span>
+                      </template>
 
-                      <input type="text" class="tbl-formula-input tbl-formula-input-inline" x-show="row.row_type === 'formula'"
+                      <template x-if="row.row_type === 'formula'">
+                      <input type="text" class="tbl-formula-input tbl-formula-input-inline"
                              placeholder="z. B. A / B * 100" x-model="row.formula" @change="load()"
-                             :data-tooltip="t('Formel — verfügbar: {rows}', {rows: (rows.slice(0, idx).map(r => rowLetters[r.uid]).filter(Boolean).join(', ') || t('– (keine Zeile oberhalb)'))})">
-                      <input type="text" class="tbl-formula-input tbl-formula-unit-inline" x-show="row.row_type === 'formula'"
+                             :data-tooltip="t('Formel — verfügbar: {rows}', {rows: (((L) => rows.slice(0, idx).map(r => L[r.uid]).filter(Boolean).join(', '))(rowLetters) || t('– (keine Zeile oberhalb)'))})">
+                      </template>
+                      <template x-if="row.row_type === 'formula'">
+                      <input type="text" class="tbl-formula-input tbl-formula-unit-inline"
                              :placeholder="suggestFormulaUnit(row) || t('Auto')" x-model="row.formula_unit" @change="load()" data-tooltip="{{ _('Einheit') }}">
+                      </template>
 
                       <span class="tbl-row-gap tbl-row-gap-agg" aria-hidden="true"
                             x-show="row.row_type === 'separator'"></span>
@@ -243,6 +285,7 @@
                           <div class="dd-picker-popover dd-picker-popover-alpine tbl-row-opts-popover" x-show="row.optsPickerOpen" x-cloak>
                             <label class="dd-picker-row"><input type="checkbox" x-model="row.bold"><span>{{ _("Fett") }}</span></label>
                             <label class="dd-picker-row" x-show="row.row_type === 'separator'"><input type="checkbox" x-model="row.show_label"><span>{{ _("Als Überschrift zeigen") }}</span></label>
+                            <label class="dd-picker-row" x-show="row.row_type === 'separator'"><input type="checkbox" x-model="row.hide_line"><span>{{ _("Linie ausblenden") }}</span></label>
                             <label class="dd-picker-row" x-show="row.row_type === 'formula'"><input type="checkbox" x-model="row.accent"><span>{{ _("Hervorheben") }}</span></label>
                             <label class="dd-picker-row" x-show="row.row_type === 'entity' || row.row_type === 'group'"><input type="checkbox" x-model="row.percent_of_total"><span>{{ _("% Anteil") }}</span></label>
                             <label class="dd-picker-row" x-show="row.row_type === 'entity' || row.row_type === 'group'"><input type="checkbox" x-model="row.hide_if_empty"><span>{{ _("Bei 0 ausblenden") }}</span></label>
@@ -271,6 +314,7 @@
               <button type="button" class="btn" @click="addRow('formula')">{{ _("+ Formel") }}</button>
               <button type="button" class="btn" data-tooltip="{{ _('Summe/Durchschnitt aller Entität-/Gruppen-Zeilen seit der letzten Trennlinie — aktualisiert sich automatisch, wenn darüber Zeilen hinzukommen oder wegfallen') }}" @click="addRow('summary')">{{ _("+ Summenzeile") }}</button>
               <button type="button" class="btn" @click="addRow('separator')">{{ _("+ Trennlinie") }}</button>
+              <button type="button" class="btn" @click="addRow('separator', {hide_line: true})">{{ _("+ Leerzeile") }}</button>
             </div>
 
             <h3 class="tbl-h">{{ _("Darstellung") }} {{ hint_button(_('Darstellung')) }}</h3>
@@ -413,7 +457,7 @@
                    table-layout:auto bleibt eine <colgroup> ohne Wirkung,
                    kann also immer gerendert werden. -->
               <colgroup>
-                <col :style="style.label_col_width ? `width:${style.label_col_width}px` : ''">
+                <col :style="effectiveLabelWidth() ? `width:${effectiveLabelWidth()}px` : ''">
                 <col x-show="style.show_row_sum && style.row_sum_position === 'left'">
                 <template x-for="col in columns.filter(c => !c.hidden)" :key="col.uid"><col></template>
                 <col x-show="style.show_row_sum && style.row_sum_position === 'right'">
@@ -458,7 +502,7 @@
                     <span class="tbl-cell"><span class="tbl-cell-number"><span class="tbl-number-whole" x-text="sumNumberParts(row).whole"></span><span class="tbl-number-separator" x-text="sumNumberParts(row).separator"></span><span class="tbl-number-fraction" x-text="sumNumberParts(row).fraction"></span></span><span class="tbl-cell-unit" x-show="style.show_units && sumUnit(row)" x-text="sumUnit(row)"></span></span>
                   </td>
                   <template x-for="col in columns" :key="col.uid">
-                    <td x-show="row.row_type !== 'separator' && !col.hidden" class="tbl-num" :class="{'tbl-error': cellError(row, col), 'tbl-comparison-col': isComparisonColumn(col)}" :style="colWidthStyle(col) + heatmapStyleFor(row, col)">
+                    <td x-show="row.row_type !== 'separator' && !col.hidden" class="tbl-num" :class="{'tbl-error': cellError(row, col), 'tbl-comparison-col': isComparisonColumn(col), 'tbl-flash': flashed[col.uid + ':' + row.uid]}" :style="colWidthStyle(col) + heatmapStyleFor(row, col)">
                       <span class="tbl-cell"><span class="tbl-cell-number"><span class="tbl-number-whole" x-text="cellNumberParts(row, col).whole"></span><span class="tbl-number-separator" x-text="cellNumberParts(row, col).separator"></span><span class="tbl-number-fraction" x-text="cellNumberParts(row, col).fraction"></span></span><span class="tbl-cell-unit" x-show="style.show_units && cellUnit(row, col)" x-text="cellUnit(row, col)"></span></span>
                       <span class="tbl-cell-deviation" x-show="style.show_deviation && !row.percent_of_total && deviationText(row, col)" :data-tooltip-fixed="deviationTitle(row, col)" x-text="deviationText(row, col)"></span>
                     </td>
@@ -467,7 +511,7 @@
                     <span class="tbl-cell"><span class="tbl-cell-number"><span class="tbl-number-whole" x-text="sumNumberParts(row).whole"></span><span class="tbl-number-separator" x-text="sumNumberParts(row).separator"></span><span class="tbl-number-fraction" x-text="sumNumberParts(row).fraction"></span></span><span class="tbl-cell-unit" x-show="style.show_units && sumUnit(row)" x-text="sumUnit(row)"></span></span>
                   </td>
 <td x-show="row.row_type === 'separator'" :colspan="tableColspan">
-                    <span class="tbl-separator-content"><span class="tbl-separator-line" aria-hidden="true"></span><span class="tbl-separator-label" x-show="row.show_label && row.label.trim()" x-text="row.label.trim()"></span><span class="tbl-separator-line" x-show="row.show_label && row.label.trim()" aria-hidden="true"></span></span>
+                    <span class="tbl-separator-content" :class="{'is-blank': row.hide_line}"><span class="tbl-separator-line" aria-hidden="true"></span><span class="tbl-separator-label" x-show="row.show_label && row.label.trim()" x-text="row.label.trim()"></span><span class="tbl-separator-line" x-show="row.show_label && row.label.trim()" aria-hidden="true"></span></span>
                   </td>
                 </tr>
               </template>
@@ -478,6 +522,10 @@
         </div>
         </div>
         <p class="tbl-hint hint-status" x-show="loading" style="margin-top:8px;">{{ _("Lädt …") }}</p>
+        <p class="tbl-hint hint-status" x-show="loadError && !loading" x-cloak style="margin-top:8px;">
+          <span x-text="t('Die Daten konnten nicht geladen werden.')"></span>
+          <button type="button" class="btn" @click="load()">{{ _("Erneut versuchen") }}</button>
+        </p>
 
         <div class="save-row" x-show="editing">
           <input type="text" placeholder="{{ _('Name der Tabelle …') }}" maxlength="{{ max_name_length }}" x-model="name">

@@ -72,6 +72,17 @@ def test_average_and_band_use_only_complete_previous_years() -> None:
     assert result["total"] == pytest.approx(0.5 * (slot + 1))
 
 
+def test_older_years_are_capped_but_average_and_band_use_all_complete_years() -> None:
+    daily = _years({year: float(year - 2018) for year in range(2019, 2026)})  # 2019 bis 2025, sieben Jahre
+    daily[date(2026, 1, 1)] = 1.0
+    result = wa.precipitation(daily, date(2026, 1, 2), 1.0)
+    assert result["avg_years"] == list(range(2019, 2026))  # alle sieben im Mittel
+    # Gezeigt: das Vorjahr (eigene Linie) plus vier ältere = fünf frühere Jahre.
+    assert result["previous_year"] == 2025
+    assert sorted(result["older"]) == ["2021", "2022", "2023", "2024"]
+    assert result["older"]["2024"][0] == pytest.approx(6.0)
+
+
 def test_average_needs_two_years_for_the_comparison() -> None:
     result = wa.precipitation(_years({2025: 2.0}) | {date(2026, 1, 1): 1.0}, date(2026, 1, 2), 1.0)
     assert result["avg_to_date"] is None and result["avg_years"] == [2025]
@@ -162,11 +173,13 @@ def test_count_kenntage_over_a_window() -> None:
     assert wa.count_kenntage([], TZ, start, end, today) is None
 
 
-def test_records_need_a_year_of_data_and_name_the_days() -> None:
+def test_records_start_with_the_first_day_and_name_the_days() -> None:
     today = date(2026, 6, 1)
     days = list(_days(date(2025, 5, 1), date(2026, 5, 31)))
     points = [_point(day, value=10.0, low=2.0, high=18.0) for day in days]
-    assert wa.records(points[:100], TZ, today) is None
+    short = wa.records(points[:100], TZ, today)  # schon ein junges Archiv hat Rekorde
+    assert short["days"] == 100 and short["since"] == "2025-05-01"
+    assert wa.records([], TZ, today) is None
     hottest = _point(date(2025, 8, 3), value=27.5, low=19.0, high=38.2)
     coldest = _point(date(2026, 1, 20), value=-8.0, low=-14.0, high=-2.0)
     points[points.index(next(p for p in points if p.day_start == hottest.day_start))] = hottest
@@ -270,3 +283,31 @@ def test_heating_days_cover_only_closed_heating_season_days_with_data() -> None:
 
 def test_heating_days_without_counters_are_empty() -> None:
     assert wa.heating_days([_point(date(2026, 1, 5))], [[]], [1.0], TZ, date(2026, 2, 1)) == []
+
+
+def test_precipitation_months_compare_the_running_month_over_the_same_period() -> None:
+    """Tabelle „Niederschlag je Monat“: Vorjahr und Ø begrenzen sich im laufenden Monat auf dessen bisherige Tage,
+    spätere Monate haben nur Vorjahr und Ø, und Regentage zählen erst ab der Schwelle."""
+    daily: dict[date, float] = {}
+    for year in (2023, 2024, 2025):  # drei komplette Jahre (Zeile an jedem Tag): 1 mm an jedem 1. und 20. eines Monats
+        for offset in range(365):
+            day = date(year, 1, 1) + timedelta(days=offset)
+            daily[day] = 1.0 if day.day in (1, 20) else 0.0
+    daily[date(2026, 3, 2)] = 4.0
+    daily[date(2026, 3, 3)] = 0.4
+    daily[date(2026, 4, 1)] = 2.0
+    result = wa.precipitation(daily, date(2026, 4, 10), 1.0)
+    months = {row["month"]: row for row in result["months"]}
+    assert len(months) == 12
+    assert months[3]["current"] == 4.4 and months[3]["wet_days"] == 1 and not months[3]["running"]
+    assert months[3]["previous"] == 2.0 and months[3]["avg"] == 2.0  # ganzer Monat
+    assert months[4]["running"] and months[4]["current"] == 2.0
+    assert months[4]["previous"] == 1.0 and months[4]["avg"] == 1.0  # nur bis zum 10.04. (ohne den 20.)
+    assert months[4]["past"] == {"2025": 1.0, "2024": 1.0, "2023": 1.0}  # jedes Vorjahr im selben Ausschnitt
+    assert months[3]["past"] == {"2025": 2.0, "2024": 2.0, "2023": 2.0} and "2022" not in months[3]["past"]
+    assert months[5]["current"] is None and months[5]["wet_days"] is None
+    assert months[5]["previous"] == 2.0 and months[5]["avg"] == 2.0  # spätere Monate: ganzer Monat
+    assert months[1]["current"] is None  # im laufenden Jahr gibt es für den Januar keine Zeile
+
+    only_one_year = {day: value for day, value in daily.items() if day.year in (2025, 2026)}
+    assert all(row["avg"] is None for row in wa.precipitation(only_one_year, date(2026, 4, 10), 1.0)["months"])

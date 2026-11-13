@@ -60,6 +60,29 @@ def test_fit_is_a_line_through_days_below_the_limit_only() -> None:
     assert _run(f'h.fit({json.dumps(rows)}, {{limit: 15}}, 2024)') is None
 
 
+def test_fit_can_skip_the_cold_days() -> None:
+    cold = [[f"2025-12-{d:02d}", float(t), [26.0]] for d, t in zip(range(1, 7), (-6, -5, -4, -3, -2, -1), strict=True)]  # flach im Frost
+    warm = [[f"2025-12-{d:02d}", float(t), [24 - 1.5 * t]] for d, t in zip(range(10, 20), range(0, 10), strict=True)]
+    rows = json.dumps(cold + warm)
+    assert _run(f"h.fit({rows}, {{limit: 15}}, 2025)")["slope"] > -1.5  # über alles: der flache Frost zieht die Steigung herunter
+    assert _run(f"h.fit({rows}, {{limit: 15}}, 2025, 0)")["slope"] == pytest.approx(-1.5)
+
+
+def test_smooth_follows_a_bend_and_needs_enough_days() -> None:
+    rows = []
+    for index in range(60):
+        temp = -6 + index * 0.25  # -6 bis 8,75 °C
+        kwh = 26.0 if temp < 0 else 26.0 - 1.4 * temp  # flach im Frost, dann fallend
+        rows.append([f"2025-12-{index % 28 + 1:02d}", temp, [kwh]])
+    rows = [[f"2025-{11 + index // 28 % 2:02d}-{index % 28 + 1:02d}", r[1], r[2]] for index, r in enumerate(rows)]
+    curve = _run(f'h.smooth({json.dumps(rows)}, {{limit: 15, on: [true]}}, 2025)')
+    assert curve[0][0] == pytest.approx(-6) and curve[-1][0] == pytest.approx(8.75)
+    value = {round(x): y for x, y in curve}
+    assert value[-5] == pytest.approx(26.0, abs=0.3)  # im Frost flach, keine Gerade darüber hinaus
+    assert value[6] == pytest.approx(26.0 - 1.4 * 6, abs=0.5)
+    assert _run(f'h.smooth({json.dumps(rows[:10])}, {{limit: 15, on: [true]}}, 2025)') is None  # zu wenige Tage
+
+
 def test_shares_group_by_month_and_counter() -> None:
     days = '[["2025-10-02", 5, [1, 2]], ["2025-10-03", 5, [3, 4]], ["2026-01-05", 0, [10, 0]], ["2026-07-01", 20, [9, 9]]]'
     totals = _run(f"h.shares({days}, [0, 1], 2025)")
@@ -68,3 +91,67 @@ def test_shares_group_by_month_and_counter() -> None:
 
 def test_periods_are_listed_newest_first() -> None:
     assert _run('h.periods([["2023-11-01", 1, [1]], ["2025-02-01", 1, [1]], ["2024-12-01", 1, [1]], ["2025-07-01", 1, [1]]])') == [2024, 2023]
+
+
+def _sun_days() -> str:
+    """Zehn sonnige und zehn trübe Heiztage; sonnige verbrauchen bei gleichem Gradtag weniger."""
+    days = []
+    sun = {}
+    for i in range(10):
+        day = f"2025-12-{i + 1:02d}"
+        days.append([day, 5.0, [12.0 + (i % 2)]])  # 15 Gt, 12 bis 13 kWh
+        sun[day] = "sunny"
+        other = f"2025-12-{i + 11:02d}"
+        days.append([other, 5.0, [15.0 + (i % 2)]])  # 15 Gt, 15 bis 16 kWh
+        sun[other] = "overcast"
+    return f"{json.dumps(days)}, {json.dumps(sun)}"
+
+
+def test_class_stats_group_heating_days_by_sun_class() -> None:
+    stats = _run(f"h.classStats({_sun_days()[:_sun_days().index('], {') + 1]}, {{room: 20, limit: 15, on: [true]}}, {_sun_days()[_sun_days().index('], {') + 3:]})")
+    assert stats["sunny"]["n"] == 10 and stats["overcast"]["n"] == 10 and stats["mixed"]["n"] == 0
+    assert stats["sunny"]["temp"] == 5 and stats["sunny"]["kwh"] == 12.5
+    assert round(stats["sunny"]["q"], 3) == round(125 / 150, 3)
+
+
+def test_class_stats_skip_days_without_degree_days_or_class() -> None:
+    days = '[["2025-12-01", 14.9, [3]], ["2025-12-02", 5, [9]], ["2025-12-03", 5, [9]]]'
+    sun = '{"2025-12-01": "sunny", "2025-12-02": "sunny"}'
+    stats = _run(f'h.classStats({days}, {{room: 15.5, limit: 15, on: [true]}}, {sun})')
+    assert stats["sunny"]["n"] == 1  # 14,9 °C: nur 0,6 Gradtage, 03.12. ohne Klasse
+
+
+def test_compare_names_clear_differences_and_refuses_thin_or_noisy_ones() -> None:
+    days, sun = _sun_days().split("], {", 1)
+    days, sun = days + "]", "{" + sun
+    opts = "{room: 20, limit: 15, on: [true]}"
+    clear = _run(f"(() => {{ const s = h.classStats({days}, {opts}, {sun}); return h.compare(s.sunny, s.overcast); }})()")
+    assert clear["status"] == "clear" and clear["percent"] < -15
+    few = _run(f"(() => {{ const s = h.classStats({days}, {opts}, {sun}); return h.compare(s.mixed, s.overcast); }})()")
+    assert few == {"status": "few", "percent": None}
+    noisy = _run(
+        "(() => { const rates = [1, 9, 2, 8, 3, 7, 4, 6]; "
+        "const g = {n: 8, q: 5, rates}; const b = {n: 8, q: 5.2, rates: rates.slice().reverse()}; return h.compare(g, b); })()"
+    )
+    assert noisy["status"] == "unclear"
+
+
+def test_summary_of_a_running_period_is_compared_with_the_same_cut_of_the_previous_one() -> None:
+    days = (
+        '[["2024-10-01", 5, [10, 1]], ["2024-10-02", 16, [2, 1]], ["2024-12-01", 0, [50, 5]],'
+        ' ["2025-10-01", 5, [8, 2]], ["2025-10-02", 10, [6, 3]], ["2025-10-03", 20, [1, 1]]]'
+    )
+    got = _run(f'h.summary({days}, {{room: 20, limit: 15, on: [true, true]}}, 2025, "2025-10-03")')
+    # Heute ist der 3.10.: die laufende Periode zählt bis gestern, die Vorperiode bis zum 2.10. (ohne den 1.12.).
+    assert got["running"] is True
+    assert (got["now"]["kwh"], got["now"]["gt"], got["now"]["heatDays"], got["now"]["n"]) == (19, 25, 2, 2)
+    assert got["now"]["perCounter"] == [14, 5]
+    assert (got["before"]["kwh"], got["before"]["heatDays"]) == (14, 1)
+
+
+def test_summary_of_a_finished_period_uses_the_whole_period_and_none_without_a_predecessor() -> None:
+    days = '[["2024-10-01", 5, [10]], ["2024-12-01", 0, [50]], ["2025-10-01", 5, [8]]]'
+    done = _run(f'h.summary({days}, {{room: 20, limit: 15, on: [true]}}, 2024, "2026-06-10")')
+    assert done["running"] is False and done["now"]["kwh"] == 60 and done["before"] is None
+    full = _run(f'h.summary({days}, {{room: 20, limit: 15, on: [true]}}, 2025, "2026-06-10")')
+    assert full["before"]["kwh"] == 60  # ganze Vorperiode, nicht gekürzt

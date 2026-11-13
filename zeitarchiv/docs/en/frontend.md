@@ -681,6 +681,46 @@ Two peculiarities that one would otherwise handle differently when rebuilding:
 Bars and colors come from `.usage-bar-track`/`.usage-bar-fill`, the same
 building block as the host storage space in `housekeeping.html`.
 
+## Wide layout (experimental)
+
+Setting `page_layout` (`standard`|`wide`, per installation, default `standard`; `app/page_layout.py`). With
+`wide`, `<html>` carries `data-page-layout="wide"` (`base.html`); with `standard` the attribute is absent, so
+nothing looks different from before while the switch is off.
+
+- **Rules:** all width rules sit under `:root[data-page-layout="wide"]` and inside `@media (min-width:1200px)`
+  or `1500px` (four columns). A source test (`tests/test_wide_layout.py`) fails if a rule sits outside.
+- **Tokens:** `--page-max` (1120 px; with the switch 1920 px from 1200 px) and `--page-narrow` (1120 px). Pages
+  without opt-in (forms, settings, energy dashboard) and the backup bar (`.rw-bar-in`) stay at `--page-narrow`,
+  centered. Opt-in is the class `.page-wide` (exactly ten templates: charts, tables,
+  table editor, chart editor, entity list, dashboard, dashboard list, overview, energy and weather dashboard).
+- **Dashboard:** the grid is up to 1440 px wide (`--dash-max`) and centered; the row height grows with the
+  window width (`max(--dashboard-row-height, column width × .58)`, computed from `vw`). `container-type` must
+  **never** be set on `.dgroup` or `.dashboard-grid`: the `position:fixed` overlays of the tiles (menu,
+  settings, "Add tile") would attach to the grid instead of the window.
+- **Four columns:** `dashboards.grid_columns` (3|4, default 3). Stored sizes are never clipped, only in the
+  display (CSS attribute rules; there is no `span min()`). Precise mode uses `grid_columns × 2` and
+  `grid_columns` (`dashboard_grid.size_limits()`). The grid lives in `dashboard_detail.css` **and**
+  `entities.css`; every change belongs in both, tests check both.
+- **Tile grids of the overview and the dashboard list** (`.ov-tiles`, `.dash-grid`): at most five columns from 1500 px
+  (minimum width `max(230px/240px, (100% − 4 · 14px) / 5)`); below that and without the switch it stays `auto-fill`.
+- **Weather tiles:** `WetterLayout.tileColumns(count, width, maxColumns)` gets the cap 6 in the wide layout
+  (`WIDE_TILE_MAX_COLUMNS` in `wetter.js`); the rule "no single tile in the last row" still applies, so eight tiles
+  stand as 4+4, twelve as 6+6.
+- **Redraw:** chart tiles listen with a `ResizeObserver` (one per page, `dashboard-tiles.js`) instead of only
+  `window.resize`. The weather, long-term and most energy charts already have their own observers; only the
+  energy dashboard's Sankey hangs on the window and recomputes its minimum height (≈ width / 3, wide layout only)
+  on resize.
+- **Energy and weather dashboard:** `.page-wide`, but the content (`#energiedashboard-root`, `#wetter-root`) stays at
+  1440 px in all tabs and is centered (wider would turn the Sankey, heatmap and fixed-height charts into flat
+  strips; one frame for all tabs so nothing jumps when switching tabs). From 1500 px the charts are somewhat taller
+  (340/400 px, heatmap 240 px), the weather tables fill the card (`min-width:100%`). Tooltips at the right card edge
+  (storage level, last two KPI tiles) open to the left, otherwise 1500–1920 px get horizontal overflow. The rules
+  live in each page CSS, not in `app.css`: `.wt-chart`, `.wt-card` etc. are used elsewhere too.
+- **Breakpoints:** 480/640/820 (mobile), new 1200/1500/1920 (only with the switch), plus the special cases
+  520/560/700/760/900.
+- **Checking:** `scripts/layout_shots.py` (Playwright, local only, not in CI) records screenshots and the
+  geometry of all tiles; the geometry is compared with a 0.5 px tolerance.
+
 ## Mobile list view
 
 Below 640 px, two modules work together that a new page does not have to

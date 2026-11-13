@@ -231,6 +231,15 @@
   // ebenfalls 60s) — ohne das blieb ein offen gelassenes Energiedashboard
   // beliebig lange auf dem Stand des letzten manuellen Reloads stehen.
   const ENERGIEDASHBOARD_REFRESH_INTERVAL_MS = 60000;
+  // Der Takt oben bleibt, geladen wird aber nur, wenn seit dem letzten Laden mindestens so lange vergangen ist.
+  // Eine Minute Verbrauch ändert eine Monats- oder Jahressumme kaum, kostet den Server aber das Mehrfache einer
+  // Tagesansicht (Monat/Jahr: mehrere Hundert ms auf einem schnellen Rechner, auf einem Pi und bei offenem Tab auf
+  // einem Wandtablet dauerhaft Last). Stunde und Tag ändern sich spürbar und bleiben bei einer Minute.
+  const ENERGIEDASHBOARD_REFRESH_BY_RANGE_MS = {hour: 60000, day: 60000, week: 300000, month: 600000, year: 900000};
+  // Der Takt läuft nie auf die Millisekunde genau; ohne diesen Spielraum würde ein Intervall von 10 min erst beim
+  // nächsten Takt (11 min) greifen.
+  const REFRESH_SLACK_MS = 5000;
+  const {energyHeatmap, energyShares} = window.ElementChartRender;
   const SHARE_COLORS = ['--chart-1', '--chart-2', '--chart-3', '--chart-4', '--chart-5', '--chart-6', '--chart-7', '--chart-8'];
   // Dieselbe Breakpoint-Zahl wie die übrigen @media(max-width:560px)-Regeln
   // auf dieser Seite. Sankey-Orientierung wechselt nur bei tatsächlichem
@@ -261,6 +270,12 @@
   // sich nicht mehr überlappen — etwas weniger als die 80px Label-Breite, weil
   // kaum ein Name die volle Breite ausnutzt.
   const SANKEY_NARROW_LABEL_PITCH = 68;
+  // Breite Darstellung (experimentell, Einstellungen → Darstellung): <html data-page-layout="wide">.
+  const isWideLayout = () => document.documentElement.dataset.pageLayout === 'wide';
+  // Mindesthöhe des Sankey bei breiter Darstellung: etwa ein Drittel der Breite, damit die Flüsse bei
+  // 1440 px nicht zu flachen Bändern werden. Ohne den Schalter 0, also die bisherige Höhe.
+  const sankeyWideMinHeight = (wrap) => (isWideLayout() && wrap ? wrap.clientWidth / 3 : 0);
+  let sankeyResizePending = false;
   let lastSankeyData = null;
   let lastSankeyIsNarrow = null;
   let currentRenderChart = null;
@@ -299,10 +314,19 @@
     history.replaceState(null, '', url);
   }
 
+  // Versatz (in Tagen, ≤ 0) des Tages JJJJ-MM-TT zu heute in der Server-Zeitzone; null/heute/Zukunft = 0.
+  function dayOffsetFor(dateStr) {
+    if (!dateStr) return 0;
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const now = window.ServerTime.parts(Date.now() / 1000);
+    const days = Math.round((Date.UTC(y, m - 1, d) - Date.UTC(now.year, now.month - 1, now.day)) / 86400000);
+    return Math.min(0, days);
+  }
+
   window.energieFlow = function energieFlow() {
     const initialPeriod = readInitialRangeOffset();
     return {
-      // Reiter „Übersicht“ (der Energiefluss) und „Langzeit“ (Vergleich mit dem Vorjahr, energie-langzeit.js).
+      // Reiter „Übersicht“ (der Energiefluss), „Verbraucher“ und „Langzeit“ (energie-langzeit.js).
       tab: 'over',
       ranges: [{key: 'hour', label: t('Stunde')}, {key: 'day', label: t('Tag')}, {key: 'month', label: t('Monat')}, {key: 'year', label: t('Jahr')}],
       range: initialPeriod.range,
@@ -314,6 +338,7 @@
       // this.offset, und der nächste Pfeil sprang unerwartet.
       _loadSeq: 0,
       _heatmapSeq: 0,
+      _lastLoadAt: 0,  // Zeitpunkt des letzten load()-Starts, für das gestaffelte Auto-Refresh
       kpi: {},
       kpiCompare: {},
       compareLabel: '',
@@ -384,8 +409,37 @@
         if (tab === 'over') this.$nextTick(() => window.dispatchEvent(new Event('resize')));
       },
 
+      // Meldet den Tag, bis zu dem der Energiefluss zeigt, an den Reiter „Vergleich“ (energie-langzeit.js, energieVergleich): der
+      // letzte Tag des Zeitraums, oder null für „jetzt“, wenn er heute oder später ist. Er wird dort zum gemeinsamen Stichtag. Nur eine
+      // Änderung wird gemeldet, damit das Nachladen der Daten einen im Reiter „Vergleich“ gewählten Stichtag nicht zurücksetzt.
+      announceWindow(data) {
+        const ZT = window.ServerTime;
+        const iso = (ts) => {
+          const p = ZT.parts(ts);
+          return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+        };
+        const day = iso(data.window_end_ts - 1);
+        const at = day < iso(Date.now() / 1000) ? day : null;
+        if (window.energieWindowAt === at) return;
+        window.energieWindowAt = at;
+        window.dispatchEvent(new CustomEvent('energie-window', {detail: {at}}));
+      },
+
+      // Gegenstück zu announceWindow(): Der Stichtag der Seite (Alpine-Store dashStichtag, im Reiter „Vergleich“ mit Pfeilen,
+      // Kalender und „Heute“ bedienbar) gilt auch für den Energiefluss. Wechselt dort der Tag, zeigt er diesen Tag (Zeitraum
+      // „Tag“); „Heute“ führt zur laufenden Periode zurück. Zeigt der Energiefluss den Tag schon (er hat ihn selbst gemeldet,
+      // etwa als Ende eines Monats), bleibt er, wie er ist: so überschreibt die Meldung des Energieflusses nicht seine eigene Periode.
+      followStichtag() {
+        const store = window.Alpine && Alpine.store('dashStichtag');
+        if (!store || store.date === (window.energieWindowAt || null)) return;
+        this.range = 'day';
+        this.offset = dayOffsetFor(store.date);
+        syncUrlWithPeriod(this.range, this.offset);
+        this.load();
+      },
+
       tabKey(event) {
-        const keys = ['over', 'long'];
+        const keys = ['over', 'cmp', 'long'].filter((key) => document.getElementById('ed-tab-' + key));
         const step = {ArrowRight: 1, ArrowLeft: -1}[event.key];
         if (!step) return;
         const next = keys[(keys.indexOf(this.tab) + step + keys.length) % keys.length];
@@ -395,6 +449,20 @@
       },
 
       init() {
+        // Der Reiter „Vergleich“ schickt in den Reiter „Langzeit“ (Knopf unter der Tabelle bei einer ausgewählten Zeile).
+        window.addEventListener('energie-goto', (event) => {
+          if (this.$root.isConnected) this.showTab(event.detail);
+        });
+        // Gemeinsamer Stichtag: im Reiter „Vergleich“ gewählt, gilt er auch für den Energiefluss (followStichtag).
+        window.addEventListener('dashboard-stichtag', () => {
+          if (this.$root.isConnected) this.followStichtag();
+        });
+        // Ein Link mit ?date=… (ohne Zeitraum) öffnet den Energiefluss an diesem Tag.
+        const startParams = new URLSearchParams(window.location.search);
+        if (window.DashboardStichtag && !startParams.has('range') && !startParams.has('offset')) {
+          this.range = 'day';
+          this.offset = dayOffsetFor(window.DashboardStichtag);
+        }
         // Nach einem htmx-Swap (z. B. Rollen gespeichert → zurück zur
         // Ansicht) mountet Alpine diese Komponente NEU auf einem frischen
         // DOM-Knoten, aber chartInstance ist eine modulweite Closure-
@@ -446,6 +514,13 @@
             const isNarrow = sankeyIsNarrow();
             if (lastSankeyData && isNarrow !== lastSankeyIsNarrow && currentRenderChart) {
               currentRenderChart(lastSankeyData);
+            } else if (lastSankeyData && currentRenderChart && isWideLayout() && !sankeyResizePending) {
+              // Breite Darstellung: die Mindesthöhe folgt der Breite (sankeyWideMinHeight), also bei Größenänderung neu rechnen.
+              sankeyResizePending = true;
+              requestAnimationFrame(() => {
+                sankeyResizePending = false;
+                if (lastSankeyData && currentRenderChart) currentRenderChart(lastSankeyData);
+              });
             }
           });
         }
@@ -466,6 +541,9 @@
           // abgeschlossene Vorperiode (offset != 0) bleibt für immer gleich,
           // ein erneutes Laden wäre reine Verschwendung.
           if (this.offset !== 0) return;
+          // Je länger der Zeitraum, desto seltener (siehe ENERGIEDASHBOARD_REFRESH_BY_RANGE_MS).
+          const interval = ENERGIEDASHBOARD_REFRESH_BY_RANGE_MS[this.range] || ENERGIEDASHBOARD_REFRESH_INTERVAL_MS;
+          if (Date.now() - this._lastLoadAt < interval - REFRESH_SLACK_MS) return;
           // Offene Dialoge (Trend-Popups, Mehrfach-Entitäten-Auswahl) nicht
           // unter der Hand neu rendern, während der Nutzer sie gerade liest.
           if (document.querySelector('dialog[open]')) return;
@@ -888,10 +966,10 @@
           xAxis: {type: 'category', data: data.labels, axisLabel: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, axisLine: {lineStyle: {color: gridLine}}},
           yAxis: [{
             type: 'value', name: unit.trim(), nameTextStyle: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, max: isShare ? 100 : undefined,
-            axisLabel: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, splitLine: {lineStyle: {color: gridLine}},
+            axisLabel: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11), formatter: (value) => this.fmt(value)}, splitLine: {lineStyle: {color: gridLine}},
           }].concat(hasSoc ? [{
             type: 'value', name: '%', min: 0, max: 100, nameTextStyle: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)},
-            axisLabel: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11)}, splitLine: {show: false},
+            axisLabel: {color: ink, fontFamily: fontMono(), fontSize: scaledFont(11), formatter: (value) => this.fmt(value)}, splitLine: {show: false},
           }] : []),
           series: data.series.map((row, i) => ({
             name: row.name,
@@ -1048,8 +1126,12 @@
 
       async load() {
         const seq = ++this._loadSeq;
+        this._lastLoadAt = Date.now();
         this.loading = true;
         this.loadError = false;
+        // Die Heatmap ist ein eigener, unabhängiger Abruf (eigener Fehlerpfad, eigene Laufnummer): Sie startet
+        // gleichzeitig mit den Hauptdaten statt erst danach. Vorher kamen beide nacheinander (zweimal ca. 110 ms).
+        this.loadHeatmap();
         try {
           const params = new URLSearchParams({range: this.range, offset: String(this.offset)});
           const res = await fetch(`energiedashboard/data?${params}`);
@@ -1063,6 +1145,7 @@
           this.quality = data.quality;
           this.periodText = periodLabel(data);
           this.windowStart = data.window_start_ts;
+          this.announceWindow(data);
           this.hasFlow = data.nodes.some(n => n.role !== 'bus' && n.value > 0);
           this.verbraucherBreakdown = data.verbraucher_breakdown || [];
           this.versorgungBreakdown = data.versorgung_breakdown || [];
@@ -1080,11 +1163,6 @@
         } finally {
           if (seq === this._loadSeq) this.loading = false;
         }
-        if (seq !== this._loadSeq) return;
-        // Eigener, unabhängiger Fetch (eigenes try/catch unten) — ein
-        // Fehlschlag hier soll die restliche Seite nicht als loadError
-        // markieren, die Karte blendet sich per x-show einfach aus.
-        this.loadHeatmap();
       },
 
       // Popup öffnen und die Trend-Daten dafür (einmalig) nachladen. Das
@@ -1171,44 +1249,10 @@
         if (!el || typeof echarts === 'undefined' || !data.rows || !data.rows.length) return;
         if (!heatmapChartInstance) heatmapChartInstance = echarts.init(el);
         const palette = colors();
-        const accent = cssVar('--accent-line');
-        const surfaceAlt = cssVar('--surface-alt');
-        const dayLabels = data.rows.map((row) => row.label);
-        const hourLabels = Array.from({length: 24}, (_, h) => String(h));
-        const cells = [];
-        data.rows.forEach((row, rIdx) => {
-          row.hours.forEach((value, hIdx) => {
-            if (value != null) cells.push([hIdx, rIdx, value]);
-          });
-        });
-        const fmt = (value) => this.fmt(value, value < 10 ? 2 : 1);
-        heatmapChartInstance.setOption({
-          tooltip: {
-            trigger: 'item',
-            formatter: (p) => `${p.marker}${dayLabels[p.value[1]]} ${p.value[0]}:00: <strong>${fmt(p.value[2])} kWh</strong>`,
-          },
-          grid: {containLabel: true, left: 4, right: 8, top: 8, bottom: 4},
-          xAxis: {
-            type: 'category', data: hourLabels, position: 'top',
-            splitArea: {show: false}, axisLine: {show: false}, axisTick: {show: false},
-            axisLabel: {
-              color: palette.ink, fontFamily: fontMono(), fontSize: scaledFont(9), interval: 2, margin: 4,
-              formatter: (value) => value + ':00',
-            },
-          },
-          yAxis: {
-            type: 'category', data: dayLabels, inverse: true,
-            axisLine: {show: false}, axisTick: {show: false},
-            axisLabel: {color: palette.ink, fontSize: scaledFont(10.5)},
-          },
-          visualMap: {show: false, min: 0, max: data.max_value || 1, inRange: {color: [surfaceAlt, accent]}},
-          series: [{
-            type: 'heatmap',
-            data: cells,
-            itemStyle: {borderColor: cssVar('--surface'), borderWidth: 1, borderRadius: 2},
-            emphasis: {itemStyle: {shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.25)'}},
-          }],
-        }, true);
+        heatmapChartInstance.setOption(energyHeatmap(data, {
+          colors: {ink: palette.ink, accent: cssVar('--accent-line'), surfaceAlt: cssVar('--surface-alt'), surface: cssVar('--surface'), mono: fontMono()},
+          font: scaledFont,
+        }), true);
         // Robuster als der $nextTick()-Zeitpunkt allein (der die Karte nur
         // beim JETZIGEN Sichtbarwerden trifft): ResizeObserver feuert bei
         // JEDER tatsächlichen Größenänderung des Containers — u. a. genau
@@ -1492,7 +1536,7 @@
         if (wrap && wrap.classList.contains('edash-sankey-wrap')) {
           const neueHoehe = isNarrow
             ? ''
-            : Math.round(Math.min(760, Math.max(420, dichtesteEbene * 52))) + 'px';
+            : Math.round(Math.min(760, Math.max(420, dichtesteEbene * 52, sankeyWideMinHeight(wrap)))) + 'px';
           if (wrap.style.height !== neueHoehe) {
             wrap.style.height = neueHoehe;
             // ECharts hat seine Größe beim init() gemerkt — ohne resize()
@@ -1645,31 +1689,9 @@
         const el = this.$refs.shareChartEl;
         if (!el || typeof echarts === 'undefined' || !breakdown.length) return;
         if (!shareChartInstance) shareChartInstance = echarts.init(el);
-        const surface = cssVar('--surface');
-        const fmt = (value) => this.fmt(value, value < 10 ? 2 : 1);
-        shareChartInstance.setOption({
-          tooltip: {
-            trigger: 'item',
-            formatter: (p) => `${p.marker}${escapeHtml(p.name)}: <strong>${fmt(p.value)} kWh</strong> (${this.fmt(p.percent, 0)} %)`,
-          },
-          series: [{
-            type: 'pie',
-            radius: ['52%', '85%'],
-            center: ['50%', '50%'],
-            avoidLabelOverlap: true,
-            itemStyle: {borderColor: surface, borderWidth: 2},
-            label: {show: false},
-            labelLine: {show: false},
-            emphasis: {
-              scaleSize: 6,
-              itemStyle: {shadowBlur: 12, shadowColor: 'rgba(0,0,0,0.25)'},
-            },
-            data: breakdown.map((item, idx) => ({
-              name: item.name, value: item.value,
-              itemStyle: {color: this.shareColor(idx)},
-            })),
-          }],
-        }, true);
+        shareChartInstance.setOption(energyShares(breakdown, {
+          colorAt: (idx) => this.shareColor(idx), surface: cssVar('--surface'),
+        }), true);
         // Dasselbe ResizeObserver-Muster wie renderHeatmap()/#storage-pie:
         // die Kachel steht unter x-show und ist beim ersten setOption() oft
         // noch display:none — ECharts fällt dann auf seine 100px-Standard-
@@ -1706,40 +1728,11 @@
         const el = this.$refs.versorgungChartEl;
         if (!el || typeof echarts === 'undefined' || !breakdown.length) return;
         if (!versorgungChartInstance) versorgungChartInstance = echarts.init(el);
-        const surface = cssVar('--surface');
-        const fmt = (value) => this.fmt(value, value < 10 ? 2 : 1);
-        versorgungChartInstance.setOption({
-          tooltip: {
-            trigger: 'item',
-            formatter: (p) => `${p.marker}${escapeHtml(p.name)}: <strong>${fmt(p.value)} kWh</strong> (${this.fmt(p.percent, 0)} %)`,
-          },
-          series: [{
-            type: 'pie',
-            radius: ['52%', '85%'],
-            center: ['50%', '50%'],
-            avoidLabelOverlap: true,
-            itemStyle: {borderColor: surface, borderWidth: 2},
-            label: {show: false},
-            labelLine: {show: false},
-            emphasis: {
-              scaleSize: 6,
-              itemStyle: {shadowBlur: 12, shadowColor: 'rgba(0,0,0,0.25)'},
-            },
-            // Negative/Null-Werte (Speichernutzung in einer überwiegend
-            // ladenden Periode, siehe compute_flow()) ergäben ein
-            // negatives Tortenstück — ECharts kann das nicht sinnvoll
-            // zeichnen. Nur aus dem Donut ausgefiltert, die Tabelle zeigt
-            // die Zeile weiterhin. Da versorgungBreakdown serverseitig
-            // absteigend sortiert ist, kann ein solcher Wert nur am Ende
-            // stehen — herausfiltern verschiebt also nicht den Index der
-            // übrigen Einträge, shareColor(idx) bleibt zur Tabellenzeile
-            // konsistent.
-            data: breakdown.filter((item) => item.value > 0).map((item, idx) => ({
-              name: item.name, value: item.value,
-              itemStyle: {color: this.shareColor(idx)},
-            })),
-          }],
-        }, true);
+        // Negative/Null-Werte (Speichernutzung in einer überwiegend ladenden Periode) ergäben ein negatives Tortenstück;
+        // sie fehlen nur im Ring, die Tabelle zeigt die Zeile weiter (absteigend sortiert, die Farben bleiben konsistent).
+        versorgungChartInstance.setOption(energyShares(breakdown.filter((item) => item.value > 0), {
+          colorAt: (idx) => this.shareColor(idx), surface: cssVar('--surface'),
+        }), true);
         if (typeof ResizeObserver !== 'undefined') {
           if (versorgungResizeObserver) versorgungResizeObserver.disconnect();
           versorgungResizeObserver = new ResizeObserver(() => {

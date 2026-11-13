@@ -30,7 +30,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -421,6 +423,71 @@ def refresh_heatmap_weekday_cache_if_stale(service: "EnergieDashboardService") -
         index.set_heatmap_weekday_snapshot(range_key, grid)
 
 
+def configured_entity_ids(config: dict) -> set[str]:
+    """Alle Entitäten, die schon eine Rolle im Energiedashboard haben (Netz, Erzeuger, Speicher, Verbraucher)."""
+    used = {config.get("netzbezug"), config.get("einspeisung")}
+    used |= {row.get("entity_id") for row in (config.get("erzeuger") or []) + (config.get("verbraucher") or [])}
+    for storage in config.get("speicher") or []:
+        used |= {storage.get(key) for key in ("laden_entity_id", "entladen_entity_id", "soc_entity_id", "capacity_entity_id")}
+    return {entity_id for entity_id in used if entity_id}
+
+
+def active_role_config(index: Index) -> dict | None:
+    """Rollenbelegung oder ``None``, wenn das Energiedashboard ausgeschaltet ist (der Auswahl-Assistent bietet dann
+    keine Rollen an)."""
+    return _load_config(index) if _is_enabled(index) else None
+
+
+#: Ziele der Zuordnung aus dem Auswahl-Assistenten (ROADMAP 1.54): Felder mit einer Entität, Listen mit neuen Zeilen.
+ASSIGN_FIELDS = ("netzbezug", "einspeisung")
+ASSIGN_LISTS = ("erzeuger", "speicher", "verbraucher")
+MAX_ASSIGN = 40
+
+
+def apply_assignments(config: dict, values: list[str], options: dict[str, dict]) -> tuple[dict, int]:
+    """Kopie der Konfiguration mit den Zuordnungen „Ziel:Entität“ aus dem Auswahl-Assistenten.
+
+    Es wird nichts gespeichert: die Einrichtung zeigt das Ergebnis zum Prüfen, gespeichert wird dort. Felder werden nur
+    gesetzt, wenn sie leer sind, Listen nur angehängt; eine Entität, die schon eine Rolle hat, wird übersprungen.
+    Zählerrollen verlangen einen archivierten Zähler (``aggregation_type`` „counter“), ein Speicher (``ziel:entladen,laden``)
+    mindestens eine Seite. Ungültiges fällt still weg. Rückgabe: Konfiguration und Zahl der angewendeten Zuordnungen."""
+    merged = {**config, "erzeuger": [dict(r) for r in config.get("erzeuger") or []],
+              "speicher": [dict(r) for r in config.get("speicher") or []],
+              "verbraucher": [dict(r) for r in config.get("verbraucher") or []]}
+    used = configured_entity_ids(merged)
+
+    def usable(entity_id: str) -> bool:
+        option = options.get(entity_id)
+        return bool(entity_id) and option is not None and option["aggregation_type"] == "counter" and entity_id not in used
+
+    applied = 0
+    for value in values[:MAX_ASSIGN]:
+        target, _sep, rest = value.partition(":")
+        if target in ASSIGN_FIELDS:
+            if not merged.get(target) and usable(rest):
+                merged[target] = rest
+                used.add(rest)
+                applied += 1
+        elif target in ("erzeuger", "verbraucher"):
+            if usable(rest):
+                row = {"entity_id": rest, "name": options[rest]["label"]}
+                merged[target].append({**row, "kwp": None} if target == "erzeuger" else {**row, "gruppe": "", "parent": ""})
+                used.add(rest)
+                applied += 1
+        elif target == "speicher":
+            out_id, _comma, in_id = rest.partition(",")
+            ids = [eid for eid in (out_id, in_id) if usable(eid)]
+            if ids and (out_id != in_id):
+                merged["speicher"].append({
+                    "name": options[ids[0]]["label"], "entladen_entity_id": out_id if out_id in ids else "",
+                    "laden_entity_id": in_id if in_id in ids else "", "soc_entity_id": "", "capacity_kwh": None,
+                    "capacity_entity_id": "",
+                })
+                used.update(ids)
+                applied += 1
+    return merged, applied
+
+
 def _is_enabled(index: Index) -> bool:
     return index.get_setting(SETTING_ENABLED, "0") == "1"
 
@@ -545,7 +612,16 @@ class EnergieDashboardService:
             deps.data_dir, deps.index, deps.tz, entity_series=self._entity_series,
             radiation_entity=lambda: wetter_routes.radiation_entity(deps.index),
             storage_capacity=self._storage_capacity,
+            sun_days=self._wetter_sun_days,
+            temperature_entity=lambda: wetter_routes.temperature_entity(deps.index),
         )
+
+    #: Der Wetter-Dienst entsteht in main.py nach diesem Dienst und wird dort nachgereicht (wie ``_background.energiedashboard_service``).
+    wetter: wetter_routes.WetterService | None = None
+
+    def _wetter_sun_days(self, now: datetime) -> list[dict] | None:
+        """Sonnentage des Wetterdashboards für „Ertrag und Wetter“ (Reiter „Langzeit“); None ohne Wetterdienst oder Helligkeit."""
+        return self.wetter.archive_sun_days(now) if self.wetter is not None else None
 
     def _storage_capacity(self, config: dict) -> float | None:
         """Summe der Kapazität aller Speicher mit Entlade-Entität in kWh (für die Kenntage im Reiter „Langzeit“); None, wenn sie
@@ -3504,9 +3580,12 @@ class EnergieDashboardService:
                 result.append({"month": tr(_MONTH_NAMES_DE[month - 1]), **anomaly})
         return result
 
-    def _page_context(self, request: Request) -> dict:
+    def _page_context(self, request: Request, assign: list[str] | None = None) -> dict:
         config = _load_config(self.deps.index)
+        options = {option["entity_id"]: option for option in self._entity_options()}
+        valid = [value for value in (assign or [])[:MAX_ASSIGN] if apply_assignments(config, [value], options)[1]]
         return {
+            "assign_query": urlencode([("assign", value) for value in valid]),
             "configured": _is_configured(config),
             "enabled": _is_enabled(self.deps.index),
             "config": config,
@@ -3520,9 +3599,9 @@ class EnergieDashboardService:
         deps = self.deps
 
         @router.get("/energiedashboard", response_class=HTMLResponse)
-        def energiedashboard_page(request: Request) -> HTMLResponse:
+        def energiedashboard_page(request: Request, assign: list[str] = Query(default=[])) -> HTMLResponse:
             return deps.templates.TemplateResponse(
-                request, "energiedashboard.html", self._page_context(request)
+                request, "energiedashboard.html", self._page_context(request, assign)
             )
 
         @router.post("/energiedashboard/enable")
@@ -3537,9 +3616,31 @@ class EnergieDashboardService:
             deps.index.set_setting(SETTING_ENABLED, "0")
             return {"enabled": False}
 
-        @router.get("/energiedashboard/setup", response_class=HTMLResponse)
-        def energiedashboard_setup_form(request: Request) -> HTMLResponse:
+        @router.get("/energiedashboard/setup/vorschlaege")
+        def energiedashboard_setup_suggestions() -> dict:
+            """Zuordnungen aus den Rollen des Energie-Dashboards von Home Assistant für „Aus Home Assistant übernehmen“
+            (nichts wird gespeichert). Alle archivierten Entitäten mit einer Rolle zählen, nicht nur kürzlich übernommene."""
+            # Erst hier importiert: selection_roles importiert dieses Modul.
+            from . import selection_catalog, selection_roles
+
+            catalog = selection_catalog.load(deps.data_dir)
+            if catalog is None:
+                return {"has_catalog": False, "proposals": []}
             config = _load_config(deps.index)
+            options = {option["entity_id"]: option for option in self._entity_options()}
+            ids = [row["entity_id"] for row in catalog["entities"] if row.get("energy_role") and row["entity_id"] in options]
+            proposals = [
+                {"target": item["target"], "assign": item["assign"], "confidence": item["confidence"]}
+                for item in selection_roles.energie_proposals(config, catalog["entities"], ids)
+                if apply_assignments(config, [item["assign"]], options)[1]
+            ]
+            return {"has_catalog": True, "proposals": proposals}
+
+        @router.get("/energiedashboard/setup", response_class=HTMLResponse)
+        def energiedashboard_setup_form(request: Request, assign: list[str] = Query(default=[])) -> HTMLResponse:
+            config = _load_config(deps.index)
+            options = {option["entity_id"]: option for option in self._entity_options()}
+            config, prefill_count = apply_assignments(config, assign, options)
             # Aufgelöste Kapazität je bereits konfiguriertem Speicher (nur für
             # dessen capacity_entity_id, nicht für jede Entität in
             # entity_options — dieselbe Berechnung wie im Datenendpunkt,
@@ -3560,7 +3661,7 @@ class EnergieDashboardService:
             return deps.templates.TemplateResponse(
                 request, "_energiedashboard_setup.html",
                 {
-                    "config": config, "entity_options": self._entity_options(),
+                    "config": config, "entity_options": self._entity_options(), "prefill_count": prefill_count,
                     "resolved_capacities": resolved_capacities,
                     "anomalie_schwelle_options": list(ANOMALIE_SCHWELLE_LABELS.items()),
                     **deps.app_root_context(request),
@@ -3616,6 +3717,7 @@ class EnergieDashboardService:
             kt_truebe: str = Form(""),
             kt_stark: str = Form(""),
             kt_schwach: str = Form(""),
+            kt_einsp: str = Form(""),
             langzeit_zeigen: list[str] = Form([]),
         ) -> HTMLResponse:
             if not netzbezug.strip():
@@ -3631,7 +3733,7 @@ class EnergieDashboardService:
             kenntage: dict[str, float] = {}
             for key, raw in (
                 ("autark", kt_autark), ("sonnig", kt_sonnig), ("truebe", kt_truebe),
-                ("speicher_stark", kt_stark), ("speicher_schwach", kt_schwach),
+                ("speicher_stark", kt_stark), ("speicher_schwach", kt_schwach), ("einspeisung", kt_einsp),
             ):
                 value = _parse_float(raw)
                 low, high = energie_langzeit.KENNTAGE_LIMITS[key]
@@ -3980,13 +4082,23 @@ class EnergieDashboardService:
                 raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
             return self.langzeit.compute_months(config)
 
-        @router.get("/energiedashboard/langzeit/records")
-        def energiedashboard_langzeit_records() -> dict:
-            # Rekordtage und Kenntage je Jahr aus den Tageswerten aller Rollen (Reiter „Langzeit“).
+        @router.get("/energiedashboard/langzeit/years")
+        def energiedashboard_langzeit_years() -> dict:
+            # Jahressummen je Kalenderjahr für die Karte „Jahresbilanz“ (Reiter „Langzeit“), komplett und bis zum
+            # selben Kalendertag wie heute. Das Frontend holt sie genau einmal beim ersten Öffnen des Reiters.
             config = _load_config(deps.index)
             if not energie_langzeit.is_configured(config):
                 raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
-            return self.langzeit.compute_records(config)
+            return self.langzeit.compute_years(config)
+
+        @router.get("/energiedashboard/langzeit/records")
+        def energiedashboard_langzeit_records(years: int = 0) -> dict:
+            # Rekordtage und Kenntage je Jahr aus den Tageswerten aller Rollen (Reiter „Langzeit“); years > 0: Rekorde nur
+            # über die neuesten so vielen Jahre mit Daten (Auswahl „Letzte N“ der Seite), 0 = alle.
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            return self.langzeit.compute_records(config, years=max(0, min(years, 100)))
 
         @router.get("/energiedashboard/langzeit/kenntage")
         def energiedashboard_langzeit_kenntage(field: str, year: int) -> dict:
@@ -3998,6 +4110,36 @@ class EnergieDashboardService:
                 raise HTTPException(status_code=422, detail=tr("Unbekannter Kenntag: {value}", value=field))
             return self.langzeit.compute_kenntage_days(config, field, year)
 
+        @router.get("/energiedashboard/langzeit/days")
+        def energiedashboard_langzeit_days(field: str = "erzeugung") -> dict:
+            # „Jahre im Vergleich, Tag für Tag“ (Reiter „Langzeit“): Tageswerte einer Größe als Matrix Jahr × Kalendertag.
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            if field not in energie_langzeit.DAY_FIELDS:
+                raise HTTPException(status_code=422, detail=tr("Unbekannte Größe: {value}", value=field))
+            return self.langzeit.compute_day_matrix(config, field)
+
+        @router.get("/energiedashboard/langzeit/weather")
+        def energiedashboard_langzeit_weather() -> dict:
+            # Karte „Ertrag und Wetter“ (Reiter „Langzeit“): Erzeugung je Sonnenstunde je Monat und Jahr und die Größen, die sich
+            # gegen die Außentemperatur auftragen lassen. Helligkeit und Temperatur stammen aus dem Wetterdashboard.
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            return self.langzeit.compute_weather(config)
+
+        @router.get("/energiedashboard/langzeit/temperature")
+        def energiedashboard_langzeit_temperature(size: str) -> dict:
+            # Tage mit Außentemperatur und Tageswert einer Größe (Streudiagramm „Verbrauch gegen Temperatur“).
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            try:
+                return self.langzeit.compute_temperature_days(config, size)
+            except ValueError:
+                raise HTTPException(status_code=422, detail=tr("Unbekannte Größe: {value}", value=size)) from None
+
         @router.post("/energiedashboard/langzeit/changes")
         def energiedashboard_langzeit_changes(body: energie_langzeit.TableRequest) -> dict:
             # „Was hat sich verändert?“: Verbraucher mit der größten Änderung gegenüber dem Vorjahr.
@@ -4005,6 +4147,15 @@ class EnergieDashboardService:
             if not energie_langzeit.is_configured(config):
                 raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
             return self.langzeit.compute_changes(config, body)
+
+        @router.post("/energiedashboard/langzeit/consumers")
+        def energiedashboard_langzeit_consumers(body: energie_langzeit.ConsumersRequest) -> dict:
+            # Ansicht „Verbraucher“ im Reiter „Langzeit“: Rangliste zum Stichtag, mit months=True dazu Monatswerte
+            # je Verbraucher über alle Jahre (Anteile je Jahr, Jahre × Monate je Verbraucher).
+            config = _load_config(deps.index)
+            if not energie_langzeit.is_configured(config):
+                raise HTTPException(status_code=409, detail=tr("Noch nicht eingerichtet"))
+            return self.langzeit.compute_consumers(config, body)
 
         @router.get("/energiedashboard/heatmap")
         def energiedashboard_heatmap(range: str = "week", offset: int = 0) -> dict:  # noqa: A002

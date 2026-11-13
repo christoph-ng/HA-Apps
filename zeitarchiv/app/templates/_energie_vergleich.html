@@ -1,0 +1,85 @@
+{% from "_hints.html" import hint_button, hint_body %}
+{# Reiter „Vergleich“ des Energiedashboards (Roadmap 1.45/1.49/1.50), aufgebaut wie die Vergleichskarten des Wetterdashboards: eine Karte
+   „Zeiträume im Vergleich“ mit Stichtag-Leiste (Alpine-Store dashStichtag, wie im Wetter), Spalten- und Vorjahr-Menü; darin die Bilanz
+   (Energie, Quoten, Speicher, PV-Anlage) und die Verbraucher der obersten Ebene in einer Tabelle. Darunter „Aufteilung des Verbrauchs“.
+   Die Daten kommen von POST energiedashboard/langzeit/table, /consumers und GET /months; energie-langzeit.js (energieVergleich)
+   formatiert und zeichnet nur. Der Name des Reiters steht nur im Reiterkopf von _energiedashboard_view.html. #}
+{# Verbraucher der obersten Ebene (wie energie_langzeit.top_consumers): ohne sie gibt es nur die Bilanz. #}
+{% set consumer_count = (config.verbraucher or []) | selectattr('entity_id') | rejectattr('parent') | list | length %}
+{% set hidden = config.langzeit_ausblenden or [] %}
+{% set cons_shown = consumer_count > 0 and 'verbraucher' not in hidden %}
+{# Einfache Anführungszeichen, weil tojson doppelte liefert. #}
+<div x-data='energieVergleich({{ {"consumers": consumer_count > 0, "hidden": hidden} | tojson }})' data-hints="collapsed">
+  <p class="hint hint-warn" x-show="consumersError" x-text="consumersError" x-cloak></p>
+
+  <div class="card wt-card">
+    <div class="wt-controls">
+      <h2 class="wt-h2">{{ _("Zeiträume im Vergleich") }} {{ hint_button(_("Zeiträume im Vergleich")) }}</h2>
+      {% call hint_body() %}<span x-text="note()"></span>{% endcall %}
+    </div>
+    <div class="wt-controls">
+      <div class="wt-seg" role="group" aria-label="{{ _('Zeilen') }}">
+        <button type="button" :aria-pressed="(shownFilter() === 'all').toString()" @click="setFilter('all')">{{ _("Alle") }}</button>
+        <button type="button" :aria-pressed="(shownFilter() === 'energie').toString()" @click="setFilter('energie')">{{ _("Energie") }}</button>
+        <button type="button" x-show="hasAnlage()" x-cloak :aria-pressed="(shownFilter() === 'anlage').toString()" @click="setFilter('anlage')">{{ _("Anlage") }}</button>
+{% if cons_shown %}
+        <button type="button" :aria-pressed="(shownFilter() === 'cons').toString()" @click="setFilter('cons')">{{ _("Verbraucher") }}</button>
+{% endif %}
+      </div>
+      <div class="dd-picker-wrap wt-controls-end">
+        <button type="button" class="btn" onclick="toggleDDPicker('el-cols')">{{ _("Spalten ▾") }}</button>
+        <div class="dd-picker-popover wt-vt-menu" id="el-cols-popover">
+          <template x-for="option in tablePeriodOptions()" :key="option.col">
+            <label class="dd-picker-row"><input type="checkbox" :checked="cols().includes(option.col)"
+              :disabled="cols().length === 1 && cols().includes(option.col)"
+              @change="toggleCol(option.col)"><span x-text="option.label"></span></label>
+          </template>
+          <div class="menu-section-label wt-vt-menu-sep" x-show="tableYearOptions().length" x-cloak>{{ _("Einzelne Jahre") }}</div>
+          <template x-for="option in tableYearOptions()" :key="option.col">
+            <label class="dd-picker-row"><input type="checkbox" :checked="cols().includes(option.col)"
+              :disabled="cols().length === 1 && cols().includes(option.col)"
+              @change="toggleCol(option.col)"><span x-text="option.label"></span></label>
+          </template>
+        </div>
+      </div>
+      <div class="dd-picker-wrap">
+        <button type="button" class="btn" :class="{'wt-btn-on': vorjahr}" onclick="toggleDDPicker('el-yoy')" x-text="yoyLabel()"></button>
+        <div class="dd-picker-popover wt-yoy-popover" id="el-yoy-popover">
+          <div class="dd-picker-row" role="button" tabindex="0" :class="{active: !vorjahr}" @click="setYoy('off')">{{ _("Aus") }}</div>
+          <div class="dd-picker-row" role="button" tabindex="0" :class="{active: vorjahr && mode === 'bis_jetzt'}" @click="setYoy('bis_jetzt')">{{ _("Bis jetzt") }}</div>
+          <div class="dd-picker-row" role="button" tabindex="0" :class="{active: vorjahr && mode === 'komplett'}" @click="setYoy('komplett')">{{ _("Komplett") }}</div>
+          <div class="dd-picker-row wt-yoy-toggle" role="button" tabindex="0" :class="{active: diff}" :aria-pressed="diff.toString()" @click="toggleDiff()">{{ _("Differenz anzeigen") }}</div>
+        </div>
+      </div>
+    </div>
+    <p class="wt-stand" x-text="standText"></p>
+    <p class="hint hint-warn" x-show="error" x-text="error" x-cloak></p>
+    <div class="tbl-wrap wt-table-wrap wt-vt-wrap" x-ref="tableWrap">
+      <table class="wt-table wt-table-full wt-vt" x-ref="table" @click="tableClick($event)" @keydown="tableKey($event)"><tbody><tr><td class="wt-loading">{{ _("Lädt …") }}</td></tr></tbody></table>
+    </div>
+    {# Die ausgewählte Zeile gilt für „Aufteilung des Verbrauchs“ und ist im Reiter „Langzeit“ vorgewählt. #}
+    <div class="wt-cmp-sel" x-show="selection()" x-cloak>
+      <span class="wt-cmp-sel-name"><i class="wt-vr-dot" :class="{'wt-vr-hatch': selection() && selection().hatch}" :style="selection() ? 'background:' + selection().color : ''"></i><b x-text="selection() ? selection().name : ''"></b> {{ _("ausgewählt") }}</span>
+      <button type="button" class="btn" @click="goLongterm()">{{ _("Monatswerte je Jahr in Langzeit ›") }}</button>
+      <button type="button" class="btn wt-cmp-sel-x" @click="select(sel)" aria-label="{{ _('Auswahl aufheben') }}">✕</button>
+    </div>
+  </div>
+
+{% if cons_shown %}
+  {# Aufteilung des Verbrauchs: ein gestapelter Balken je Spalte der Tabelle, „Übrige“ schraffiert. Je Jahr steht sie im Reiter „Langzeit“. #}
+  <div class="card wt-card" x-show="cons" x-cloak>
+    <div class="wt-controls">
+      <h2 class="wt-h2">{{ _("Aufteilung des Verbrauchs") }} {{ hint_button(_("Aufteilung des Verbrauchs")) }}</h2>
+      {% call hint_body() %}<span x-text="sharesNote()"></span>{% endcall %}
+      <div class="wt-controls-end">
+        <div class="wt-seg" role="group" aria-label="{{ _('Anteile oder kWh') }}">
+          <button type="button" :aria-pressed="(sharesMode === 'pct').toString()" @click="setSharesMode('pct')">{{ _("Anteile (%)") }}</button>
+          <button type="button" :aria-pressed="(sharesMode === 'kwh').toString()" @click="setSharesMode('kwh')">kWh</button>
+        </div>
+      </div>
+    </div>
+    <div class="wt-vs-rows wt-vs-cmp" x-ref="shares" @mouseover="sharesHover($event)" @mouseleave="highlight(pickKey())" @click="sharesClick($event)"></div>
+    <div class="wt-vs-leg" role="group" aria-label="{{ _('Verbraucher hervorheben') }}" x-ref="sharesLegend" @click="sharesClick($event)"></div>
+  </div>
+{% endif %}
+</div>

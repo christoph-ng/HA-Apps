@@ -49,6 +49,8 @@
   .emp-hit .name,.entity-name-default .name{font-size:calc(13px * var(--font-scale, 1));color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .emp-hit .id,.entity-name-default .id{font-size:calc(11px * var(--font-scale, 1));font-family:var(--font-mono);color:var(--ink-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .emp-type{flex:none;font-size:calc(11px * var(--font-scale, 1));color:var(--ink-muted);background:var(--surface-alt);border-radius:999px;padding:1px 8px;}
+  .entity-name-stack{flex:none;max-width:150px;font-family:var(--font-mono);font-size:calc(13px * var(--font-scale, 1));padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--ink);cursor:pointer;}
+  .entity-name-stack:hover{border-color:var(--accent-line);}
   .emp-unit,.entity-name-unit{flex:none;min-width:32px;text-align:right;font-size:calc(12px * var(--font-scale, 1));font-family:var(--font-mono);color:var(--ink-muted);}
   .emp-empty{padding:12px;font-size:calc(12.5px * var(--font-scale, 1));color:var(--ink-faint);}
   /* Die Zeile ist ein Eintrag zum Anklicken, kein Hilfetext — dieselbe
@@ -67,6 +69,20 @@
      max-width entfällt dabei: die Zeilenkarten des Tabellen-Editors nutzen
      die volle Breite ihres Abschnitts, und ein auf 560px gestutzter Kasten
      mitten im Formular sähe wie ein Fremdkörper aus. */
+  .stack-block{margin-top:14px;display:flex;flex-direction:column;gap:8px;align-items:flex-start;}
+  .stack-block.inactive .stack-card{opacity:.55;border-style:dashed;}
+  .stack-card{width:100%;box-sizing:border-box;border:1px solid var(--accent-line);background:var(--accent-line-soft);border-radius:12px;padding:8px;}
+  .stack-card.over{outline:2px dashed var(--accent-line);outline-offset:2px;}
+  .stack-card-head{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+  .stack-card-head input{flex:1;min-width:0;max-width:none;font-weight:600;font-size:calc(13px * var(--font-scale, 1));padding:6px 9px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--ink);}
+  .stack-count{font-family:var(--font-mono);font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);}
+  .stack-dissolve{background:none;border:0;padding:2px;font-family:var(--font-mono);font-size:calc(12px * var(--font-scale, 1));color:var(--ink-muted);text-decoration:underline;cursor:pointer;}
+  .stack-members{display:flex;flex-wrap:wrap;gap:6px;}
+  .stack-chip{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:3px 6px 3px 8px;font-size:calc(13px * var(--font-scale, 1));}
+  .stack-chip-dot{width:10px;height:10px;border-radius:50%;background:var(--dot);flex:none;}
+  .stack-chip button:disabled{opacity:.3;cursor:default;}
+  .stack-chip button{background:none;border:0;padding:0 2px;cursor:pointer;color:var(--ink-muted);}
+  .stack-empty{font-size:calc(12.5px * var(--font-scale, 1));color:var(--ink-faint);padding:4px 2px;}
   .entity-names-list{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
   .entity-name-row{
     display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:10px;
@@ -176,6 +192,10 @@
   .soll-entity-picker > .btn{width:100%;}
   .soll-entity-picker .dd-picker-popover{width:100%;}
   #chart{width:100%;height:420px;max-width:100%;}
+  /* Breite Darstellung: das Diagramm wächst mit der Breite (etwa 3 : 1), höchstens 640px. */
+  @media (min-width:1200px){
+    :root[data-page-layout="wide"] #chart{height:max(420px,min(33vw,640px));}
+  }
   .card{overflow:hidden;}
   /* .chart-legend/.chart-legend-item: siehe app.css — von der Entität-eigenen
      Chart-Seite (entity_detail.html) mitgenutzt, deshalb zentral statt hier

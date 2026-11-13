@@ -3,33 +3,33 @@
 
 {# Eine Karte je Reiter („basis“ = Übersicht, „klima“, „wind“): oben Titel und Stichtag-Leiste, darunter die Kacheln, dann die
    Vergleichstabelle. Der Stichtag gilt für Kacheln und Tabelle; die Daten laden einmal, wetter.js filtert je Gruppe. #}
-{% macro weather_card(group, placeholders) %}
-{% set sfx = group %}
-<div class="card wt-card wt-tilecard">
-  <div class="wt-controls wt-card-head">
-    {# Der Titel nennt den Tag („Heute“, „Gestern“, sonst „Rückblick“); in der Vergangenheit springt ein Klick auf heute. #}
-    <h2 class="wt-h2" :class="{'wt-h2-jump': stichtag()}" x-text="cardTitle()" @click="if (stichtag()) $store.dashStichtag.set(null)" :title="stichtag() ? t('Zurück zu heute') : ''"></h2>
-    {# Stichtag-Leiste des App-Standards (wie bei den Dashboards: ‹ Datum ›, Kalender, „Heute“; ohne Schrittweiten-Knöpfe). Der Alpine-Store
-       dashStichtag hält den Tag und stellt ihn als ?date=… in die Adresse; wetter.js lädt Kacheln und Tabelle bei „dashboard-stichtag“ neu. #}
-    {{ period_nav(true, true) }}
-  </div>
-  <p class="wt-stand" x-show="tilesStand" x-cloak x-text="standText()"></p>
-  <div class="wt-tiles" style="--wt-cols:{{ placeholders }}" x-show="!tilesLoaded" aria-hidden="true">
-    {% for n in range(placeholders) %}<span class="wt-tile is-loading"><span class="wt-tile-label">&nbsp;</span><span class="wt-tile-value">–</span><span class="wt-tile-sub">&nbsp;</span></span>{% endfor %}
-  </div>
-  <div class="wt-tiles" x-ref="tiles{{ group | capitalize }}" :style="'--wt-cols:' + tileCols.{{ group }}" x-show="tilesFor('{{ group }}').length" x-cloak>
-    <template x-for="(tile, i) in tilesFor('{{ group }}')" :key="tile.key">
-      <a class="wt-tile" :class="{'wt-tile-wide': tileCols.{{ group }} > 1 && i === tilesFor('{{ group }}').length - 1 && tilesFor('{{ group }}').length % tileCols.{{ group }} === 1}" :data-role="tile.key" :href="'entities/' + encodeURIComponent(tile.entity_id)" :title="tileTitle(tile)">
-        <span class="wt-tile-label" x-text="tile.label"></span>
-        <span class="wt-tile-value" x-html="tileValue(tile)"></span>
-        <span class="wt-tile-sub" x-text="tileSub(tile)"></span>
-      </a>
-    </template>
-  </div>
+{% macro lage_knopf() %}{{ hint_button(_("Wetterlage")) }}{% endmacro %}
+{% macro lage_hint() %}{% call hint_body() %}{{ _("Die Zeile fasst den Himmel, den Wind und den Regen zusammen und zeigt immer den aktuellen Stand. Der Himmel ergibt sich aus der Helligkeit der letzten 10 Minuten, nur bei Tag (laut Dämmerungssensor); die Grenzen folgen der Sonnen-Schwelle aus der Einrichtung (Standard: trüb unter 15.000 lx, bewölkt bis 25.000, heiter bis 70.000, darüber sonnig). Der Wind nennt die Beaufort-Stufe nach dem stärksten Wert der letzten 10 Minuten; meldet der Sensor nur Stufen oder steht er geschützt, fallen die Klassen eher niedrig aus. Beim Regen zählen auch Nebel und Tau mit, wenn der Sensor sie als Regen meldet. Fehlt ein Sensor, fehlt sein Teil in der Zeile. Für einen früheren Tag fasst die Karte den Tag zusammen: häufigste Himmelsklasse zu den hellen Stunden samt Sonnenstunden, stärkster Wind, Regenmenge und Tiefst- und Höchstwert der Temperatur.") }}{% endcall %}{% endmacro %}
 
-  <div class="wt-card-sep"></div>
+{# Kopf der Wetterlage: Symbol, Wort, Satz und Chips. Gleich in der eigenen Karte und in der verschmolzenen Karte. #}
+{% macro lage_hero() %}
+    <div class="wt-lage-hero" :style="'--wt-hero:' + conditionsHero().color">
+      <span class="wt-lage-icon" x-show="conditionsHero().icon" x-html="iconSvg(conditionsHero().icon)"></span>
+      <div class="wt-lage-text">
+        <p class="wt-headline wt-lage" x-text="conditionsLine()"></p>
+        <p class="wt-lage-sentence" x-show="conditionsSentence().length">
+          <template x-for="(part, i) in conditionsSentence()" :key="i"><span class="wt-lage-s" x-text="part"></span></template>
+        </p>
+      </div>
+      <div class="wt-lage-chips" x-show="conditionsChips().length">
+        <template x-for="chip in conditionsChips()" :key="chip.text">
+          <span class="wt-lage-chip"><span x-html="iconSvg(chip.icon)"></span><span x-text="chip.text"></span></span>
+        </template>
+      </div>
+    </div>
+{% endmacro %}
+
+{# Vergleichstabelle samt Spalten- und Vorjahresmenü. Auf „basis“ eine eigene Karte (own), bei „wind“ und „klima“ unter den Kacheln. #}
+{% macro compare_block(group, own) %}
+{% set sfx = group %}
+  {% if not own %}<div class="wt-card-sep"></div>{% endif %}
   <div class="wt-controls">
-    <h3 class="wt-h3">{{ _("Zeiträume im Vergleich") }} {{ hint_button(_("Zeiträume im Vergleich")) }}</h3>
+    <{{ "h2" if own else "h3" }} class="{{ 'wt-h2' if own else 'wt-h3' }}">{{ _("Zeiträume im Vergleich") }} {{ hint_button(_("Zeiträume im Vergleich")) }}</{{ "h2" if own else "h3" }}>
     {% call hint_body() %}<span x-show="vorjahr" x-text="modeHint()"></span>{% endcall %}
     {# Spaltenauswahl wie in der Entitätenliste: Knopf „Spalten ▾“ mit Popover (dd-picker). #}
     <div class="dd-picker-wrap wt-controls-end">
@@ -37,6 +37,10 @@
       <div class="dd-picker-popover" id="wt-cols-{{ sfx }}-popover">
         <template x-for="key in columnKeys" :key="key">
           <label class="dd-picker-row"><input type="checkbox" :checked="columns.includes(key)" @change="toggleColumn(key)"><span x-text="columnName(key)"></span></label>
+        </template>
+        <div class="menu-section-label wt-vt-menu-sep" x-show="yearKeys.length" x-cloak>{{ _("Einzelne Jahre") }}</div>
+        <template x-for="key in yearKeys" :key="key">
+          <label class="dd-picker-row"><input type="checkbox" :checked="columns.includes(key)" @change="toggleColumn(key)"><span x-text="key.slice(1)"></span></label>
         </template>
       </div>
     </div>
@@ -49,6 +53,7 @@
         <div class="dd-picker-row" role="button" tabindex="0" :class="{active: vorjahr && mode === 'bis_jetzt'}" @click="setYoy('bis_jetzt')">{{ _("Bis jetzt") }}</div>
         <div class="dd-picker-row" role="button" tabindex="0" :class="{active: vorjahr && mode === 'komplett'}" @click="setYoy('komplett')">{{ _("Komplett") }}</div>
         <div class="dd-picker-row wt-yoy-toggle" role="button" tabindex="0" :class="{active: diff}" :aria-pressed="diff.toString()" @click="toggleDiff()">{{ _("Differenz anzeigen") }}</div>
+        {% if group == 'klima' %}<div class="dd-picker-row wt-yoy-toggle" role="button" tabindex="0" :class="{active: avgOnly}" :aria-pressed="avgOnly.toString()" @click="toggleAvg()">{{ _("Nur Mittelwerte") }}</div>{% endif %}
       </div>
     </div>
   </div>
@@ -56,6 +61,66 @@
   <div class="tbl-wrap wt-table-wrap" x-ref="tableWrap{{ group | capitalize if group != 'basis' else '' }}">
     <table class="wt-table" x-ref="table{{ group | capitalize if group != 'basis' else '' }}"><tbody><tr><td class="wt-loading">{{ _("Lädt …") }}</td></tr></tbody></table>
   </div>
+{% endmacro %}
+
+{# lage=true (nur „basis“, wenn auch die Wetterlage gezeigt wird): Der Satz der Wetterlage steht in dieser Karte, und die Kacheln
+   („Temperatur“, „Regen“ groß, dann Helligkeit, Wind und der Rest) kommen aus displayTiles(); eine eigene Wetterlage-Karte gibt es dann nicht. #}
+{% macro weather_card(group, placeholders, lage=false, hero=false) %}
+{% set sfx = group %}
+<div class="card wt-card wt-tilecard">
+  <div class="wt-controls wt-card-head">
+    {# Der Titel nennt den Tag („Heute“, „Gestern“, sonst „Rückblick“); in der Vergangenheit springt ein Klick auf heute. #}
+    <h2 class="wt-h2" :class="{'wt-h2-jump': stichtag()}" x-text="{{ 'conditionsTitle()' if lage else 'cardTitle()' }}" @click="if (stichtag()) $store.dashStichtag.set(null)" :title="stichtag() ? t('Zurück zu heute') : ''"></h2>
+    {% if hero %}{{ lage_knopf() }}{% endif %}
+    {% if hero %}{{ lage_hint() }}{% endif %}
+  </div>
+  <p class="wt-stand" x-show="tilesStand" x-cloak x-text="standText()"></p>
+  {% if hero %}
+  <div data-wt-conditions data-layout="{{ config.lage_layout }}" x-show="conditions" x-cloak>
+    {{ lage_hero() }}
+  </div>
+  {% endif %}
+  <div class="wt-tiles" style="--wt-cols:{{ placeholders }}" x-show="!tilesLoaded" aria-hidden="true">
+    {% for n in range(placeholders) %}<span class="wt-tile is-loading"><span class="wt-tile-label">&nbsp;</span><span class="wt-tile-value">–</span><span class="wt-tile-sub">&nbsp;</span></span>{% endfor %}
+  </div>
+  {% if lage %}
+  <div class="wt-tiles wt-tiles-lage" data-layout="{{ config.lage_layout }}" x-ref="tiles{{ group | capitalize }}" x-show="displayTiles().length" x-cloak>
+    <template x-for="tile in displayTiles()" :key="tile.key">
+      <a class="wt-tile" :class="{'wt-tile-static': !tile.href}" :data-role="tile.role" :href="tile.href || null" :title="tile.title">
+        <span class="wt-tile-icon" x-html="iconSvg(tile.icon)"></span>
+        <span class="wt-tile-label" x-text="tile.label"></span>
+        <span class="wt-tile-value" x-html="tile.value"></span>
+        <span class="wt-tile-sub" x-text="tile.sub"></span>
+        <span class="wt-tile-k" x-text="tile.k"></span>
+      </a>
+    </template>
+  </div>
+  {% else %}
+  <div class="wt-tiles" x-ref="tiles{{ group | capitalize }}" :style="'--wt-cols:' + tileCols.{{ group }}" x-show="tilesFor('{{ group }}').length" x-cloak>
+    <template x-for="(tile, i) in tilesFor('{{ group }}')" :key="tile.key">
+      <a class="wt-tile" :class="{'wt-tile-wide': tileCols.{{ group }} > 1 && i === tilesFor('{{ group }}').length - 1 && tilesFor('{{ group }}').length % tileCols.{{ group }} === 1}" :data-role="tile.key" :href="'entities/' + encodeURIComponent(tile.entity_id)" :title="tileTitle(tile)">
+        <span class="wt-tile-icon" x-html="iconSvg(tileIcon(tile))"></span>
+        <span class="wt-tile-label" x-text="tile.label"></span>
+        <span class="wt-tile-value" x-html="tileValue(tile)"></span>
+        <span class="wt-tile-sub" x-text="tileSub(tile)"></span>
+      </a>
+    </template>
+  </div>
+  {% endif %}
+
+  {% if group != 'basis' %}{{ compare_block(group, false) }}{% endif %}
+</div>
+{% endmacro %}
+{# Auswahl der Räume über den Vergleichsdiagrammen (nur bei mindestens zwei Räumen); die Außenwerte bleiben immer. #}
+{% macro room_chips() %}
+<div class="wt-rooms" role="group" aria-label="{{ _('Räume im Diagramm') }}" x-show="roomChips().length" x-cloak>
+  <template x-for="chip in roomChips()" :key="chip.name">
+    <span class="wt-room-item">
+      <span class="wt-room-floor" x-show="chip.floorLabel" x-text="chip.floorLabel"></span>
+      <button type="button" class="wt-room-chip" :aria-pressed="chip.on.toString()" @click="toggleRoom(chip.name)" x-text="chip.label"></button>
+    </span>
+  </template>
+  <button type="button" class="wt-room-all" x-show="roomsOff.length" x-cloak @click="showAllRooms()">{{ _("Alle") }}</button>
 </div>
 {% endmacro %}
 {% if not configured %}
@@ -70,7 +135,35 @@
 {% else %}
 {# Kein x-init="init()": Alpine ruft init() des x-data-Objekts selbst auf (siehe
    _energiedashboard_view.html — mit x-init liefe es doppelt). #}
-<div x-data='wetterDashboard({{ precip_modes | tojson }})'>
+{% set hc = hidden_cards %}
+{% set show_conditions = has_conditions %}
+{% set show_basis = 'basis' not in hc %}
+{% set show_compare = 'compare' not in hc %}
+{% set show_monthly = 'monthly' not in hc %}
+{% set show_dayimage = has_dayimage and 'dayimage' not in hc %}
+{% set show_overview = show_basis or show_compare or show_dayimage or show_monthly %}
+{% set show_precip_main = precip_modes and 'precip' not in hc %}
+{% set show_precip_months = precip_modes and 'precip_months' not in hc %}
+{% set show_precip = show_precip_main or show_precip_months %}
+{% set show_klima_tiles = has_klima and 'klima' not in hc %}
+{% set show_tempcmp = has_klima and 'tempcmp' not in hc %}
+{% set show_humidcmp = has_klima and 'humidcmp' not in hc %}
+{% set show_klima = show_klima_tiles or show_tempcmp or show_humidcmp %}
+{% set show_windtiles = has_windtiles and 'wind' not in hc %}
+{% set show_sunhours = has_dayimage and 'sunhours' not in hc %}
+{% set show_daylight_main = has_daylight and 'daylight' not in hc %}
+{% set show_dl_days = has_daylight and 'daylight_days' not in hc %}
+{% set show_dl_length = has_daylight and 'daylength' not in hc %}
+{% set show_daylight = show_daylight_main or show_dl_days or show_dl_length %}
+{% set show_pv = has_pv and 'pvlight' not in hc %}
+{% set show_windtab = show_windtiles or show_sunhours or show_daylight or show_pv %}
+{% set show_records = 'records' not in hc %}
+{% set show_kenntage = 'kenntage' not in hc %}
+{% set show_monthyears = 'monthyears' not in hc %}
+{% set show_yearmatrix = 'yearmatrix' not in hc %}
+{% set show_long = show_records or show_kenntage or show_monthyears or show_yearmatrix %}
+{% set show_heat = has_heating and 'heating' not in hc %}
+<div x-data='wetterDashboard({{ precip_modes | tojson }})' data-hints="collapsed" data-tile-style="{{ config.tile_style }}">
   <div class="wt-title-row">
     <h1>{{ _("Wetterdashboard") }}</h1>
     <button type="button" class="wt-title-edit" title="{{ _('Rollen bearbeiten') }}"
@@ -80,48 +173,148 @@
 
   {# Reiterzeile des App-Standards (.entity-tabs in app.css, wie bei Entitäten und Entitätsseiten); hier
      Schaltflächen statt Links, weil die Reiter nur umschalten und die Seite nicht wechseln. #}
+  {# Stichtag-Leiste des App-Standards (wie bei den Dashboards: ‹ Datum ›, Kalender, „Heute“; ohne Schrittweiten-Knöpfe) in der Reiterzeile,
+     die beim Scrollen unter der Kopfleiste stehen bleibt. Der Alpine-Store dashStichtag hält den Tag und stellt ihn als ?date=… in die
+     Adresse; wetter.js lädt Kacheln und Tabelle bei „dashboard-stichtag“ neu. Nur in den Reitern mit Kachelkarte. #}
+  <div class="dash-tabs-bar">
   <nav class="entity-tabs wt-tabs" role="tablist" aria-label="{{ _('Ansichten des Wetterdashboards') }}">
+    {% if show_overview %}
     <button type="button" role="tab" id="wt-tab-overview" aria-controls="wt-panel-overview" class="entity-tab" :class="{'is-active': tab === 'overview'}" :aria-selected="(tab === 'overview').toString()" :tabindex="tab === 'overview' ? 0 : -1" @click="showTab('overview')" @keydown="tabKey($event)">{{ _("Übersicht") }}</button>
-    {% if precip_modes %}
+    {% endif %}
+    {% if show_precip %}
     <button type="button" role="tab" id="wt-tab-precip" aria-controls="wt-panel-precip" class="entity-tab" :class="{'is-active': tab === 'precip'}" :aria-selected="(tab === 'precip').toString()" :tabindex="tab === 'precip' ? 0 : -1" @click="showTab('precip')" @keydown="tabKey($event)">{{ _("Niederschlag") }}</button>
     {% endif %}
-    {% if has_klima %}
+    {% if show_klima %}
     <button type="button" role="tab" id="wt-tab-klima" aria-controls="wt-panel-klima" class="entity-tab" :class="{'is-active': tab === 'klima'}" :aria-selected="(tab === 'klima').toString()" :tabindex="tab === 'klima' ? 0 : -1" @click="showTab('klima')" @keydown="tabKey($event)">{{ _("Temperatur &amp; Klima") }}</button>
     {% endif %}
-    {% if has_windsun %}
+    {% if show_windtab %}
     <button type="button" role="tab" id="wt-tab-wind" aria-controls="wt-panel-wind" class="entity-tab" :class="{'is-active': tab === 'wind'}" :aria-selected="(tab === 'wind').toString()" :tabindex="tab === 'wind' ? 0 : -1" @click="showTab('wind')" @keydown="tabKey($event)">{{ _("Wind &amp; Sonne") }}</button>
     {% endif %}
-    <button type="button" role="tab" id="wt-tab-long" aria-controls="wt-panel-long" class="entity-tab" :class="{'is-active': tab === 'long'}" :aria-selected="(tab === 'long').toString()" :tabindex="tab === 'long' ? 0 : -1" @click="showTab('long')" @keydown="tabKey($event)">{{ _("Langzeit") }}</button>
-    {% if has_heating %}
+    {% if show_heat %}
     <button type="button" role="tab" id="wt-tab-heat" aria-controls="wt-panel-heat" class="entity-tab" :class="{'is-active': tab === 'heat'}" :aria-selected="(tab === 'heat').toString()" :tabindex="tab === 'heat' ? 0 : -1" @click="showTab('heat')" @keydown="tabKey($event)">{{ _("Heizen") }}</button>
     {% endif %}
+    {% if show_long %}
+    <button type="button" role="tab" id="wt-tab-long" aria-controls="wt-panel-long" class="entity-tab" :class="{'is-active': tab === 'long'}" :aria-selected="(tab === 'long').toString()" :tabindex="tab === 'long' ? 0 : -1" @click="showTab('long')" @keydown="tabKey($event)">{{ _("Langzeit") }}</button>
+    {% endif %}
   </nav>
+  <div class="dash-tabs-bar-end" x-show="['overview', 'klima', 'wind'].includes(tab)" x-cloak>{{ period_nav(true, true) }}</div>
+  {# Jahre-Auswahl des Reiters Langzeit: gilt für alle Karten des Reiters (Rekorde, Kenntage, Jahres-Matrix), deshalb wie der Zeitraum in der Reiterzeile. #}
+  <div class="dash-tabs-bar-end wt-scope-years" x-show="tab === 'long' && showLongChoice()" x-cloak title="{{ _('gilt für alle Karten dieses Reiters') }}">
+    <span class="wt-scope-lab"><b>{{ _("Jahre") }}</b></span>
+    <div class="wt-seg" role="group" aria-label="{{ _('Anzahl der Jahre') }}">
+      <template x-for="option in longOptions()" :key="option.value">
+        <button type="button" :aria-pressed="(longShownRange() === option.value).toString()" @click="setLongRange(option.value)" x-text="option.label"></button>
+      </template>
+    </div>
+  </div>
+  </div>
 
+  {% if show_overview %}
   <section x-show="tab === 'overview'" role="tabpanel" id="wt-panel-overview" aria-labelledby="wt-tab-overview">
-  {{ weather_card("basis", 5) }}
+  {% if show_basis %}
+  {{ weather_card("basis", 5, true, show_conditions) }}
+  {% endif %}
 
-  <div class="card wt-card" x-show="monthly" x-cloak>
+  {% if show_compare %}
+  <div class="card wt-card wt-tilecard">{{ compare_block("basis", true) }}</div>
+  {% endif %}
+
+  {% if show_dayimage %}
+  <div class="card wt-card" data-wt-dayimage x-show="dayimage || dayimageError" x-cloak>
+    <div class="wt-controls">
+      <h2 class="wt-h2">{{ _("Tagesbild") }} {{ hint_button(_("Tagesbild")) }}</h2>
+      {% call hint_body() %}{{ _("Jede Karte ist ein Tag. Der Sonnenanteil ist die Zeit über der Sonnen-Schwelle geteilt durch die hellen Stunden des Tages (Dämmerungssensor ab der Tag-Schwelle): sonnig ab 50 %, wechselhaft ab 20 %, sonst trüb. Tage mit weniger als drei hellen Stunden oder ohne Werte bleiben leer. Ein Klick öffnet den Tag mit Helligkeitsverlauf und Eckwerten; dort lässt er sich als Stichtag setzen. Das ist kein Wert des Wetterdienstes: Die Station trennt direktes und diffuses Licht nicht.") }}{% endcall %}
+    </div>
+    <p class="wt-headline" x-show="dayimage" x-text="dayimageHead()"></p>
+    <div class="wt-days" x-show="dayimage" role="list">
+      <template x-for="cell in dayimageCells()" :key="cell.date">
+        <button type="button" role="listitem" class="wt-day" :class="{'is-today': cell.today, 'is-picked': cell.picked}" :data-class="cell.class || 'none'" :title="cell.title" @click="openDay(cell)" aria-haspopup="dialog">
+          <span class="wt-day-date" x-text="cell.label"></span>
+          <span class="wt-day-pill" x-text="cell.kindName"></span>
+          <span class="wt-day-bar"><i :style="'width:' + cell.percent + '%'"></i></span>
+          <span class="wt-day-sub" x-text="cell.sub"></span>
+        </button>
+      </template>
+    </div>
+    <p class="hint hint-warn" x-show="dayimageError" x-text="dayimageError" x-cloak></p>
+
+    <dialog class="detail-dialog wt-item-dialog wt-day-dialog" x-ref="dayDlg" aria-labelledby="wt-day-dialog-title" :data-class="dayDlg && dayDlg.cell.class || 'none'" @click="if ($event.target === $el) $el.close()" @close="onDayClose()">
+      <template x-if="dayDlg">
+        <div>
+          <div class="detail-dialog-header">
+            <div>
+              <h2 id="wt-day-dialog-title" x-text="dayDlgTitle()"></h2>
+              <div class="wt-day-dialog-sub">
+                <span class="wt-day-pill" :data-class="dayDlg.cell.class || 'none'" x-text="dayDlg.cell.kindName"></span>
+                <span class="wt-day-sub" x-text="dayDlg.cell.sub"></span>
+              </div>
+            </div>
+            <button type="button" class="btn" @click="closeDay()" aria-label="{{ _('Schließen') }}">✕</button>
+          </div>
+          <div class="wt-day-bar" x-show="dayDlg.cell.class"><i :style="'width:' + dayDlg.cell.percent + '%'"></i></div>
+          <p class="hint" x-show="dayDlg.loading">{{ _("Wird geladen …") }}</p>
+          <p class="hint hint-warn" x-show="dayDlg.error" x-text="dayDlg.error" x-cloak></p>
+          <template x-if="dayDlg.data">
+            <div>
+              <h3 class="wt-day-dialog-label">{{ _("Helligkeit, Stundenmittel") }}</h3>
+              <p class="hint" x-show="!dayDlg.data.sun.hours.length" x-cloak>{{ _("Für diesen Tag liegen keine Werte vor.") }}</p>
+              <div class="wt-chart" x-show="dayDlg.data.sun.hours.length" x-ref="dayChart"></div>
+              <template x-if="dayDlgFacts().length">
+                <div>
+                  <h3 class="wt-day-dialog-label">{{ _("Eckwerte des Tages") }}</h3>
+                  <div class="wt-day-facts">
+                    <template x-for="fact in dayDlgFacts()" :key="fact.label">
+                      <div class="wt-day-fact">
+                        <span class="wt-day-fact-label" x-text="fact.label"></span>
+                        <span class="wt-day-fact-value" x-text="fact.value"></span>
+                        <span class="wt-day-fact-sub" x-text="fact.sub" x-show="fact.sub"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+          <div class="wt-dialog-footer">
+            <button type="button" class="btn" @click="closeDay()">{{ _("Schließen") }}</button>
+            <template x-if="dayDlgAction()">
+              <button type="button" class="btn primary" @click="applyDay()" x-text="dayDlgAction().label"></button>
+            </template>
+          </div>
+        </div>
+      </template>
+    </dialog>
+  </div>
+  {% endif %}
+
+
+  {% if show_monthly %}
+  <div class="card wt-card" x-show="monthly || monthlyError" x-cloak>
     <div class="wt-controls">
       <h2 class="wt-h2">{{ _("Monatsvergleich") }} {{ hint_button(_("Monatsvergleich")) }}</h2>
       {% call hint_body() %}<span x-text="monthlyNote()"></span>{% endcall %}
-      {% if precip_modes %}
+      {% if precip_modes or has_dayimage %}
       <div class="wt-seg" role="group" aria-label="{{ _('Kennzahl') }}">
         <button type="button" :aria-pressed="(monthlyMetric === 'temperature').toString()" @click="setMonthlyMetric('temperature')">{{ _("Temperatur") }}</button>
-        <button type="button" :aria-pressed="(monthlyMetric === 'precip').toString()" @click="setMonthlyMetric('precip')">{{ _("Niederschlag") }}</button>
+        {% if precip_modes %}<button type="button" :aria-pressed="(monthlyMetric === 'precip').toString()" @click="setMonthlyMetric('precip')">{{ _("Niederschlag") }}</button>{% endif %}
+        {% if has_dayimage %}<button type="button" :aria-pressed="(monthlyMetric === 'sun').toString()" @click="setMonthlyMetric('sun')">{{ _("Sonnenstunden") }}</button>{% endif %}
       </div>
       {% endif %}
       <label class="filter-chip"><input type="checkbox" x-model="band" @change="drawMonthly()"><span>{{ _("Spanne der Vorjahre") }}</span></label>
     </div>
     <p class="wt-headline" x-show="monthlyMetric === 'temperature' && headline()" x-text="headline()"></p>
-    <div class="wt-chart" x-ref="monthlyChart"></div>
+    <p class="hint hint-warn" x-show="monthlyError" x-cloak>{{ _("Der Monatsvergleich konnte nicht geladen werden.") }} <button type="button" class="btn" @click="loadMonthly()">{{ _("Erneut versuchen") }}</button></p>
+    <div class="wt-chart" x-ref="monthlyChart" x-show="monthly"></div>
   </div>
+  {% endif %}
   </section>
+  {% endif %}
 
-  {% if precip_modes %}
+  {% if show_precip %}
   <section x-show="tab === 'precip'" x-cloak role="tabpanel" id="wt-panel-precip" aria-labelledby="wt-tab-precip">
     <div class="card wt-card">
       <div class="wt-controls">
-        <h2 class="wt-h2">{{ _("Niederschlag seit Jahresbeginn") }}</h2>
+        {% if show_precip_main %}<h2 class="wt-h2">{{ _("Niederschlag seit Jahresbeginn") }}</h2>{% endif %}
         {% if precip_modes | length > 1 %}
         <div class="wt-seg" role="group" aria-label="{{ _('Art des Niederschlags') }}">
           <button type="button" :aria-pressed="(precipMode === 'mm').toString()" @click="setPrecipMode('mm')">{{ _("Menge") }}</button>
@@ -129,10 +322,12 @@
         </div>
         {% endif %}
       </div>
+      {% if show_precip_main %}
       <p class="wt-headline" x-show="precip" x-text="precipHeadline()"></p>
       <div class="wt-kpis" x-show="precip" :style="'--wt-cols:' + kpiCols(precipKpis().length)">
         <template x-for="kpi in precipKpis()" :key="kpi.label">
-          <div class="wt-tile">
+          <div class="wt-tile" style="--wt-accent:var(--chart-3)">
+            <span class="wt-tile-icon" x-html="iconSvg(kpi.icon)"></span>
             <span class="wt-tile-label" x-text="kpi.label"></span>
             <span class="wt-tile-value" x-html="kpi.value"></span>
             <span class="wt-tile-sub" x-text="kpi.sub"></span>
@@ -140,49 +335,205 @@
         </template>
       </div>
       <div class="wt-chart wt-chart-tall" x-ref="precipChart"></div>
+      {% endif %}
+      {% if show_precip_months %}
+      <h3 class="wt-h3" x-show="precip && precip.months" x-cloak>{{ _("Niederschlag je Monat") }}</h3>
+      <div class="wt-table-wrap" x-show="precip && precip.months" x-cloak><table class="wt-table wt-table-full wt-precip-table" x-ref="precipTable"></table></div>
+      <p class="wt-foot" x-show="precip && precip.months" x-cloak x-text="precipTableNote()"></p>
+      {% endif %}
       <p class="hint hint-warn" x-show="precipError" x-text="precipError" x-cloak></p>
     </div>
   </section>
   {% endif %}
 
-  {% if has_klima %}
+  {% if show_klima %}
   <section x-show="tab === 'klima'" x-cloak role="tabpanel" id="wt-panel-klima" aria-labelledby="wt-tab-klima">
-    {{ weather_card("klima", 3) }}
+    {% if show_klima_tiles %}{{ weather_card("klima", 3) }}{% endif %}
+    {% if show_tempcmp %}
     <div class="card wt-card">
       <div class="wt-controls">
         <h2 class="wt-h2">{{ _("Temperaturen im Vergleich") }} {{ hint_button(_("Temperaturen im Vergleich")) }}</h2>
         {% call hint_body() %}{{ _("Tagesmittel der Außentemperatur und der weiteren Sensoren. Tage mit zu wenigen Werten bleiben leer.") }}{% endcall %}
         <div class="wt-seg" role="group" aria-label="{{ _('Zeitraum') }}">
-          <template x-for="days in [7, 30, 90]" :key="days">
-            <button type="button" :aria-pressed="(tempDays === days).toString()" @click="setTempDays(days)" x-text="t('{n} Tage', {n: days})"></button>
+          <template x-for="opt in [{days: 7, label: t('7 Tage')}, {days: 30, label: t('30 Tage')}, {days: 365, label: t('12 Monate')}]" :key="opt.days">
+            <button type="button" :aria-pressed="(tempDays === opt.days).toString()" @click="setTempDays(opt.days)" x-text="opt.label"></button>
           </template>
         </div>
       </div>
-      <div class="wt-chart" x-ref="tempChart"></div>
+      {{ room_chips() }}
+      <div class="wt-chart" x-ref="tempChart" x-show="!tempCmp || tempCmp.series.length"></div>
       <p class="hint hint-warn" x-show="tempError" x-text="tempError" x-cloak></p>
     </div>
+    {% endif %}
+    {% if show_humidcmp %}
+    <div class="card wt-card" x-show="tempCmp && tempCmp.humidity && tempCmp.humidity.length" x-cloak>
+      <div class="wt-controls">
+        <h2 class="wt-h2">{{ _("Luftfeuchte im Vergleich") }} {{ hint_button(_("Luftfeuchte im Vergleich")) }}</h2>
+        {% call hint_body() %}{{ _("Tagesmittel der Luftfeuchte außen und der weiteren Feuchtesensoren, im selben Zeitraum wie die Temperaturen.") }}{% endcall %}
+      </div>
+      {{ room_chips() }}
+      <div class="wt-chart" x-ref="humidChart"></div>
+    </div>
+    {% endif %}
   </section>
   {% endif %}
 
-  {% if has_windsun %}
+  {% if show_windtab %}
   <section x-show="tab === 'wind'" x-cloak role="tabpanel" id="wt-panel-wind" aria-labelledby="wt-tab-wind">
+    {% if show_windtiles %}
     {{ weather_card("wind", 3) }}
+    {% endif %}
+
+  {% if show_sunhours %}
+  <div class="card wt-card" x-show="sunhours || sunhoursError" x-cloak>
+    <div class="wt-controls">
+      <h2 class="wt-h2">{{ _("Sonnenstunden") }} {{ hint_button(_("Sonnenstunden")) }}</h2>
+      {% call hint_body() %}{{ _("Die Kurve zeigt das Stundenmittel der Süd-Helligkeit. Hinterlegt sind die Stunden über der Sonnen-Schwelle; sie zählen als Sonnenscheindauer. Das ist kein offizieller Wert des Wetterdienstes (der DWD zählt ab 120 W/m² direkter Strahlung, und die Station trennt direktes und diffuses Licht nicht). Der Süd-Sensor sättigt bei 98.800 lx. Die Schwelle steht in der Einrichtung.") }}{% endcall %}
+    </div>
+    <p class="wt-headline" x-show="sunhours" x-html="sunhoursHead()"></p>
+    <div class="wt-chart" x-show="sunhours && sunhours.hours.length" x-ref="sunChart"></div>
+    <p class="hint hint-warn" x-show="sunhoursError" x-text="sunhoursError" x-cloak></p>
+  </div>
+  {% endif %}
+
+  {% if show_pv %}
+  <div class="card wt-card" x-show="pv || pvError" x-cloak>
+    <div class="wt-controls">
+      <h2 class="wt-h2">{{ _("PV und Helligkeit") }} {{ hint_button(_("PV und Helligkeit")) }}</h2>
+      {% call hint_body() %}{{ _("Die Erwartung wird aus den letzten 28 Tagen gelernt: je Helligkeitsstufe der Median der Stundenleistung. Die Karte zeigt, ob der Tagesertrag dazu passt; sie ist eine Messung, keine Prognose. Eine Abweichung über 15 % wird markiert, aber nur an Tagen mit nennenswerter Erwartung. Temperatur, Abregelung und ein voller Akku senken die Leistung, ohne dass die Anlage schlechter wird. Der Süd-Sensor misst an einem Punkt, im Sommer sättigt er mittags (98.800 lx), dann sagt die Helligkeit über die Leistung nur noch wenig. Das Verhältnis nach Uhrzeit zeigt, ob die Anlage morgens oder abends systematisch abweicht (Ausrichtung der Module, Verschattung).") }}{% endcall %}
+    </div>
+    <div class="wt-pv-status" x-show="pv" x-cloak>
+      <span class="wt-pv-chip" :data-kind="pvStatus().kind" x-text="pvStatus().chip"></span>
+      <span class="wt-pv-text" x-text="pvStatus().text"></span>
+    </div>
+    <div class="wt-pv-legend" x-show="pv" x-cloak>
+      <span><i class="wt-pv-sw" data-kind="actual"></i>{{ _("Ertrag") }}</span>
+      <span><i class="wt-pv-sw" data-kind="expected"></i>{{ _("Erwartet nach Helligkeit") }}</span>
+      <span x-show="pvHas('low')"><i class="wt-pv-sw" data-kind="low"></i><span x-text="pv ? t('mehr als {limit} % darunter', {limit: pv.limit}) : ''"></span></span>
+      <span x-show="pvHas('high')"><i class="wt-pv-sw" data-kind="high"></i><span x-text="pv ? t('mehr als {limit} % darüber', {limit: pv.limit}) : ''"></span></span>
+    </div>
+    <div class="wt-chart wt-pv-chart" x-show="pv" x-ref="pvChart"></div>
+    <p class="hint hint-status" x-show="pv">{{ _("Ein Tag lässt sich anklicken.") }}</p>
+    <h3 class="wt-h3" x-show="pv && pvDay() && pvDay().hours.length" x-text="pvHourTitle()"></h3>
+    <div class="wt-chart wt-chart-short wt-pv-chart" x-show="pv && pvDay() && pvDay().hours.length" x-ref="pvHourChart"></div>
+    <p class="hint hint-status" x-show="pv && pvDay() && pvDay().hours.length" x-text="pvHourNote()"></p>
+    <p class="hint hint-warn" x-show="pvError" x-text="pvError" x-cloak></p>
+  </div>
+  {% endif %}
+
+  {% if show_daylight %}
+  <div class="card wt-card" x-show="daylight || daylightError" x-cloak>
+    {% if show_daylight_main %}
+    <div class="wt-controls">
+      <h2 class="wt-h2">{{ _("Tageslicht") }} {{ hint_button(_("Tageslicht")) }}</h2>
+      {% call hint_body() %}{{ _("Der Dämmerungssensor misst von 0 bis 1.000 lx. Die Kurve zeigt, wann es für den Sensor hell wird und wann nicht mehr, nicht den Sonnenstand: Dichte Wolken verschieben den Tagesbeginn nach hinten, Ausrichtung und Verschattung wirken ebenfalls. Die Schwellen für Nacht und Tag stehen in der Einrichtung.") }}{% endcall %}
+    </div>
+    <p class="wt-headline" x-show="daylight" x-text="daylightHead()"></p>
+    <div class="wt-kpis wt-kpis-soft" x-show="daylight" :style="'--wt-cols:' + kpiCols(daylightStats().length)">
+      <template x-for="stat in daylightStats()" :key="stat.label">
+        <div class="wt-tile" :data-kind="stat.kind">
+          <span class="wt-tile-icon" x-html="iconSvg(stat.icon)"></span>
+          <span class="wt-tile-label" x-text="stat.label"></span>
+          <span class="wt-tile-value" x-text="stat.value"></span>
+          <span class="wt-tile-sub" x-text="stat.sub"></span>
+        </div>
+      </template>
+    </div>
+    <div class="wt-chart" x-show="daylight" x-ref="daylightChart"></div>
+    <p class="hint hint-warn" x-show="daylightNote()" x-text="daylightNote()" x-cloak></p>
+    <p class="hint hint-warn" x-show="daylightError" x-text="daylightError" x-cloak></p>
+    {% endif %}
+    {% if show_dl_days %}
+    <h3 class="wt-h3 wt-dl-h" x-show="daylight">{{ _("Die letzten Tage im Vergleich") }}</h3>
+    <div class="tbl-wrap wt-table-wrap" x-show="daylight">
+      <table class="wt-table wt-table-full wt-dl-table">
+        <thead><tr>
+          <th>{{ _("Tag") }}</th><th>{{ _("Hell von–bis") }}</th>
+          <th>{{ _("Tageslänge") }}<span class="wt-sb">{{ _("Änderung zum Vortag") }}</span></th>
+          <th>{{ _("Dämmerung") }}<span class="wt-sb">{{ _("morgens / abends") }}</span></th>
+          <th class="wt-dl-dim" x-show="daylight && daylight.has_elevation" x-cloak>{{ _("Sonnenhöhe") }}<span class="wt-sb">{{ _("Beginn / Ende") }}</span></th>
+        </tr></thead>
+        <tbody>
+          <template x-for="row in daylightRows()" :key="row.date">
+            <tr :class="{'wt-row-current': row.current}">
+              <td x-text="row.day"></td><td x-text="row.span"></td>
+              <td><span :class="row.running ? 'wt-dl-run' : 'wt-dl-len'" x-text="row.length"></span><span class="wt-dl-pill" x-show="row.delta" x-text="row.delta"></span></td>
+              <td><span x-text="row.morning"></span><span class="wt-dl-sep"> / </span><span :class="row.evening === '–' ? 'wt-dl-dim' : ''" x-text="row.evening"></span></td>
+              <td class="wt-dl-dim" x-show="daylight.has_elevation" x-cloak><span x-text="row.sunFrom"></span><span class="wt-dl-sep"> / </span><span x-text="row.sunTo"></span></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+    <p class="wt-hint" x-show="daylight && daylightHistoryNote()" x-text="daylightHistoryNote()" x-cloak></p>
+    {% endif %}
+    {% if show_dl_length %}
+    <h3 class="wt-h3 wt-dl-h" x-show="daylength" x-cloak>{{ _("Tageslänge im Jahresverlauf") }}</h3>
+    <div class="wt-chart wt-chart-short" x-show="daylength" x-cloak x-ref="daylengthChart"></div>
+    <p class="hint hint-status" x-show="daylength" x-text="daylengthNote()" x-cloak></p>
+    {% endif %}
+  </div>
+  {% endif %}
   </section>
   {% endif %}
 
+  {% if show_long %}
   <section x-show="tab === 'long'" x-cloak role="tabpanel" id="wt-panel-long" aria-labelledby="wt-tab-long">
+    {% if show_records %}
+    <div class="card wt-card" x-show="longterm && longterm.records.length" x-cloak>
+      <div class="wt-controls">
+        <h2 class="wt-h2">{{ _("Rekorde") }} <span class="wt-rec-scope" x-text="recordsScope()"></span> {{ hint_button(_("Rekorde")) }}</h2>
+        {% call hint_body() %}<span x-text="recordsNote()"></span>{% endcall %}
+      </div>
+      <div class="wt-rec-groups">
+        <template x-for="group in recordGroups()" :key="group.key">
+          <section class="wt-rec-g" :data-group="group.key">
+            <div class="wt-rec-head">
+              <span class="wt-rec-badge" aria-hidden="true">
+                <svg x-show="group.key === 'temperature'" viewBox="0 0 24 24"><path d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z"/></svg>
+                <svg x-show="group.key === 'wind'" viewBox="0 0 24 24"><path d="M3 8h10a3 3 0 1 0-3-3"/><path d="M3 12h15a3 3 0 1 1-3 3"/><path d="M3 16h7"/></svg>
+                <svg x-show="group.key === 'sun'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/></svg>
+              </span>
+              <h3 class="wt-rec-h" x-text="{temperature: '{{ _("Temperatur") }}', wind: '{{ _("Wind und Regen") }}', sun: '{{ _("Sonne") }}'}[group.key]"></h3>
+            </div>
+            {# Große Kennzahlen; ohne href sind sie kein Link. #}
+            <div class="wt-rec-hero" :data-count="group.heroes.length">
+              <template x-for="record in group.heroes" :key="record.key">
+                <a class="wt-rec-big" :data-tone="recordTone(record.key)" :href="recordHasLink(record) ? recordLink(record) : null">
+                  <span class="wt-rec-k" x-text="recordLabel(record.key)"></span>
+                  <span class="wt-rec-bv" x-html="recordValue(record)"></span>
+                  <span class="wt-rec-chip" x-text="recordDate(record)"></span>
+                </a>
+              </template>
+            </div>
+            <ul class="wt-rec-list" x-show="group.rows.length">
+              <template x-for="record in group.rows" :key="record.key">
+                <li>
+                  {# Ohne href (Sonnigster Monat) ist die Zeile kein Link: ein Monat hat keinen einzelnen Tag. #}
+                  <a class="wt-rec-row" :data-tone="recordTone(record.key)" :href="recordHasLink(record) ? recordLink(record) : null">
+                    <span class="wt-rec-k" x-text="recordLabel(record.key)"></span>
+                    <span class="wt-rec-v" x-html="recordValue(record)"></span>
+                    <span class="wt-rec-d"><span x-text="recordDate(record)"></span><b x-show="recordHasLink(record)" x-text="record.end ? t('Ersten Tag öffnen') : t('Tag öffnen')"></b></span>
+                    <span class="wt-rec-bar" :data-kind="record.key" x-show="recordBar(record) != null"><i :style="'width:' + recordBar(record) + '%'"></i></span>
+                  </a>
+                </li>
+              </template>
+            </ul>
+          </section>
+        </template>
+      </div>
+    </div>
+    <p class="hint hint-status" x-show="longterm && !longterm.records.length" x-cloak>{{ _("Noch keine Rekorde: Es liegen noch keine abgeschlossenen Tage mit Werten vor.") }}</p>
+    {% endif %}
+    {% if show_kenntage %}
     <div class="card wt-card">
       <div class="wt-controls">
         <h2 class="wt-h2">{{ _("Kenntage je Jahr") }} {{ hint_button(_("Kenntage je Jahr")) }}</h2>
         {% call hint_body() %}<span x-text="kenntageNote()"></span>{% endcall %}
-        <div class="wt-seg" role="group" aria-label="{{ _('Zeitraum') }}">
-          <button type="button" :aria-pressed="(kenntageRange === 'all').toString()" @click="setKenntageRange('all')">{{ _("Alle Jahre") }}</button>
-          <button type="button" :aria-pressed="(kenntageRange === '5').toString()" @click="setKenntageRange('5')">{{ _("Letzte 5") }}</button>
-        </div>
       </div>
       <div class="wt-kk-grid">
-        {% for key, label in (("frost", _("Frosttage")), ("eis", _("Eistage")), ("sommer", _("Sommertage")), ("heiss", _("Heiße Tage"))) %}
-        <div class="wt-kk">
+        {% for key, label in (("frost", _("Frosttage")), ("eis", _("Eistage")), ("sommer", _("Sommertage")), ("heiss", _("Heiße Tage")), ("sunny", _("Sonnentage")), ("overcast", _("Trübe Tage"))) %}
+        <div class="wt-kk"{% if key in ("sunny", "overcast") %} x-show="longterm && longterm.sun_kenntage" x-cloak{% endif %}>
           <div class="wt-kk-head"><span class="wt-kk-swatch wt-kk-{{ key }}"></span><span class="wt-kk-name">{{ label }}</span><span class="wt-kk-avg" x-text="kenntageAvg('{{ key }}')"></span></div>
           <div class="wt-chart wt-kk-chart" x-ref="kenntageChart{{ key | capitalize }}"></div>
         </div>
@@ -190,16 +541,32 @@
       </div>
       <p class="wt-foot" x-show="kenntageFoot()" x-text="kenntageFoot()" x-cloak></p>
     </div>
+    {% endif %}
+    {% if show_monthyears %}
     <div class="card wt-card" x-show="tempYears" x-cloak>
       <div class="wt-controls">
-        <h2 class="wt-h2">{{ _("Mitteltemperatur je Monat und Jahr") }} {{ hint_button(_("Mitteltemperatur je Monat und Jahr")) }}</h2>
+        <h2 class="wt-h2">
+          <span x-show="tempYearsMetric === 'temperature'">{{ _("Mitteltemperatur je Monat und Jahr") }}</span>
+          {% if precip_modes %}<span x-show="tempYearsMetric === 'precip'" x-cloak>{{ _("Niederschlag je Monat und Jahr") }}</span>{% endif %}
+          {% if has_dayimage %}<span x-show="tempYearsMetric === 'sun'" x-cloak>{{ _("Sonnenstunden je Monat und Jahr") }}</span>{% endif %}
+          {{ hint_button(_("Monatswerte je Jahr")) }}</h2>
         {% call hint_body() %}<span x-text="tempYearsNote()"></span>{% endcall %}
+        {% if precip_modes or has_dayimage %}
+        <div class="wt-seg" role="group" aria-label="{{ _('Kennzahl') }}">
+          <button type="button" :aria-pressed="(tempYearsMetric === 'temperature').toString()" @click="setTempYearsMetric('temperature')">{{ _("Temperatur") }}</button>
+          {% if precip_modes %}<button type="button" :aria-pressed="(tempYearsMetric === 'precip').toString()" @click="setTempYearsMetric('precip')">{{ _("Niederschlag") }}</button>{% endif %}
+          {% if has_dayimage %}<button type="button" :aria-pressed="(tempYearsMetric === 'sun').toString()" @click="setTempYearsMetric('sun')">{{ _("Sonne") }}</button>{% endif %}
+        </div>
+        {% endif %}
       </div>
       <div class="tbl-wrap wt-table-wrap"><table class="wt-tm" x-ref="tempYearsTable"></table></div>
+      <p class="hint hint-warn" x-show="tempYearsError" x-text="tempYearsError" x-cloak></p>
       <div class="wt-tm-legend">
-        <span>{{ _("kälter") }}</span><span class="wt-tm-scale" x-ref="tempYearsScale"></span><span>{{ _("wärmer als im Mittel der Jahre im Archiv") }}</span>
+        <span x-text="tempYearsLegend().low"></span><span class="wt-tm-scale" x-ref="tempYearsScale"></span><span x-text="tempYearsLegend().high"></span>
       </div>
     </div>
+    {% endif %}
+    {% if show_yearmatrix %}
     <div class="card wt-card">
       <div class="wt-controls">
         <h2 class="wt-h2">{{ _("Jahre im Vergleich, Tag für Tag") }} {{ hint_button(_("Jahre im Vergleich, Tag für Tag")) }}</h2>
@@ -211,41 +578,48 @@
           {% if precip_modes %}
           <button type="button" :aria-pressed="(matrixMetric === 'precip').toString()" @click="setMatrixMetric('precip')">{{ _("Niederschlag") }}</button>
           {% endif %}
+          {% if has_dayimage %}
+          <button type="button" :aria-pressed="(matrixMetric === 'sun').toString()" @click="setMatrixMetric('sun')">{{ _("Sonne") }}</button>
+          {% endif %}
         </div>
       </div>
       <div class="wt-chart wt-matrix" x-ref="matrixChart" :style="matrixHeight()"></div>
       <p class="hint hint-warn" x-show="matrixError" x-text="matrixError" x-cloak></p>
     </div>
-    <div class="card wt-card" x-show="longterm && longterm.records.length" x-cloak>
-      <div class="wt-controls">
-        <h2 class="wt-h2">{{ _("Rekorde") }} {{ hint_button(_("Rekorde")) }}</h2>
-        {% call hint_body() %}<span x-text="recordsNote()"></span>{% endcall %}
-      </div>
-      <div class="wt-kpis" :style="'--wt-cols:' + kpiCols(longterm ? longterm.records.length : 0)">
-        <template x-for="record in (longterm ? longterm.records : [])" :key="record.key">
-          <div class="wt-tile">
-            <span class="wt-tile-label" x-text="recordLabel(record.key)"></span>
-            <span class="wt-tile-value" x-html="recordValue(record)"></span>
-            <span class="wt-tile-sub" x-text="recordDate(record)"></span>
-            <a class="wt-record-link" :href="recordLink(record)">{{ _("Tag öffnen") }}</a>
-          </div>
-        </template>
-      </div>
-    </div>
-    <p class="hint hint-status" x-show="longterm && !longterm.records.length" x-cloak>{{ _("Rekorde erscheinen, sobald das Archiv mindestens ein Jahr Tageswerte enthält.") }}</p>
+    {% endif %}
     <p class="hint hint-warn" x-show="longError" x-text="longError" x-cloak></p>
   </section>
-  {% if has_heating %}
+  {% endif %}
+
+  {% if show_heat %}
   <section x-show="tab === 'heat'" x-cloak role="tabpanel" id="wt-panel-heat" aria-labelledby="wt-tab-heat">
     <div class="card wt-card">
       <div class="wt-controls">
         <h2 class="wt-h2">{{ _("Heizen und Wetter") }}</h2>
+        <label class="wt-check" x-show="heat" x-cloak>{{ _("Heizperiode") }}
+          <select x-model="heatSeason" @change="drawHeat()">
+            <template x-for="period in heatPeriods()" :key="period"><option :value="period" x-text="heatLabel(period)"></option></template>
+          </select>
+        </label>
         <label class="wt-check" x-show="heat" x-cloak>{{ _("Raumtemperatur") }}
           <input type="text" class="wt-num" x-model="heatRoom" @input="drawHeat()" inputmode="decimal" size="3"> °C</label>
         <label class="wt-check" x-show="heat" x-cloak>{{ _("Heizgrenze") }}
           <input type="text" class="wt-num" x-model="heatLimit" @input="drawHeat()" inputmode="decimal" size="3"> °C</label>
       </div>
-      <p class="wt-headline" x-show="heat" x-text="heatHeadline()"></p>
+    </div>
+    <div class="wt-kpis" x-show="heatKpis().length" x-cloak :style="'--wt-cols:' + kpiCols(heatKpis().length)">
+      <template x-for="kpi in heatKpis()" :key="kpi.label">
+        <div class="wt-tile" :style="'--wt-accent:' + kpi.accent">
+          <span class="wt-tile-icon" x-html="iconSvg(kpi.icon)"></span>
+          <span class="wt-tile-label" x-text="kpi.label"></span>
+          <span class="wt-tile-value" x-html="kpi.value"></span>
+          <span class="wt-tile-sub" x-text="kpi.sub"></span>
+        </div>
+      </template>
+    </div>
+    <div class="card wt-card">
+      <label class="wt-check" x-show="heatHasSun()" x-cloak>
+        <input type="checkbox" x-model="heatBySun" @change="drawHeat()"> {{ _("Punkte nach Sonne einfärben") }} <span class="wt-badge">{{ _("experimentell") }}</span></label>
       {# Zähler als Auswahl-Pillen (.filter-chip aus app.css), mit Farbpunkt wie im Streudiagramm #}
       <div class="wt-chips" role="group" aria-label="{{ _('Heizzähler') }}" x-show="heat && heat.counters.length > 1" x-cloak>
         <template x-for="(counter, i) in (heat ? heat.counters : [])" :key="counter.entity_id">
@@ -254,7 +628,16 @@
         </template>
       </div>
       <div class="wt-chart wt-chart-tall" x-ref="heatChart"></div>
-      <p class="hint hint-status" x-text="heatReadout()"></p>
+      <div class="wt-slopes" x-show="heatSlopes().length" x-cloak>
+        <template x-for="row in heatSlopes()" :key="row.period">
+          <div class="wt-slope" :title="row.title">
+            <span class="wt-slope-name"><i class="wt-swatch" :style="'background:' + row.color"></i><span x-text="row.label"></span></span>
+            <span class="wt-slope-v" x-text="row.value"></span>
+            <span class="wt-slope-s" x-text="row.sub"></span>
+          </div>
+        </template>
+      </div>
+      <p class="hint hint-status" x-show="heatReadout()" x-text="heatReadout()"></p>
       <p class="hint hint-warn" x-show="heatError" x-text="heatError" x-cloak></p>
     </div>
     <div class="card wt-card" x-show="heat" x-cloak>
@@ -262,16 +645,22 @@
         <h2 class="wt-h2"><span x-text="t('Gradtagzahl {tag} und Verbrauch je Monat', {tag: heatTag()})"></span> {{ hint_button(_("Gradtagzahl")) }}</h2>
         {% call hint_body() %}{{ _("Die Gradtagzahl zählt je Tag die Raumtemperatur minus Tagesmittel, aber nur an Tagen unter der Heizgrenze. kWh je Gradtag ist der witterungsbereinigte Verbrauch: Er lässt kalte und milde Winter vergleichen. Die Heizperiode ist fest 1.10. bis 30.4., und nur abgeschlossene Tage mit ausreichend Temperaturwerten zählen.") }}{% endcall %}
       </div>
-      <div class="wt-table-wrap"><table class="wt-table wt-heat-table" x-ref="heatTable"></table></div>
+      <div class="wt-table-wrap"><table class="wt-table wt-table-full wt-heat-table" x-ref="heatTable"></table></div>
+    </div>
+    <div class="card wt-card" x-show="heatHasSun()" x-cloak>
+      <div class="wt-controls">
+        <h2 class="wt-h2">{{ _("Heizen und Sonne") }} <span class="wt-badge">{{ _("experimentell") }}</span> {{ hint_button(_("Heizen und Sonne")) }}</h2>
+        {% call hint_body() %}{{ _("Jeder Heiztag bekommt die Klasse aus dem Tagesbild (sonnig, wechselhaft, trüb). Verglichen wird kWh je Gradtag, nicht kWh je Tag, weil klare Tage oft kälter sind; es zählen nur Tage unter der Heizgrenze mit mindestens einem Gradtag. Ein Unterschied wird nur genannt, wenn er sich vom Zufall abhebt, und erst ab 8 Tagen je Klasse. Der Sensor misst senkrecht an einem Punkt: Was durch die Fenster kommt, hängt von Ausrichtung, Verschattung und Rollläden ab, das Ergebnis gilt also nur für dieses Haus. PV-gesteuertes Heizen kann den Effekt umdrehen, und der Wärmespeicher des Hauses lässt den Vortag mitwirken.") }}{% endcall %}
+      </div>
+      <div class="wt-ts-verdict">
+        <span class="wt-ts-chip" :data-status="heatSunVerdict().status" x-text="heatSunVerdict().chip"></span>
+        <span class="wt-ts-text" x-text="heatSunVerdict().text"></span>
+      </div>
+      <div class="wt-ts-box" x-ref="heatSunTiles"></div>
     </div>
     <div class="card wt-card" x-show="heat && heat.counters.length > 1" x-cloak>
       <div class="wt-controls">
-        <h2 class="wt-h2">{{ _("Anteil je Zähler") }}</h2>
-        <label class="wt-check">{{ _("Heizperiode") }}
-          <select x-model="heatSeason" @change="drawHeat()">
-            <template x-for="period in heatPeriods()" :key="period"><option :value="period" x-text="heatLabel(period)"></option></template>
-          </select>
-        </label>
+        <h2 class="wt-h2"><span>{{ _("Anteil je Zähler") }}</span> <span x-text="heatLabel(heatSeason)"></span></h2>
       </div>
       <div class="wt-chart" x-ref="heatShareChart"></div>
       <p class="hint hint-status" x-text="heatShareText()"></p>

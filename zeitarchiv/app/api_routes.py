@@ -83,8 +83,9 @@ EventText = Annotated[str, Field(max_length=MAX_EVENT_TEXT_LENGTH)]
 # "cards": /api/card/items und /api/card/chart existieren, gespeicherte Charts für
 # die Lovelace-Karte. "card_series": /api/card/entities und /api/card/series, die
 # Karte ohne gespeichertes Chart. "card_spark": /api/card/spark, die Sparkline unter
-# einer Kachelkarte. "card_table": /api/card/table, gespeicherte Tabellen.
-API_CAPABILITIES = ("state", "ai", "catalog", "selection", "cards", "card_series", "card_spark", "card_table")
+# einer Kachelkarte. "card_table": /api/card/table, gespeicherte Tabellen. "card_elements":
+# /api/card/elements und /api/card/element, Bausteine der Dashboards Energie und Wetter.
+API_CAPABILITIES = ("state", "ai", "catalog", "selection", "cards", "card_series", "card_spark", "card_table", "card_elements")
 
 
 class EventIn(BaseModel):
@@ -223,7 +224,7 @@ def _validate_entity_id_or_400(entity_id: str) -> None:
 
 
 def _table_aggregates(result: dict) -> dict[str, float | None]:
-    """Verdichtet eine Chart-Serie auf die fünf Tabellen-Aggregationen."""
+    """Verdichtet eine Chart-Serie auf die sechs Tabellen-Aggregationen."""
     points = result["points"]
     total = sum((point["value"] or 0.0) for point in points)
     average = total / len(points) if points else 0.0
@@ -238,7 +239,11 @@ def _table_aggregates(result: dict) -> dict[str, float | None]:
         if point["max"] is not None or point["value"] is not None
     ]
     automatic = total if result["aggregation_type"] in ("counter", "switch") else average
+    # Zuletzt erfasster Wert des Zeitraums (letzter Punkt mit Wert); bei Standard-
+    # Linien trägt der Randpunkt am Fensteranfang den Wert auch ohne neue Messung.
+    last_values = [point["value"] for point in points if point["value"] is not None]
     return {
+        "last": last_values[-1] if last_values else None,
         "auto": automatic,
         "avg": average,
         "min": min(minima) if minima else None,
@@ -715,7 +720,7 @@ def create_api_router(deps: ApiDependencies, state: ApiState) -> APIRouter:
                 deps.data_dir, deps.index, entity_id, range, deps.tz, now,
                 offset=offset if compare_mode == "year" else offset - 1,
                 continuous=continuous,
-                year_over_year=compare_mode == "year",
+                year_over_year=compare_mode == "year", full_period=True,
                 chart_type=chart_type,
                 read_cache=read_cache,
             )
@@ -788,6 +793,10 @@ def create_api_router(deps: ApiDependencies, state: ApiState) -> APIRouter:
         is_current = True
         for entity_id in ids:
             entity = deps.index.get_entity(entity_id)
+            # Hauptabfrage, Vergleichsreihe und „Summe bis zum gleichen Tag“ lesen dieselbe Monats-CSV und dieselben
+            # Rollup-Stufen. Der Cache gilt je Entität und nicht je Anfrage: Bei vielen Entitäten läge sonst jede
+            # Hot-Datei bis zum Ende der Anfrage im Speicher (auf kleinen Geräten Hunderte MB bei großen Dateien).
+            entity_cache = read_cache if read_cache is not None else query_mod.QueryReadCache()
             # Heatmap: nur die Zellen der Zustands-Entitäten; alles andere
             # kommt unverändert, die Oberfläche wirft es für die Heatmap ohnehin
             # heraus (Zustände stehen nie neben anderen Serien).
@@ -811,6 +820,7 @@ def create_api_router(deps: ApiDependencies, state: ApiState) -> APIRouter:
                 result = query_mod.query_series(
                     deps.data_dir, deps.index, entity_id, range, deps.tz, now,
                     offset=offset, continuous=continuous, year_over_year=year_over_year,
+                    read_cache=entity_cache,
                 )
             entry = {
                 "entity_id": entity_id,
@@ -840,7 +850,7 @@ def create_api_router(deps: ApiDependencies, state: ApiState) -> APIRouter:
                     deps.data_dir, deps.index, entity_id, range, deps.tz, now,
                     offset=offset if compare_mode == "year" else offset - 1,
                     continuous=continuous,
-                    year_over_year=compare_mode == "year",
+                    year_over_year=compare_mode == "year", full_period=True, read_cache=entity_cache,
                 )
                 entry.update(
                     compare_points=compare_result["points"],
@@ -853,6 +863,7 @@ def create_api_router(deps: ApiDependencies, state: ApiState) -> APIRouter:
                     cut = query_mod.query_compare_cut(
                         deps.data_dir, deps.index, entity_id, range, deps.tz, now,
                         offset=offset, continuous=continuous, year_over_year=compare_mode == "year",
+                        read_cache=entity_cache,
                     )
                     if cut:
                         entry.update(compare_cut_points=cut["points"], compare_cut_end=cut["window_end"])

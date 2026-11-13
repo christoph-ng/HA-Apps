@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from app import wetter_analysis as analysis_mod
 from app import wetter_routes
 from app.storage import hotbuffer
 from app.storage import rollup as rollup_mod
@@ -46,6 +47,15 @@ def _add(service, entity_id, domain, state_class, unit, points):
 
 def _configure(service, **roles):
     wetter_routes._save_config(service.deps.index, {**wetter_routes._empty_config(), **roles})
+
+
+
+def _wetter_script() -> str:
+    """wetter.js samt element-table-render.js: die Vergleichstabelle wurde dorthin herausgelöst (Roadmap 1.48), damit
+    dieselbe Zeichnung in der Lovelace-Karte läuft. Die Prüfungen gelten dem Zusammenspiel beider."""
+    from _paths import APP
+
+    return "\n".join((APP / "static/js" / name).read_text(encoding="utf-8") for name in ("wetter.js", "element-table-render.js"))
 
 
 def test_config_round_trip_and_defaults(service) -> None:
@@ -255,8 +265,11 @@ def test_temperature_comparison_route_validates_the_period(client) -> None:
     index.set_setting(wetter_routes.SETTING_ENABLED, "1")
     wetter_routes._save_config(index, {**wetter_routes._empty_config(), "temperature": "sensor.wetter_test_temp9"})  # noqa: SLF001
     assert client.get("/wetterdashboard/temperaturen?days=5").status_code == 400
+    assert client.get("/wetterdashboard/temperaturen?days=90").status_code == 400
     result = client.get("/wetterdashboard/temperaturen?days=7")
     assert result.status_code == 200 and len(result.json()["dates"]) == 7
+    year = client.get("/wetterdashboard/temperaturen?days=365")
+    assert year.status_code == 200 and len(year.json()["dates"]) == 365
     index.set_setting(wetter_routes.SETTING_CONFIG, "")
 
 
@@ -269,6 +282,24 @@ def test_long_term_tab_has_the_year_by_month_temperature_card(client) -> None:
     html = client.get("/wetterdashboard").text
     assert "tempYearsTable" in html
     assert client.get("/wetterdashboard/monatsvergleich?metric=temperature").status_code == 200  # Datenquelle der Karte
+    # Ohne Niederschlag und Helligkeit gibt es nichts umzuschalten.
+    assert "setTempYearsMetric(" not in html
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_year_by_month_card_offers_precipitation_and_sun_when_assigned(client) -> None:
+    from app.main import index
+
+    index.get_or_create_entity("sensor.wetter_test_temp11", "sensor", "measurement", "°C")
+    index.get_or_create_entity("sensor.wetter_test_lux11", "sensor", "measurement", "lx")
+    index.set_setting(wetter_routes.SETTING_ENABLED, "1")
+    wetter_routes._save_config(  # noqa: SLF001
+        index, {**wetter_routes._empty_config(), "temperature": "sensor.wetter_test_temp11", "illuminance": "sensor.wetter_test_lux11"},
+    )
+    html = client.get("/wetterdashboard").text
+    assert "setTempYearsMetric('temperature')" in html
+    assert "setTempYearsMetric('sun')" in html
+    assert "setTempYearsMetric('precip')" not in html
     index.set_setting(wetter_routes.SETTING_CONFIG, "")
 
 
@@ -358,7 +389,7 @@ def test_monthly_and_longterm_have_the_expected_shape(service) -> None:
     rain = service.compute_monthly("precip", "mm", NOW)
     assert rain["unit"] == "mm" and rain["years"]["2026"][7] == pytest.approx(3.5)
     longterm = service.compute_longterm(NOW)
-    assert longterm["records"] == [] and longterm["records_days"] == 0  # ein paar Tage sind kein Archiv
+    assert longterm["records"] == [] and longterm["records_days"] == 0  # ohne abgedeckte Tage keine Rekorde
     assert longterm["kenntage"] == {} and longterm["current_year"] == 2026  # ohne abgedeckte Tage keine Kenntage
 
 
@@ -537,9 +568,8 @@ def test_radiation_defaults_to_whole_numbers_and_other_roles_stay_automatic(serv
 
 
 def test_radiation_has_no_minimum_row_in_the_script() -> None:
-    from _paths import APP
 
-    script = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    script = _wetter_script()
     assert "row.key === 'radiation'" in script
 
 
@@ -560,10 +590,10 @@ def test_column_selection_is_a_popover_like_the_entity_list() -> None:
 
 
 def test_comparison_table_sits_in_the_app_table_frame() -> None:
-    from _paths import APP, TEMPLATES
+    from _paths import TEMPLATES
 
     assert 'class="tbl-wrap wt-table-wrap"' in (TEMPLATES / "_wetter_view.html").read_text(encoding="utf-8")
-    assert "is-scrollable" in (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    assert "is-scrollable" in _wetter_script()
 
 
 def test_tiles_carry_the_entity_and_link_to_it_and_css_uses_defined_font_tokens(service) -> None:
@@ -584,7 +614,7 @@ def test_cards_match_the_energy_dashboard_card_metrics() -> None:
     css = (APP / "static/css/app.css").read_text(encoding="utf-8")
     energy = (APP / "static/css/pages/energiedashboard.css").read_text(encoding="utf-8")
     assert ".edash-card{border:1px solid var(--border);border-radius:12px;background:var(--surface);padding:16px 18px" in energy
-    assert ".wt-card{padding:16px 18px;border-radius:12px;box-shadow:var(--shadow);}" in css
+    assert ".wt-card{padding:16px 18px;border-radius:12px;box-shadow:var(--shadow),var(--tile-lift);}" in css
 
 
 def test_setup_form_uses_app_fields_and_info_buttons(client) -> None:
@@ -593,8 +623,52 @@ def test_setup_form_uses_app_fields_and_info_buttons(client) -> None:
     index.set_setting(wetter_routes.SETTING_CONFIG, "")
     html = client.get("/wetterdashboard/setup").text
     assert html.count('class="field"') >= 4 and "wt-item-add" in html
-    assert html.count("hint-toggle") == 4  # Weitere Sensoren, Heizenergie, Regentage, Anzeige
+    assert html.count("hint-toggle") == 5  # Weitere Sensoren, Regentage, Sonne und Tageslicht, Anzeige, Experimentell
     assert '<p class="hint">' not in html  # lose .hint-Absätze verschwänden auf dem Telefon ohne Knopf
+
+
+def test_conditions_layout_setting_defaults_saves_and_rejects_unknown_values(client) -> None:
+    from app.main import index
+
+    index.get_or_create_entity("sensor.wetter_test_temp12", "sensor", "measurement", "°C")
+    index.get_or_create_entity("sensor.wetter_test_wind12", "sensor", "measurement", "km/h")
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    base = {"temperature": "sensor.wetter_test_temp12", "wind": "sensor.wetter_test_wind12"}
+    assert wetter_routes.DEFAULT_LAGE_LAYOUT in wetter_routes.LAGE_LAYOUTS
+    assert client.post("/wetterdashboard/setup", data={**base, "lage_layout": "riesig"}).status_code == 400
+    page = client.post("/wetterdashboard/setup", data=base)  # ohne Angabe: Standard
+    assert f'data-layout="{wetter_routes.DEFAULT_LAGE_LAYOUT}"' in page.text
+    for layout in wetter_routes.LAGE_LAYOUTS:
+        saved = client.post("/wetterdashboard/setup", data={**base, "lage_layout": layout})
+        assert saved.status_code == 200 and f'data-layout="{layout}"' in saved.text
+    # Ein Aufruf ohne das Feld (ältere Aufrufer) behält die letzte Wahl.
+    assert 'data-layout="large"' in client.post("/wetterdashboard/setup", data={**base, "lage_layout": "large"}).text
+    assert 'data-layout="large"' in client.post("/wetterdashboard/setup", data=base).text
+    # Die Auswahl steht in der Einrichtung, mit der gespeicherten Wahl vorbelegt.
+    setup = client.get("/wetterdashboard/setup").text
+    assert 'name="lage_layout" value="large" checked' in setup
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_tile_style_setting_defaults_saves_and_rejects_unknown_values(client) -> None:
+    from app.main import index
+
+    index.get_or_create_entity("sensor.wetter_test_temp13", "sensor", "measurement", "°C")
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    base = {"temperature": "sensor.wetter_test_temp13"}
+    assert wetter_routes.DEFAULT_TILE_STYLE in wetter_routes.TILE_STYLES
+    assert client.post("/wetterdashboard/setup", data={**base, "tile_style": "neon"}).status_code == 400
+    page = client.post("/wetterdashboard/setup", data=base)  # ohne Angabe: Standard
+    assert f'data-tile-style="{wetter_routes.DEFAULT_TILE_STYLE}"' in page.text
+    for style in wetter_routes.TILE_STYLES:
+        saved = client.post("/wetterdashboard/setup", data={**base, "tile_style": style})
+        assert saved.status_code == 200 and f'data-tile-style="{style}"' in saved.text
+    # Ein Aufruf ohne das Feld (ältere Aufrufer) behält die letzte Wahl.
+    assert 'data-tile-style="tint"' in client.post("/wetterdashboard/setup", data={**base, "tile_style": "tint"}).text
+    assert 'data-tile-style="tint"' in client.post("/wetterdashboard/setup", data=base).text
+    setup = client.get("/wetterdashboard/setup").text
+    assert 'name="tile_style" value="tint" checked' in setup
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
 
 
 # -- Stichtag ---------------------------------------------------------------------------------
@@ -643,31 +717,30 @@ def test_reference_day_today_or_later_means_now_and_garbage_is_rejected(service)
 
 
 def test_tiles_and_table_show_placeholders_while_loading() -> None:
-    from _paths import APP, TEMPLATES
+    from _paths import TEMPLATES
 
     text = (TEMPLATES / "_wetter_view.html").read_text(encoding="utf-8")
     assert 'x-show="!tilesLoaded"' in text and "wt-tile is-loading" in text and 'class="wt-loading"' in text
-    assert "this.tilesLoaded = true" in (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    assert "this.tilesLoaded = true" in _wetter_script()
 
 
 def test_day_columns_name_the_hour_not_a_minute() -> None:
-    from _paths import APP
 
-    script = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    script = _wetter_script()
     assert "t('{from}–{to} Uhr'" in script and "fmtDate(formats.hm, ts)" not in script
 
 
 def test_tabs_are_keyboard_operable_and_linked_to_their_panels() -> None:
     import re
 
-    from _paths import APP, TEMPLATES
+    from _paths import TEMPLATES
 
     text = (TEMPLATES / "_wetter_view.html").read_text(encoding="utf-8")
     tabs = set(re.findall(r'role="tab" id="wt-tab-(\w+)" aria-controls="wt-panel-\1"', text))
     panels = set(re.findall(r'role="tabpanel" id="wt-panel-(\w+)" aria-labelledby="wt-tab-\1"', text))
     assert tabs == panels and {"overview", "long"} <= tabs
     assert text.count('@keydown="tabKey($event)"') == len(tabs) and text.count(":tabindex=") == len(tabs)
-    script = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    script = _wetter_script()
     assert all(key in script for key in ("ArrowLeft", "ArrowRight", "Home", "End"))
 
 
@@ -682,36 +755,36 @@ def test_toggles_are_app_chips_and_card_heads_keep_one_layout() -> None:
 
 
 def test_year_over_year_is_one_menu_and_not_part_of_the_column_list() -> None:
-    from _paths import APP, TEMPLATES
+    from _paths import TEMPLATES
 
     text = (TEMPLATES / "_wetter_view.html").read_text(encoding="utf-8")
     assert "toggleDDPicker('wt-yoy-{{ sfx }}')" in text and 'id="wt-yoy-{{ sfx }}-popover"' in text
     assert 'x-model="vorjahr"' not in text and "Mit Vorjahr" not in text  # kein Haken zwischen den Spalten mehr
     assert "wt-picker-sep" not in text
-    script = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    script = _wetter_script()
     assert "setYoy(choice)" in script and "yoyLabel()" in script
 
 
 def test_tiles_use_short_names_and_the_layout_helper(service) -> None:
-    from _paths import APP, TEMPLATES
+    from _paths import TEMPLATES
 
     _add(service, "sensor.regen", "sensor", "total_increasing", "mm", [(_ts(19, 0), 100.0), (_ts(20, 6), 103.5)])
     _add(service, "binary_sensor.regen", "binary_sensor", None, "", [(_ts(20, 6), 1.0), (_ts(20, 6, 30), 0.0)])
     _add(service, "sensor.t", "sensor", "measurement", "°C", [(_ts(20, 1), 12.0)])
     _configure(service, temperature="sensor.t", precip_mm="sensor.regen", precip_dur="binary_sensor.regen")
     assert [tile["label"] for tile in service.compute_tiles(NOW)] == ["Temperatur", "Niederschlag", "Regen"]
-    assert "WetterLayout.tileColumns" in (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    assert "WetterLayout.tileColumns" in _wetter_script()
     assert "wetter-layout.js" in (TEMPLATES / "wetterdashboard.html").read_text(encoding="utf-8")
 
 
 def test_reference_day_uses_the_dashboard_stichtag_bar_of_the_app() -> None:
-    from _paths import APP, TEMPLATES
+    from _paths import TEMPLATES
 
     view = (TEMPLATES / "_wetter_view.html").read_text(encoding="utf-8")
     page = (TEMPLATES / "wetterdashboard.html").read_text(encoding="utf-8")
     assert "{{ period_nav(true, true) }}" in view and "period_assets()" in page
     assert "wt-daynav" not in view and 'type="date"' not in view
-    script = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    script = _wetter_script()
     assert "Alpine.store('dashStichtag').date" in script and "'dashboard-stichtag'" in script
     assert "shiftStichtag" not in script and "setStichtag" not in script
 
@@ -730,21 +803,20 @@ def test_page_context_carries_the_calendar_bounds_for_the_stichtag_bar(client) -
 
 
 def test_columns_with_a_reference_day_show_the_weekday_under_the_date() -> None:
-    from _paths import APP
 
-    script = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    script = _wetter_script()
     assert "formats.weekday" in script and "weekday: new Intl.DateTimeFormat" in script
 
 
 def test_wind_and_sun_tab_groups_tiles_and_rows() -> None:
-    from _paths import APP, TEMPLATES
+    from _paths import TEMPLATES
 
     view = (TEMPLATES / "_wetter_view.html").read_text(encoding="utf-8")
-    assert "{% if has_windsun %}" in view and 'id="wt-panel-wind"' in view
+    assert "{% if show_windtab %}" in view and "has_windtiles" in view and 'id="wt-panel-wind"' in view
     assert 'weather_card("basis"' in view and 'weather_card("wind"' in view
     assert 'weather_card("klima"' in view and 'id="wt-panel-klima"' in view
-    script = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
-    assert "const WIND_KEYS = ['wind', 'gust', 'radiation']" in script and "groupOf" in script
+    script = _wetter_script()
+    assert "const WIND_KEYS = ['wind', 'gust', 'radiation', 'illuminance']" in script and "groupOf" in script
 
 
 def test_wind_and_sun_tab_only_appears_with_one_of_its_roles(client) -> None:
@@ -818,3 +890,650 @@ def test_tiles_follow_the_reference_day(service) -> None:
     assert past["last"] == 6.0  # Wert am Ende des gewählten Tages
     assert past["today"]["min"] == 3.0 and past["today"]["max"] == 11.0
     assert service.compute_tiles(NOW, at="2026-08-20")[0]["last"] == 15.0  # heute gilt als „jetzt“
+
+
+# -- Sonnenscheindauer (ROADMAP 1.43, Ergänzung Helligkeit) --------------------------------------
+
+
+def _hour_rows(day: int, values: list[tuple[int, float]]) -> list:
+    return [rollup_mod.FineRow(bucket_start=_ts(day, hour), value=value) for hour, value in values]
+
+
+def test_summarize_sunshine_counts_hours_at_or_above_the_threshold_per_day(service) -> None:
+    config = {**wetter_routes._empty_config(), "sun_threshold_lx": 25000.0}
+    rows = (
+        _hour_rows(18, [(9, 30000.0), (10, 25000.0), (11, 24999.0)])  # zwei Stunden: die Schwelle selbst zählt
+        + _hour_rows(19, [(9, 90000.0), (10, 98800.0), (11, 60000.0), (12, 10000.0)])  # drei Stunden
+    )
+    summary = service.summarize("sunshine", rows, config)
+    assert summary["hours"] == pytest.approx(5.0)
+    assert summary["top"] == pytest.approx(3.0) and summary["top_ts"] == _ts(19, 9)
+
+
+def test_summarize_sunshine_counts_a_cut_hour_only_up_to_the_end(service) -> None:
+    config = {**wetter_routes._empty_config(), "sun_threshold_lx": 25000.0}
+    rows = _hour_rows(20, [(10, 40000.0), (11, 40000.0)])
+    # Bis 11:30: die zweite Stunde ist erst zur Hälfte vorbei (laufende Stunde bzw. Schnitt des Vorjahresfensters).
+    assert service.summarize("sunshine", rows, config, until=_ts(20, 11, 30))["hours"] == pytest.approx(1.5)
+    assert service.summarize("sunshine", rows, config, until=_ts(21, 0))["hours"] == pytest.approx(2.0)
+
+
+def test_summarize_sunshine_bridges_gaps_between_two_bright_hours_only(service) -> None:
+    # Ein Sensor, der mittags bei 98.800 lx klebt, löst kein Ereignis aus: die Stunden dazwischen haben keine Zeile.
+    config = {**wetter_routes._empty_config(), "sun_threshold_lx": 25000.0}
+    bright = _hour_rows(20, [(10, 98800.0), (14, 98800.0)])
+    assert service.summarize("sunshine", bright, config)["hours"] == pytest.approx(5.0)  # 10 bis 14 Uhr
+    # Dunkle Zeile danach: die Lücke gilt nicht als sonnig (die Wolke kam irgendwann in der Lücke).
+    assert service.summarize("sunshine", _hour_rows(20, [(10, 98800.0), (13, 5000.0)]), config)["hours"] == pytest.approx(1.0)
+    # Eine Lücke über der Grenze (Ausfall) zählt nicht.
+    assert service.summarize("sunshine", _hour_rows(19, [(7, 98800.0)]) + _hour_rows(19, [(15, 98800.0)]), config)["hours"] == pytest.approx(2.0)
+    # Das Ende des Fensters kappt auch aufgefüllte Stunden.
+    assert service.summarize("sunshine", bright, config, until=_ts(20, 12, 30))["hours"] == pytest.approx(2.5)
+
+
+def test_summarize_sunshine_without_values_is_missing_not_zero(service) -> None:
+    config = {**wetter_routes._empty_config(), "sun_threshold_lx": 25000.0}
+    assert service.summarize("sunshine", [], config) is None
+    assert service.summarize("sunshine", [rollup_mod.FineRow(bucket_start=_ts(20, 9))], config) is None
+    # Ein dunkler Tag mit Werten ist 0 Stunden, nicht „fehlt“.
+    dark = service.summarize("sunshine", _hour_rows(20, [(9, 3000.0)]), config)
+    assert dark["hours"] == 0.0 and dark["top"] is None and dark["top_ts"] is None
+
+
+def test_table_has_a_sunshine_row_from_the_illuminance_role(service) -> None:
+    _add(service, "sensor.t", "sensor", "measurement", "°C", [(_ts(19, 8), 10.0), (_ts(20, 1), 12.0)])
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", [
+        (_ts(19, 8), 30000.0), (_ts(19, 9), 10000.0), (_ts(19, 10), 40000.0), (_ts(19, 11), 0.0),
+        (_ts(20, 10), 40000.0), (_ts(20, 11), 40000.0),
+    ])
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued")
+    data = service.compute_table(TableRequest(columns=["heute", "gestern"], vorjahr=True), NOW)
+    rows = {row["key"]: row for row in data["rows"]}
+    assert list(rows) == ["temperature", "kenntage", "illuminance"]
+    sun = rows["illuminance"]
+    assert sun["kind"] == "sunshine" and sun["label"] == "Sonnenscheindauer"
+    assert sun["cells"]["gestern"]["cur"]["hours"] == pytest.approx(2.0)  # 8 Uhr und 10 Uhr
+    assert sun["cells"]["heute"]["cur"]["hours"] == pytest.approx(2.0)  # 10 und 11 Uhr bei 40.000 lx
+    assert sun["cells"]["heute"]["vj"] is None  # das Archiv beginnt erst gestern: kein Vorjahr, nie 0
+    assert data["sun_threshold_lx"] == 25000.0
+
+
+def test_sunshine_threshold_config_round_trip_and_bounds(service) -> None:
+    index = service.deps.index
+    assert wetter_routes._load_config(index)["sun_threshold_lx"] == wetter_routes.DEFAULT_SUN_THRESHOLD_LX
+    _configure(service, temperature="sensor.t", sun_threshold_lx=40000.0)
+    assert wetter_routes._load_config(index)["sun_threshold_lx"] == 40000.0
+    _configure(service, temperature="sensor.t", sun_threshold_lx=5.0)  # außerhalb: Standard statt Unsinn
+    assert wetter_routes._load_config(index)["sun_threshold_lx"] == wetter_routes.DEFAULT_SUN_THRESHOLD_LX
+
+
+def test_sunshine_setup_through_the_app(client) -> None:
+    from app.main import index
+
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    index.get_or_create_entity("sensor.sonne_test_temp", "sensor", "measurement", "°C")
+    index.get_or_create_entity("sensor.sonne_test_lux", "sensor", "measurement", "lx")
+    index.get_or_create_entity("sensor.sonne_test_zaehler", "sensor", "total_increasing", "kWh")
+    form = client.get("/wetterdashboard/setup").text
+    assert 'name="sun_threshold_lx"' in form and 'data-role="illuminance"' in form
+    base = {"temperature": "sensor.sonne_test_temp", "illuminance": "sensor.sonne_test_lux"}
+    assert client.post("/wetterdashboard/setup", data={**base, "sun_threshold_lx": "30000"}).status_code == 200
+    config = wetter_routes._load_config(index)
+    assert config["illuminance"] == "sensor.sonne_test_lux" and config["sun_threshold_lx"] == 30000.0
+    assert client.post("/wetterdashboard/setup", data={**base, "sun_threshold_lx": "abc"}).status_code == 400
+    assert client.post("/wetterdashboard/setup", data={**base, "sun_threshold_lx": "50"}).status_code == 400
+    # Ein Zähler passt nicht zur Rolle Helligkeit.
+    assert client.post("/wetterdashboard/setup", data={
+        "temperature": "sensor.sonne_test_temp", "illuminance": "sensor.sonne_test_zaehler",
+    }).status_code == 400
+    # Leer: Standard.
+    assert client.post("/wetterdashboard/setup", data=base).status_code == 200
+    assert wetter_routes._load_config(index)["sun_threshold_lx"] == wetter_routes.DEFAULT_SUN_THRESHOLD_LX
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_sunshine_row_and_metrics_exist_in_the_script() -> None:
+
+    script = _wetter_script()
+    assert "row.kind === 'sunshine'" in script and "field: 'hours'" in script
+    assert "data.sun_threshold_lx" in script  # die Schwelle steht in der Beschriftung, nicht versteckt
+
+
+def test_tiles_carry_the_sunshine_hours_when_illuminance_is_assigned(service) -> None:
+    """Die Sonnenscheindauer ist eine Kachel mit Stunden; mit dem Aggregationstyp „sunshine“ stürzte die Abfrage einmal ab."""
+    _add(service, "sensor.t", "sensor", "measurement", "°C", [(_ts(20, 1), 12.0)])
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", [
+        (_ts(19, 10, 30), 40000.0), (_ts(19, 11, 30), 40000.0), (_ts(20, 10, 30), 40000.0), (_ts(20, 11, 30), 40000.0),
+    ])
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued")
+
+    tiles = {tile["key"]: tile for tile in service.compute_tiles(NOW)}
+    assert list(tiles) == ["temperature", "illuminance"]
+    sun = tiles["illuminance"]
+    assert sun["kind"] == "sunshine" and sun["label"] == "Sonnenschein"
+    assert sun["today"]["hours"] == pytest.approx(2.0) and sun["yesterday"]["hours"] == pytest.approx(2.0)
+
+
+def _dayimage_data(service) -> None:
+    def day(number: int, lux: dict[int, float]) -> tuple[list, list]:
+        main = [(_ts(number, hour, 30), value) for hour, value in lux.items()]
+        dawn = [(_ts(number, hour, 30), 1000.0 if value >= 1000 else 0.0) for hour, value in lux.items()]
+        return main, dawn
+
+    sunny = {hour: 80000.0 for hour in range(8, 17)}
+    gray = {hour: 9000.0 for hour in range(8, 17)}
+    mixed = {hour: (80000.0 if hour in (10, 11, 12) else 9000.0) for hour in range(8, 17)}
+    short = {7: 0.0, 8: 9000.0, 9: 9000.0, 10: 0.0}
+    main_rows: list = []
+    dawn_rows: list = []
+    for number, lux in ((19, sunny), (18, gray), (17, mixed), (16, short)):
+        main, dawn = day(number, lux)
+        main_rows += main
+        dawn_rows += dawn
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", main_rows)
+    _add(service, "sensor.lux_daem", "sensor", "measurement", "lx", dawn_rows)
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued", illuminance_dawn="sensor.lux_daem")
+
+
+def test_dayimage_classifies_each_day_by_its_sun_share(service) -> None:
+    _dayimage_data(service)
+    data = service.compute_dayimage(NOW, days=6)
+    classes = {row["date"][-2:]: row["class"] for row in data["days"]}
+    assert classes == {"15": None, "16": None, "17": "mixed", "18": "overcast", "19": "sunny", "20": None}
+    sunny = next(row for row in data["days"] if row["date"].endswith("19"))
+    assert sunny["share"] == pytest.approx(1.0) and sunny["bright_hours"] == pytest.approx(9.0)
+    mixed = next(row for row in data["days"] if row["date"].endswith("17"))
+    assert mixed["share"] == pytest.approx(3 / 9, abs=0.12)
+    assert data["counts"] == {"sunny": 1, "mixed": 1, "overcast": 1, "none": 3}
+    assert next(row for row in data["days"] if row["date"].endswith("20"))["today"] is True  # heute noch ohne helle Stunden
+
+
+def test_heating_days_carry_the_sun_class_of_the_dayimage(service) -> None:
+    config_days = [["2026-08-10", 5.0, [1.0]], ["2026-08-17", 5.0, [1.0]], ["2026-08-18", 5.0, [1.0]], ["2026-08-19", 5.0, [1.0]]]
+    _dayimage_data(service)
+    with service.deps.index._conn:  # noqa: SLF001 — die Testdaten sind absteigend geschrieben
+        service.deps.index._conn.execute(  # noqa: SLF001
+            "UPDATE entities SET first_ts = ? WHERE entity_id = 'sensor.lux_sued'", (_ts(16, 7, 30),),
+        )
+    config = wetter_routes._load_config(service.deps.index)
+    sun = service._heating_sun(config_days, config, NOW)
+    # Tage ohne Klasse (vor dem Archivbeginn der Helligkeit) fehlen, es steht nie eine geratene Klasse da.
+    assert sun == {"2026-08-17": "mixed", "2026-08-18": "overcast", "2026-08-19": "sunny"}
+    assert service._heating_sun([], config, NOW) == {}
+    _configure(service, temperature="sensor.t")
+    assert service._heating_sun(config_days, wetter_routes._load_config(service.deps.index), NOW) == {}
+
+
+def _pv_data(service, last_factor: float = 1.0, unit: str = "W") -> None:
+    lux_rows, pv_rows = [], []
+    for day in range(10, 20):
+        for hour in range(8, 16):
+            lux = 60000.0
+            if not (day == 19 and hour == 11):  # eine Lücke: der gesättigte Süd-Sensor schreibt bei gleichem Wert nichts
+                lux_rows.append((_ts(day, hour, 30), lux))
+            factor = last_factor if day == 19 else 1.0
+            pv_rows.append((_ts(day, hour, 30), (3000.0 if unit == "W" else 3.0) * factor))
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", lux_rows)
+    _add(service, "sensor.pv", "sensor", "measurement", unit, pv_rows)
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued", pv_power="sensor.pv")
+
+
+def test_pv_compares_the_closed_days_with_the_learned_expectation(service) -> None:
+    _pv_data(service, last_factor=0.5)
+    data = service.compute_pv(NOW, days=3)
+    rows = {row["date"][-2:]: row for row in data["days"]}
+    assert sorted(rows) == ["17", "18", "19"] and rows["18"]["flagged"] is False
+    assert rows["19"]["flagged"] is True and rows["19"]["deviation"] == pytest.approx(-50.0, abs=2.0)
+    assert rows["19"]["actual"] == pytest.approx(12.0)  # acht Stunden zu 1,5 kW, die Lücke um 11 Uhr zählt mit
+    assert data["window"] == 28 and data["limit"] == 15
+
+
+def test_pv_needs_both_roles_and_a_power_unit(service) -> None:
+    _pv_data(service)
+    assert service.compute_pv(NOW, days=3) is not None
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued")
+    assert service.compute_pv(NOW, days=3) is None
+    _add(service, "sensor.pv_wh", "sensor", "measurement", "%", [(_ts(19, 12), 50.0)])
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued", pv_power="sensor.pv_wh")
+    assert service.compute_pv(NOW, days=3) is None  # keine Leistungseinheit: nicht raten
+
+
+def test_pv_card_needs_both_roles_and_a_route(client) -> None:
+    from app.main import index
+
+    config = wetter_routes._empty_config()
+    assert not wetter_routes.card_available("pvlight", {**config, "pv_power": "sensor.pv"})
+    assert wetter_routes.card_available("pvlight", {**config, "pv_power": "sensor.pv", "illuminance": "sensor.l"})
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    index.get_or_create_entity("sensor.wetter_test_temp5", "sensor", "measurement", "°C")
+    assert client.post("/wetterdashboard/setup", data={"temperature": "sensor.wetter_test_temp5"}).status_code == 200
+    assert client.get("/wetterdashboard/pv").status_code == 409  # keine PV-Rolle
+
+
+def test_dayimage_falls_back_to_the_brightness_on_days_without_dawn_rows(service) -> None:
+    """Der Dämmerungssensor ist oft erst kurz im Archiv: Tage davor zählen die hellen Stunden nach der Helligkeit selbst."""
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", [(_ts(18, hour, 30), 80000.0) for hour in range(8, 17)])
+    _add(service, "sensor.lux_daem", "sensor", "measurement", "lx", [(_ts(19, 9, 30), 1000.0), (_ts(19, 10, 30), 1000.0)])
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued", illuminance_dawn="sensor.lux_daem")
+    data = service.compute_dayimage(NOW, days=3)
+    day18 = next(row for row in data["days"] if row["date"].endswith("18"))
+    assert day18["class"] == "sunny" and day18["bright_hours"] >= 8
+
+
+def test_sunhours_curve_marks_hours_above_the_threshold_and_holds_gaps(service) -> None:
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", [
+        (_ts(19, 8, 30), 10000.0), (_ts(19, 9, 30), 60000.0), (_ts(19, 10, 30), 98800.0),
+        (_ts(19, 13, 30), 98800.0),  # 11 und 12 Uhr ohne Zeile: der Sensor hält seinen Wert
+        (_ts(19, 14, 30), 12000.0),
+    ])
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued")
+    data = service.compute_sunhours("2026-08-19", NOW)
+    assert data["date"] == "2026-08-19" and data["threshold"] == 25000.0 and data["saturation"] == 98800
+    by_hour = {round((row[0] - data["start"]) / 3600): row for row in data["hours"]}
+    assert sorted(by_hour) == [8, 9, 10, 11, 12, 13, 14]
+    assert by_hour[11][3] is True and by_hour[12][3] is True and by_hour[10][3] is False  # nur die Lücke ist „gehalten“
+    assert data["sun_hours"] == pytest.approx(5.0)  # 9, 10, 11, 12, 13 Uhr
+    assert data["peak"]["value"] == pytest.approx(98800.0)
+
+
+def test_sunhours_without_values_and_without_role(service) -> None:
+    assert service.compute_sunhours(None, NOW) is None
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", [(_ts(10, 12), 5000.0)])
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued")
+    data = service.compute_sunhours("2026-08-19", NOW)
+    assert data["hours"] == [] and data["sun_hours"] is None
+
+
+def test_sunhours_card_and_route_through_the_app(client) -> None:
+    from app.main import index
+
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    index.get_or_create_entity("sensor.sh_temp", "sensor", "measurement", "°C")
+    index.get_or_create_entity("sensor.sh_lux", "sensor", "measurement", "lx")
+    base = {"temperature": "sensor.sh_temp"}
+    assert client.post("/wetterdashboard/setup", data=base).status_code == 200
+    assert 'x-ref="sunChart"' not in client.get("/wetterdashboard").text
+    assert client.get("/wetterdashboard/sonnenstunden").status_code == 409
+    assert client.post("/wetterdashboard/setup", data={**base, "illuminance": "sensor.sh_lux"}).status_code == 200
+    page = client.get("/wetterdashboard").text
+    assert 'x-ref="sunChart"' in page and 'id="wt-tab-wind"' in page
+    assert client.get("/wetterdashboard/sonnenstunden").json()["hours"] == []
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_dayimage_needs_the_illuminance_role_and_values(service) -> None:
+    assert service.compute_dayimage(NOW) is None
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", [(_ts(2, 12), 5000.0)])
+    _configure(service, temperature="sensor.t", illuminance="sensor.lux_sued")
+    assert service.compute_dayimage(NOW, days=5) is None  # nichts in den letzten fünf Tagen
+
+
+def test_dayimage_card_and_route_through_the_app(client) -> None:
+    from app.main import index
+
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    index.get_or_create_entity("sensor.tb_temp", "sensor", "measurement", "°C")
+    index.get_or_create_entity("sensor.tb_lux", "sensor", "measurement", "lx")
+    base = {"temperature": "sensor.tb_temp"}
+    assert client.post("/wetterdashboard/setup", data=base).status_code == 200
+    assert "data-wt-dayimage" not in client.get("/wetterdashboard").text
+    assert client.post("/wetterdashboard/setup", data={**base, "illuminance": "sensor.tb_lux"}).status_code == 200
+    assert "data-wt-dayimage" in client.get("/wetterdashboard").text
+    assert client.get("/wetterdashboard/tagesbild").status_code == 409  # Rolle ohne Werte
+    assert client.post("/wetterdashboard/setup", data={
+        **base, "illuminance": "sensor.tb_lux", "cards_submitted": "1", "show_card": ["basis"],
+    }).status_code == 200
+    assert "data-wt-dayimage" not in client.get("/wetterdashboard").text
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_dayimage_detail_combines_the_light_curve_and_the_key_figures_of_the_day(service) -> None:
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", [(_ts(18, hour, 30), 60000.0) for hour in range(9, 14)])
+    _add(service, "sensor.t_aussen", "sensor", "measurement", "°C", [(_ts(18, 6, 30), 3.0), (_ts(18, 14, 30), 11.5)])
+    _configure(service, temperature="sensor.t_aussen", illuminance="sensor.lux_sued")
+    data = service.compute_dayimage_detail("2026-08-18", NOW)
+    assert data["sun"]["date"] == "2026-08-18" and data["sun"]["sun_hours"] == pytest.approx(5.0)
+    assert len(data["sun"]["hours"]) == 5 and data["sun"]["threshold"] == 25000.0
+    assert data["conditions"]["date"] == "2026-08-18"
+    assert data["conditions"]["temp"]["min"] == pytest.approx(3.0) and data["conditions"]["temp"]["max"] == pytest.approx(11.5)
+
+
+def test_dayimage_detail_accepts_today_and_needs_the_illuminance_role(service) -> None:
+    assert service.compute_dayimage_detail("2026-08-18", NOW) is None
+    _add(service, "sensor.lux_sued", "sensor", "measurement", "lx", [(_ts(19, 9, 30), 60000.0)])
+    _add(service, "sensor.t_aussen", "sensor", "measurement", "°C", [(_ts(19, 8, 30), 7.0)])
+    _configure(service, temperature="sensor.t_aussen", illuminance="sensor.lux_sued")
+    now = datetime(2026, 8, 19, 15, 0, tzinfo=TZ)
+    today = now.date().isoformat()
+    data = service.compute_dayimage_detail(today, now)
+    assert data["sun"]["date"] == today and data["conditions"]["date"] == today  # heute zählt als Tag („bisher“)
+    assert data["conditions"]["temp"]["min"] == pytest.approx(7.0)  # auch nur mit Temperatur gibt es Eckwerte
+
+
+def test_dayimage_detail_route_and_dialog_markup(client) -> None:
+    from app.main import index
+
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    index.get_or_create_entity("sensor.td_temp", "sensor", "measurement", "°C")
+    index.get_or_create_entity("sensor.td_lux", "sensor", "measurement", "lx")
+    base = {"temperature": "sensor.td_temp", "illuminance": "sensor.td_lux"}
+    assert client.post("/wetterdashboard/setup", data=base).status_code == 200
+    page = client.get("/wetterdashboard").text
+    assert 'x-ref="dayDlg"' in page and 'openDay(cell)' in page and "pickDay" not in page
+    assert client.get("/wetterdashboard/tagesbild/tag?date=2026-01-05").status_code == 200
+    assert client.get("/wetterdashboard/tagesbild/tag?date=kaputt").status_code == 400
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_card_availability_follows_the_assigned_roles() -> None:
+    config = wetter_routes._empty_config()
+    assert not any(wetter_routes.card_available(key, config) for key in wetter_routes.CARD_KEYS)
+    config.update(temperature="sensor.t", illuminance_dawn="sensor.d", heating=[{"entity_id": "sensor.h", "name": ""}])
+    available = {key for key in wetter_routes.CARD_KEYS if wetter_routes.card_available(key, config)}
+    # ohne Helligkeit kein Tagesbild
+    assert available == {
+        "basis", "compare", "monthly", "records", "kenntage", "monthyears", "yearmatrix",
+        "daylight", "daylight_days", "daylength", "heating",
+    }
+
+
+def test_hidden_cards_are_saved_only_for_available_cards_and_hide_cards_and_tabs(client) -> None:
+    from app.main import index
+
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    for entity, unit in (("sensor.karten_t", "°C"), ("sensor.karten_w", "km/h")):
+        index.get_or_create_entity(entity, "sensor", "measurement", unit)
+    base = {"temperature": "sensor.karten_t", "wind": "sensor.karten_w", "cards_submitted": "1"}
+    page = client.get("/wetterdashboard/setup").text
+    assert 'name="show_card"' in page and "cardAvailable(" in page
+    # alles angehakt: nichts ausgeblendet
+    long_cards = ["records", "kenntage", "monthyears", "yearmatrix"]
+    shown = ["basis", "compare", "monthly", "wind", *long_cards, "daylight", "daylight_days", "daylength", "heating"]
+    assert client.post("/wetterdashboard/setup", data={**base, "show_card": shown}).status_code == 200
+    assert wetter_routes._load_config(index)["hidden_cards"] == []
+    html = client.get("/wetterdashboard").text
+    assert 'id="wt-tab-wind"' in html and 'id="wt-tab-long"' in html and "data-wt-conditions" in html
+    # Langzeit steht wie im Energiedashboard als letzter Reiter, hinter den Themen
+    assert html.index('id="wt-tab-wind"') < html.index('id="wt-tab-long"')
+    # Vergleichstabelle, Wind & Sonne, Langzeit abgewählt; Tageslicht (keine Rolle) und Heizen (kein Zähler) sind nicht wählbar
+    assert client.post("/wetterdashboard/setup", data={**base, "show_card": ["basis", "monthly"]}).status_code == 200
+    assert wetter_routes._load_config(index)["hidden_cards"] == ["compare", "wind", *long_cards]
+    html = client.get("/wetterdashboard").text
+    assert 'id="wt-tab-wind"' not in html and 'id="wt-tab-long"' not in html and "data-wt-conditions" in html and 'x-ref="table"' not in html
+    assert 'id="wt-tab-overview"' in html
+    # alles abgewählt: auch die Übersicht fehlt
+    assert client.post("/wetterdashboard/setup", data={**base, "show_card": []}).status_code == 200
+    assert 'id="wt-tab-overview"' not in client.get("/wetterdashboard").text
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_cards_hidden_before_the_blocks_were_split_keep_all_their_blocks_hidden(client) -> None:
+    from app.main import index
+
+    config = {"temperature": "sensor.karten_t", "hidden_cards": ["longterm", "klima", "precip"]}
+    index.set_setting(wetter_routes.SETTING_CONFIG, json.dumps(config))
+    hidden = wetter_routes._load_config(index)["hidden_cards"]
+    assert {"records", "kenntage", "monthyears", "yearmatrix", "klima", "tempcmp", "humidcmp", "precip", "precip_months"} <= set(hidden)
+    # Nach dem Speichern der neuen Einrichtung gilt jede Wahl für sich.
+    config["cards_detail"] = True
+    index.set_setting(wetter_routes.SETTING_CONFIG, json.dumps(config))
+    assert wetter_routes._load_config(index)["hidden_cards"] == ["precip", "klima"]
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+# -- Sonne im Langzeit: Monatsvergleich, Kenntage, Rekorde, Matrix ---------------------------------
+
+
+def _sun_longterm_data(service) -> None:
+    _add(service, "sensor.t", "sensor", "measurement", "°C", [(_ts(d, 12), 15.0) for d in range(16, 20)])
+    _dayimage_data(service)
+    # Die Testdaten sind absteigend geschrieben, der Archivbeginn ist aber der älteste Tag.
+    with service.deps.index._conn:  # noqa: SLF001
+        service.deps.index._conn.execute(  # noqa: SLF001
+            "UPDATE entities SET first_ts = ? WHERE entity_id IN ('sensor.lux_sued', 'sensor.lux_daem')", (_ts(16, 7, 30),),
+        )
+
+
+def test_sun_history_lists_every_closed_day_since_the_archive_start(service) -> None:
+    _sun_longterm_data(service)
+    days = service.sun_history(wetter_routes._load_config(service.deps.index), NOW)
+    assert [(entry["date"].day, entry["class"]) for entry in days] == [
+        (16, None), (17, "mixed"), (18, "overcast"), (19, "sunny"),
+    ]
+    assert days[3]["hours"] == pytest.approx(9.0) and days[0]["hours"] == pytest.approx(0.0)
+
+
+def test_monthly_comparison_offers_the_sun_hours(service) -> None:
+    _sun_longterm_data(service)
+    data = service.compute_monthly("sun", "mm", NOW)
+    assert data["metric"] == "sun" and data["unit"] == "h" and data["headline"] is None
+    assert data["years"]["2026"][7] == pytest.approx(12.0)  # 9 sonnig + 3 wechselhaft
+    assert service.compute_monthly("sun", "mm", NOW) is not None
+    service.deps.index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    assert service.compute_monthly("sun", "mm", NOW) is None
+
+
+def test_year_matrix_shows_the_day_classes(service) -> None:
+    _sun_longterm_data(service)
+    data = service.compute_matrix("sun", "mm", NOW)
+    assert data["metric"] == "sun" and data["years"] == [2026]
+    by_slot = {cell[0]: cell[2] for cell in data["cells"]}
+    slot = analysis_mod.matrix_slot
+    assert by_slot[slot(date(2026, 8, 19))] == 2 and by_slot[slot(date(2026, 8, 18))] == 0
+    assert by_slot[slot(date(2026, 8, 17))] == 1
+    assert [slot(date(2026, 8, 16)), 0] in data["missing"]  # zu kurzer Tag: grau, nicht trüb
+    assert data["hours"]["2026-08-19"] == pytest.approx(9.0) and "2026-08-16" not in data["hours"]
+
+
+def test_longterm_carries_the_sun_kenntage(service) -> None:
+    _sun_longterm_data(service)
+    data = service.compute_longterm(NOW)
+    month = data["sun_kenntage"]["2026"]
+    assert month["sunny"][7] == 1 and month["overcast"][7] == 1 and month["days"][7] == 3
+    assert any(entry["key"] == "sunniest_day" for entry in data["records"])  # Rekorde gibt es ab dem ersten Tag mit Werten
+
+
+def _sun_days(classes: list[str | None], hours: float = 6.0) -> list[dict]:
+    start = date(2025, 1, 1)
+    return [
+        {"date": start + timedelta(days=i), "class": kind, "share": None, "hours": hours if kind else None, "bright": 9}
+        for i, kind in enumerate(classes)
+    ]
+
+
+def test_sun_kenntage_count_only_sunny_and_overcast_days() -> None:
+    days = _sun_days(["sunny", "mixed", "overcast", None, "sunny"])
+    assert analysis_mod.sun_kenntage(days) == {"2025": {
+        "sunny": [2] + [0] * 11, "overcast": [1] + [0] * 11, "days": [4] + [0] * 11,
+    }}
+
+
+def test_sun_records_find_the_longest_runs_and_the_sunniest_month() -> None:
+    kinds = (["sunny"] * 2 + ["overcast"] * 3 + ["sunny"] * 4 + [None] + ["sunny"] * 5) + ["mixed"] * 360
+    days = _sun_days(kinds)
+    days[3]["hours"] = 11.5
+    monthly = {"years": {"2025": [200.0, 310.5] + [None] * 10}}
+    out = analysis_mod.sun_records(days, monthly, date(2026, 6, 1))
+    assert out["sunniest_day"] == {"value": 11.5, "date": "2025-01-04"}
+    assert out["sunniest_month"] == {"value": 310.5, "date": "2025-02-01"}
+    assert out["longest_sunny_streak"] == {"value": 5, "date": "2025-01-11", "end": "2025-01-15"}
+    assert out["longest_overcast_streak"] == {"value": 3, "date": "2025-01-03", "end": "2025-01-05"}
+    short = analysis_mod.sun_records(days[:100], monthly, date(2026, 6, 1))  # auch ein junges Archiv hat Rekorde
+    assert short["days"] == 99 and short["since"] == "2025-01-01"
+    assert analysis_mod.sun_records([], monthly, date(2026, 6, 1)) is None
+
+
+def test_sun_records_skip_the_running_month() -> None:
+    days = _sun_days(["sunny"] * 400)
+    out = analysis_mod.sun_records(days, {"years": {"2026": [None] * 5 + [999.0] + [None] * 6, "2025": [100.0] + [None] * 11}}, date(2026, 6, 10))
+    assert out["sunniest_month"]["date"] == "2025-01-01"
+
+
+def test_longterm_page_offers_the_sun_views_only_with_the_illuminance_role(client) -> None:
+    from app.main import index
+
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    index.get_or_create_entity("sensor.sl_temp", "sensor", "measurement", "°C")
+    index.get_or_create_entity("sensor.sl_lux", "sensor", "measurement", "lx")
+    base = {"temperature": "sensor.sl_temp"}
+    assert client.post("/wetterdashboard/setup", data=base).status_code == 200
+    page = client.get("/wetterdashboard").text
+    assert "setMatrixMetric('sun')" not in page and "setMonthlyMetric('sun')" not in page
+    assert client.post("/wetterdashboard/setup", data={**base, "illuminance": "sensor.sl_lux"}).status_code == 200
+    page = client.get("/wetterdashboard").text
+    assert "setMatrixMetric('sun')" in page and "setMonthlyMetric('sun')" in page
+    assert 'x-ref="kenntageChartSunny"' in page and 'x-ref="kenntageChartOvercast"' in page
+    assert client.get("/wetterdashboard/monatsvergleich?metric=sun").status_code in (200, 404)
+    assert client.get("/wetterdashboard/matrix?metric=wolke").status_code == 400
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_humidity_extras_get_their_own_series_apart_from_the_temperatures(service) -> None:
+    _add(service, "sensor.t", "sensor", "measurement", "°C", [(_ts(19, 12), 10.0)])
+    _add(service, "sensor.n", "sensor", "measurement", "°C", [(_ts(19, 12), 8.0)])
+    _add(service, "sensor.f", "sensor", "measurement", "%", [(_ts(19, 12), 60.0)])
+    _configure(
+        service, temperature="sensor.t",
+        extra_temperatures=[{"entity_id": "sensor.n", "name": "Nord"}, {"entity_id": "sensor.f", "name": "Keller feucht"}],
+    )
+    data = service.compute_temperatures(7, NOW)
+    assert [row["label"] for row in data["series"]] == ["Temperatur", "Nord"]
+    assert [row["label"] for row in data["humidity"]] == ["Keller feucht"]
+    assert all(row["unit"] == "%" for row in data["humidity"])
+
+
+def test_sky_limits_form_fills_missing_fields_and_rejects_unordered_ones(client) -> None:
+    from app.main import index
+
+    index.get_or_create_entity("sensor.wetter_test_temp6", "sensor", "measurement", "°C")
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    base = {"temperature": "sensor.wetter_test_temp6", "sun_threshold_lx": "25000"}
+    assert client.post("/wetterdashboard/setup", data={**base, "sky_sunny_lx": "90000"}).status_code == 200
+    assert wetter_routes._load_config(index)["sky_cuts_lx"] == [15000.0, 25000.0, 90000.0]  # leere Felder: automatisch
+    assert client.post("/wetterdashboard/setup", data={**base, "sky_cloudy_lx": "30000", "sky_fair_lx": "20000"}).status_code == 400
+    assert wetter_routes._load_config(index)["sky_cuts_lx"] == [15000.0, 25000.0, 90000.0]  # abgelehnt, nichts überschrieben
+    assert client.post("/wetterdashboard/setup", data=base).status_code == 200
+    assert wetter_routes._load_config(index)["sky_cuts_lx"] == []
+
+
+def test_sky_limits_form_with_an_extreme_threshold_does_not_reject_empty_fields(client) -> None:
+    """Die automatischen Grenzen (0,6x / 1x / 2,8x der Sonnenschwelle) liegen bei 1000 lx oder 50000 lx außerhalb des
+    erlaubten Bereichs; ein leeres Feld lieferte dann einen 400 mit leerem Wert statt den Rand zu nehmen."""
+    from app.main import index
+
+    index.get_or_create_entity("sensor.wetter_test_temp7", "sensor", "measurement", "°C")
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+    base = {"temperature": "sensor.wetter_test_temp7"}
+    assert client.post("/wetterdashboard/setup", data={**base, "sun_threshold_lx": "50000", "sky_cloudy_lx": "20000"}).status_code == 200
+    assert wetter_routes._load_config(index)["sky_cuts_lx"] == [20000.0, 50000.0, 100000.0]  # 2,8 x 50000 -> Obergrenze
+    index.set_setting(wetter_routes.SETTING_CONFIG, "")
+
+
+def test_pressure_trend_needs_a_known_unit(service) -> None:
+    """Die Tendenz rechnet in hPa um. Eine unbekannte Einheit (hier bar) gab früher eine Tendenz aus der Rohdifferenz,
+    als wäre es hPa; jetzt gibt es keine. Eine fehlende oder anders geschriebene bekannte Einheit zählt weiter."""
+    trends: dict[str, object] = {}
+    for entity, unit, first, last in (("sensor.p_bar", "bar", 1.000, 1.020), ("sensor.p_low", "hpa", 1000.0, 1004.0), ("sensor.p_none", "", 1000.0, 1004.0)):
+        _add(service, entity, "sensor", "measurement", unit, [(_ts(19, 6), first), (_ts(19, 18), last)])
+        _configure(service, pressure=entity)
+        data = service.compute_conditions_day("2026-08-19", NOW)
+        trends[entity] = data["pressure"]["trend"] if data and data.get("pressure") else "fehlt"
+    assert trends == {"sensor.p_bar": None, "sensor.p_low": "rising", "sensor.p_none": "rising"}
+
+
+def test_pv_unit_ignores_case_for_watt_and_kilowatt_but_not_for_milli_and_mega() -> None:
+    """„KW“ oder „w“ wurden früher als unbekannte Einheit behandelt und schalteten die PV-Auswertung ohne Hinweis ab;
+    „mW“ (Milliwatt) und „MW“ (Megawatt) unterscheiden sich nur durch die Schreibweise und bleiben streng."""
+    scale = wetter_routes.pv_scale_kw
+    assert [scale(u) for u in ("W", "w", "kW", "KW", " kw ", "MW")] == [0.001, 0.001, 1.0, 1.0, 1.0, 1000.0]
+    assert [scale(u) for u in ("mW", "mw", "", None, "kWh")] == [None, None, None, None, None]
+
+
+def test_year_charts_list_their_legend_in_the_same_order() -> None:
+    """Monatsvergleich und Niederschlag: laufendes Jahr, Vorjahr, Ø (die Niederschlagslegende stand zuerst anders)."""
+    from _paths import APP
+
+    source = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    block = source[source.index("const legend = [String(p.year)];"):]
+    block = block[: block.index("const chart = chartFor('precip'")]
+    assert block.index("legend.push(String(p.previous_year))") < block.index("olderYears.forEach") < block.index("if (hasAvg) legend.push('Ø'")
+    # Spanne der Vorjahre und Tageswert (Balken) stehen hinter Ø in der Legende, die Balken haben eine eigene, sichtbare Achse.
+    assert block.index("legend.push('Ø'") < block.index("legendEntry(t('Tageswert')")
+    assert "interval: dayStep" in source and "max: Math.max(dailyMax * 4, 1), show: false" not in source
+    render = (APP / "static/js/element-chart-render.js").read_text(encoding="utf-8")
+    assert render.index("legendEntry(String(year)") < render.index("legend.push('Ø')") < render.index("legend.unshift(current)")
+
+
+def test_daylength_chart_lists_the_newest_year_first() -> None:
+    """Der Jahresverlauf der Tageslänge führte die Jahre aufsteigend (und das älteste in der ersten Farbe)."""
+    from _paths import APP
+
+    source = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    assert "const years = [...byYear.keys()].sort().reverse();" in source
+    assert "const latest = years[0];" in source
+
+
+def test_year_charts_put_every_shown_year_in_the_legend_with_its_own_tone() -> None:
+    """Monatsvergleich, Energie-Monatsvergleich und Niederschlag: alle gezeigten Jahre stehen in der Legende, und das Zeichen
+    hat den Ton der Linie (das Vorjahr voll, ältere blasser)."""
+    from _paths import APP
+
+    render = (APP / "static/js/element-chart-render.js").read_text(encoding="utf-8")
+    assert render.count("legendEntry(String(year), colors.prev, pastOpacity(index))") == 2
+    assert "return rank <= 0 ? 1 : Math.max(0.3, 0.7 - 0.1 * rank);" in render
+    wetter = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    assert "olderYears.forEach((year, index) => legend.push(legendEntry(year, colors.prev, pastOpacity(index + 1))));" in wetter
+
+
+def test_heating_legend_marks_keep_full_colour() -> None:
+    from _paths import APP
+
+    assert "legend.push(legendEntry(name, color));" in (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+
+
+def test_records_cover_only_the_newest_years_when_asked(service) -> None:
+    """Die Auswahl „Letzte N“ der Langzeit-Seite gilt auch für die Rekorde: nur die neuesten N Jahre mit Daten zählen."""
+    from app.storage.query import DailyPoint
+
+    def day_point(day: date, value: float) -> DailyPoint:
+        stamp = datetime(day.year, day.month, day.day, tzinfo=TZ).timestamp()
+        return DailyPoint(day_start=stamp, value=value, min_value=value - 2, max_value=value + 2, covered=True)
+
+    points = [day_point(date(2022, 7, 1), 30.0), day_point(date(2024, 1, 5), -12.0), day_point(date(2025, 6, 6), 25.0)]
+    everything = analysis_mod.records(points, TZ, date(2026, 8, 20))
+    assert everything["warmest_day"]["date"] == "2022-07-01" and everything["coldest_day"]["date"] == "2024-01-05"
+    assert everything["since"] == "2022-07-01" and everything["days"] == 3
+    recent = analysis_mod.records([p for p in points if p.day_start >= datetime(2024, 1, 1, tzinfo=TZ).timestamp()], TZ, date(2026, 8, 20))
+    assert recent["warmest_day"]["date"] == "2025-06-06" and recent["since"] == "2024-01-05"
+
+
+def test_compute_longterm_passes_the_year_choice_to_the_records(service, monkeypatch) -> None:
+    from app.storage.query import DailyPoint
+
+    _rain_setup(service)
+    _configure(service, temperature="sensor.t")
+
+    def day_point(day: date, value: float) -> DailyPoint:
+        stamp = datetime(day.year, day.month, day.day, tzinfo=TZ).timestamp()
+        return DailyPoint(day_start=stamp, value=value, min_value=value - 2, max_value=value + 2, covered=True)
+
+    points = [day_point(date(2022, 7, 1), 30.0), day_point(date(2024, 1, 5), -12.0), day_point(date(2025, 6, 6), 25.0)]
+    monkeypatch.setattr(service, "_daily", lambda entity_id, now_local: points)
+    everything = {entry["key"]: entry for entry in service.compute_longterm(NOW)["records"]}
+    assert everything["warmest_day"]["date"] == "2022-07-01"
+    last_two = service.compute_longterm(NOW, years=2)  # neueste zwei Jahre mit Daten: 2025 und 2024
+    assert last_two["records_since"] == "2024-01-05" and last_two["records_days"] == 2
+    assert {entry["key"]: entry for entry in last_two["records"]}["warmest_day"]["date"] == "2025-06-06"
+    assert service.compute_longterm(NOW, years=10)["records_since"] == "2022-07-01"  # mehr als vorhanden: alle
+
+
+def test_longterm_page_has_one_year_choice_for_all_cards() -> None:
+    """Die Jahresauswahl steht einmal im Reiter Langzeit und gilt für Rekorde, Kenntage und die Jahres-Matrix."""
+    from _paths import APP, TEMPLATES
+
+    page = (TEMPLATES / "_wetter_view.html").read_text(encoding="utf-8")
+    assert page.count("setLongRange(option.value)") == 1 and "setKenntageRange" not in page
+    script = (APP / "static/js/wetter.js").read_text(encoding="utf-8")
+    assert "wetterdashboard/langzeit?years=${this.longYearsParam()}" in script
+    assert "this.loadLongterm();" in script[script.index("setLongRange(range) {"):script.index("limitedMatrix(m) {")]
+    assert "this.matrix ? this.limitedMatrix(this.matrix)" in script and "const m = this.matrix ? this.limitedMatrix(this.matrix) : null;" in script

@@ -166,6 +166,29 @@ def test_daily_counts_are_stored_with_the_alltime_stats() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_alltime_stats_listing_can_leave_out_the_daily_counts() -> None:
+    """Die Meldung und die Quote brauchen ``counts`` und die Schwellen, nicht die Tageszähler (über 99 % der Bytes).
+    Ohne ``daily`` entfällt deren Parsen; ein defekter Eintrag darf auch dort nicht die ganze Liste kippen."""
+    tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
+    try:
+        index = Index(tmp / "index.sqlite")
+        index.set_cleanup_alltime_stats("sensor.a", {"all": 5}, outlier_threshold="50", daily={"2024-07-01": {"gaps": 1}})
+        index.set_cleanup_alltime_stats("sensor.b", {"all": 7})
+        voll = index.list_cleanup_alltime_stats()
+        schlank = index.list_cleanup_alltime_stats(with_daily=False)
+        assert voll["sensor.a"]["daily"] == {"2024-07-01": {"gaps": 1}}
+        assert "daily" not in schlank["sensor.a"]
+        assert schlank["sensor.a"]["counts"] == {"all": 5} and schlank["sensor.a"]["outlier_threshold"] == "50"
+        assert schlank["sensor.b"] == voll["sensor.b"]
+        # Ein defekter Wert: json_remove wirft für die ganze Abfrage, der Rückfall überspringt nur diesen Eintrag.
+        index.set_setting(Index._CLEANUP_ALLTIME_STATS_PREFIX + "sensor.kaputt", "{kein json")
+        assert set(index.list_cleanup_alltime_stats(with_daily=False)) == {"sensor.a", "sensor.b"}
+        assert set(index.list_cleanup_alltime_stats()) == {"sensor.a", "sensor.b"}
+        index.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_soft_delete_excludes_row_and_undo_restores_it() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="zeitarchiv-cleanup-test-"))
     try:
@@ -316,7 +339,9 @@ def test_iter_raw_rows_shares_hot_read_cache_across_streaming_passes() -> None:
 
         read_cache = query.QueryReadCache()
         calls: list[Path] = []
-        original_read_rows = query.read_rows
+        # Der Cache parst eine Hot-Datei einmal (mit Min/Max) und leitet die Paar-Sicht daraus ab; gezählt wird deshalb
+        # am gemeinsamen Parser statt an read_rows().
+        original_read_rows = query._read_rows_with_extremes
 
         def counting_read_rows(path):
             calls.append(path)
@@ -328,13 +353,13 @@ def test_iter_raw_rows_shares_hot_read_cache_across_streaming_passes() -> None:
                 hot_rows_loader=read_cache.read_hot_rows,
             )
 
-        query.read_rows = counting_read_rows
+        query._read_rows_with_extremes = counting_read_rows
         try:
             # Simuliert die zwei Durchläufe von analyze_raw_rows_page().
             first_pass = list(rows_factory())
             second_pass = list(rows_factory())
         finally:
-            query.read_rows = original_read_rows
+            query._read_rows_with_extremes = original_read_rows
 
         assert first_pass == second_pass == [(ts, 1.0)]
         assert len(calls) == 1

@@ -24,6 +24,8 @@
     // praktisch nie ändert und die anderen Picker in dieser Datei (BORDER_
     // OPTIONS, DENSITY_OPTIONS, …) genauso lokal statt aus Jinja befüllt sind.
     const DECIMALS_LABELS = {auto: t('Automatisch'), '0': t('0 Nachkommastellen'), '1': t('1 Nachkommastelle'), '2': t('2 Nachkommastellen'), '3': t('3 Nachkommastellen'), '4': t('4 Nachkommastellen')};
+    // Takt des automatischen Nachladens, wie die Dashboard-Kacheln (dashboard-tiles.js).
+    const REFRESH_INTERVAL_MS = 60000;
     const RANGE_LABELS = {hour: t('Stunde'), day: t('Tag'), week: t('Woche'), month: t('Monat'), year: t('Jahr'), decade: t('Dekade')};
     const PREVIOUS_LABELS = {hour: t('Vorherige Stunde'), day: t('Vortag'), week: t('Vorwoche'), month: t('Vormonat'), year: t('Vorjahr'), decade: t('Vorherige Dekade')};
     const PLURAL_UNITS = {hour: t('Stunden'), day: t('Tagen'), week: t('Wochen'), month: t('Monaten'), year: t('Jahren'), decade: t('Dekaden')};
@@ -82,6 +84,16 @@
 
     function versatzUnit(col) {
       return UNIT_PLURAL_SIMPLE[col.range_key] || t('Perioden');
+    }
+
+    // Beschriftung nennt einen Zeitraum (Stunde, Tag, …), der Zeitraum-Typ ist ein anderer:
+    // liefert den Schlüssel, den die Beschriftung meint, sonst null. Rein ein Hinweis im Editor,
+    // gespeichert und berechnet wird die Spalte wie eingestellt.
+    function rangeLabelMismatch(col) {
+      const label = (col.label || '').trim().toLowerCase();
+      if (!label) return null;
+      const hit = Object.entries(RANGE_LABELS).find(([, name]) => name.toLowerCase() === label);
+      return hit && hit[0] !== col.range_key ? hit[0] : null;
     }
 
     // Namensvorschlag für eine Entität-Zeile ohne eigene Beschriftung — der
@@ -248,15 +260,15 @@
     // siehe TableCompute.computeValues()/memberValueFor(). Kurze
     // Button-Labels (siehe .tbl-agg-picker-Kommentar oben im CSS), volle
     // Bezeichnung im Popover UND als title-Tooltip auf dem Button.
-    const AGG_OPTIONS = [['auto', t('Automatisch')], ['avg', t('Ø Durchschnitt')], ['min', t('Min')], ['max', t('Max')], ['sum', t('Σ Summe')]];
+    const AGG_OPTIONS = [['auto', t('Automatisch')], ['avg', t('Ø Durchschnitt')], ['min', t('Min')], ['max', t('Max')], ['sum', t('Σ Summe')], ['last', t('Aktueller Wert')]];
     // Summenzeile kennt nur Summe/Durchschnitt — t("Automatisch")/"Min"/"Max"
     // ergeben für eine Summenzeile keinen Sinn (die bezieht sich immer auf
     // MEHRERE bereits aggregierte Zeilen, nicht auf einzelne Rohwerte).
     const SUMMARY_AGG_OPTIONS = [['sum', t('Σ Summe')], ['avg', t('Ø Durchschnitt')]];
-    const AGG_SHORT_LABELS = {auto: t('Auto'), avg: 'Ø', min: t('Min'), max: t('Max'), sum: 'Σ'};
+    const AGG_SHORT_LABELS = {auto: t('Auto'), avg: 'Ø', min: t('Min'), max: t('Max'), sum: 'Σ', last: t('Akt')};
     const AGG_TITLES = {
       auto: t('Automatisch (Zähler/Schalter → Summe, sonst Durchschnitt)'),
-      avg: t('Durchschnitt'), min: t('Minimum'), max: t('Maximum'), sum: t('Summe'),
+      avg: t('Durchschnitt'), min: t('Minimum'), max: t('Maximum'), sum: t('Summe'), last: t('Zuletzt erfasster Wert im Zeitraum'),
     };
     const BORDER_OPTIONS = [['horizontal', t('Horizontal')], ['grid', t('Gitter')], ['none', t('Ohne Rahmen')]];
     const BORDER_LABELS = Object.fromEntries(BORDER_OPTIONS);
@@ -276,7 +288,7 @@
         columns: INITIAL_COLUMNS.map(c => ({decimals: 'auto', year_over_year: false, hidden: false, group_label: '', heatmap: false, width: null, in_sum: true, ...c, uid: uid(), offset: Math.min(c.offset || 0, 0)})),
         rows: INITIAL_ROWS.map(r => ({
           formula_unit: '', aggregation: 'auto', hidden: false, show_label: false, accent: false,
-          percent_of_total: false, hide_if_empty: false,
+          percent_of_total: false, hide_if_empty: false, hide_line: false,
           ...r, uid: uid(), pickerOpen: false, typePickerOpen: false, aggPickerOpen: false, optsPickerOpen: false, search: '',
         })),
         style: {...DEFAULT_STYLE, ...INITIAL_STYLE},
@@ -290,6 +302,14 @@
         isCurrent: {},  // col.uid -> offset===0 (siehe currentPeriodNote() in table-compute.js)
         elapsedSeconds: {},  // col.uid -> same_elapsed-Kappung ab windowStarts[uid] (Sekunden) | null
         loading: false,
+        loadError: false,
+        // Automatisches Nachladen (Chip neben "CSV"): Standard aus der Installation (Einstellungen,
+        // Darstellung, data-page-refresh an <html>), der Schalter im Chip-Menü gilt nur für diese Seite.
+        refreshOn: document.documentElement.dataset.pageRefresh !== 'off',
+        refreshMenuOpen: false,
+        refreshAge: 0,  // Sekunden seit dem letzten Laden, nur gepflegt, solange das Chip-Menü offen ist
+        _lastRefresh: Date.now(),
+        flashed: {},  // "col.uid:row.uid" -> true, kurz nach einem Nachladen für geänderte Zellen
         saving: false,
         savedMessage: '',
         _loadSeq: 0,
@@ -327,7 +347,7 @@
         // Der Menü-Button selbst wird aktiv, sobald irgendeine enthaltene
         // Option an ist — sonst müsste man das Menü öffnen, um das zu sehen.
         rowOptionsActive(row) {
-          return !!(row.bold || row.show_label || row.accent || row.percent_of_total || row.hide_if_empty);
+          return !!(row.bold || row.show_label || row.accent || row.percent_of_total || row.hide_if_empty || row.hide_line);
         },
 
         // Manuelle Spaltenbreite (col.width/style.label_col_width, per
@@ -340,8 +360,22 @@
           if (!col.width) return '';
           return `width:${col.width}px;max-width:${col.width}px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
         },
-        labelColStyle() {
+        // Effektive Breite der Beschriftungsspalte: eine per Ziehgriff gesetzte
+        // Breite gilt wörtlich. Ohne sie wird sie nur bei "Spalten
+        // gleichmäßig" (table-layout:fixed, braucht eine Breite) aus dem
+        // längsten Label berechnet — dieselbe Formel wie auf der Kachel
+        // (autoLabelWidth in table-tile-render.js). Ohne die Option bleibt das
+        // automatische Tabellenlayout.
+        effectiveLabelWidth() {
           const w = this.style.label_col_width;
+          if (w) return w;
+          if (!this.style.equal_value_cols) return null;
+          const longest = this.rows.reduce((n, r) => (r.row_type === 'separator' || !this.rowVisible(r))
+            ? n : Math.max(n, String(this.resolvedRowLabel(r) || '').length), 0);
+          return Math.max(120, Math.min(320, longest * 8 + 24));
+        },
+        labelColStyle() {
+          const w = this.effectiveLabelWidth();
           if (!w) return '';
           return `width:${w}px;max-width:${w}px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
         },
@@ -376,23 +410,9 @@
           document.addEventListener('mousemove', onMove);
           document.addEventListener('mouseup', onUp);
         },
-        // "Spalten gleichmäßig" (style.equal_value_cols) braucht table-
-        // layout:fixed, das sich an den Zellbreiten der ersten Zeile
-        // orientiert — ohne eigene label_col_width würde die
-        // Beschriftungsspalte dann fälschlich MIT gleichmäßig aufgeteilt
-        // statt ihre bisherige (automatische) Breite zu behalten. Deshalb
-        // beim Einschalten einmalig die AKTUELLE, gerenderte Breite als
-        // label_col_width einfrieren — Doppelklick auf den Ziehgriff setzt
-        // sie bei Bedarf wieder auf automatisch zurück.
+        // Die Beschriftungsbreite wird nicht mehr beim Einschalten eingefroren
+        // (zu schmal, sobald die Labels länger werden) — siehe effectiveLabelWidth().
         toggleEqualValueCols() {
-          if (!this.style.equal_value_cols && !this.style.label_col_width) {
-            // NICHT einfach "th.tbl-label-col" (erste Treffer wäre bei
-            // fehlenden Spaltengruppen die UNSICHTBARE Gruppen-Kopfzeile,
-            // x-show="hasColumnGroups()" lässt ihre Zelle mit Breite 0 im DOM
-            // stehen) — explizit die sichtbare Zeitraum-Kopfzeile.
-            const labelTh = this.$refs.previewTable?.querySelector('tr.tbl-header-row:not(.tbl-group-header-row) th.tbl-label-col');
-            if (labelTh) this.style.label_col_width = Math.round(labelTh.getBoundingClientRect().width);
-          }
           this.style.equal_value_cols = !this.style.equal_value_cols;
         },
 
@@ -493,7 +513,9 @@
         duplicateRow(rowUid) {
           const index = this.rows.findIndex(r => r.uid === rowUid);
           if (index < 0) return;
+          const oldLetterToUid = this.snapshotRowLetters();
           this.rows.splice(index + 1, 0, {...this.rows[index], uid: uid()});
+          this.correctFormulaLetters(oldLetterToUid);
           this.load();
         },
         // Verschiebt eine Spalte um eine Position nach links (-1) oder rechts
@@ -512,16 +534,19 @@
           this.columns = this.columns.filter(c => c.uid !== colUid);
           this.load();
         },
-        addRow(type) {
+        // Leerzeile: eine Trennlinie mit ausgeblendeter Linie (extra = {hide_line: true}).
+        addRow(type, extra) {
           this.rows.push({
             uid: uid(), label: '', row_type: type, entity_ids: [], formula: '', formula_unit: '',
             aggregation: type === 'summary' ? 'sum' : 'auto', bold: false, hidden: false, show_label: false,
-            accent: false, percent_of_total: false, hide_if_empty: false,
+            accent: false, percent_of_total: false, hide_if_empty: false, hide_line: false, ...(extra || {}),
             pickerOpen: false, typePickerOpen: false, aggPickerOpen: false, optsPickerOpen: false, search: '',
           });
           this.load();
         },
         setRowType(row, type) {
+          // Trennlinien haben keinen Buchstaben: Wechsel von/zu „Trennlinie“ verschiebt die Buchstaben der Zeilen darunter.
+          const oldLetterToUid = this.snapshotRowLetters();
           row.row_type = type;
           if (type === 'entity') row.entity_ids = row.entity_ids.slice(0, 1);
           if (type === 'separator') {
@@ -537,6 +562,7 @@
             row.formula_unit = '';
             if (row.aggregation !== 'sum' && row.aggregation !== 'avg') row.aggregation = 'sum';
           }
+          this.correctFormulaLetters(oldLetterToUid);
           this.load();
         },
         moveRow(rowUid, direction) {
@@ -575,12 +601,16 @@
             r.formula = r.formula.replace(/[A-Za-z]/g, ch => {
               const referencedUid = oldLetterToUid[ch.toUpperCase()];
               if (!referencedUid) return ch;
-              return newLetterOfUid[referencedUid] || ch;
+              // Die referenzierte Zeile gibt es nicht mehr (gelöscht, zur Trennlinie gemacht): „?“ statt des alten
+              // Buchstabens, der jetzt eine andere Zeile meinte — die Formel zeigt dann einen Fehler statt eines falschen Werts.
+              return newLetterOfUid[referencedUid] || '?';
             });
           });
         },
         removeRow(rowUid) {
+          const oldLetterToUid = this.snapshotRowLetters();
           this.rows = this.rows.filter(r => r.uid !== rowUid);
+          this.correctFormulaLetters(oldLetterToUid);
           this.load();
         },
         toggleGroupEntity(row, entityId) {
@@ -620,6 +650,7 @@
           return '';
         },
         versatzUnit(col) { return versatzUnit(col); },
+        rangeLabelMismatch(col) { return rangeLabelMismatch(col); },
         insertColumnVariable(col, token, inputEl) { insertColumnVariable(col, token, inputEl); },
         clampOffset(col) { if (col.offset > 0) col.offset = 0; },
         // Tatsächlich angezeigter/gespeicherter Name — eigene Beschriftung,
@@ -772,13 +803,18 @@
         // Index-basierten Arrays statt der hier üblichen uid-Objekte, deshalb
         // hier nur die Umwandlung dorthin und die Ergebnisse zurück in
         // this.values[col.uid][row.uid].
-        async load() {
+        // silent: Nachladen im Hintergrund (Chip) — keine "Lädt …"-Zeile, ein Fehler lässt die
+        // alten Werte stehen, geänderte Zellen leuchten kurz auf.
+        async load({silent = false} = {}) {
           if (!this.columns.length || !this.rows.length) {
             this.values = {}; this.windowStarts = {}; this.windowEnds = {}; this.isCurrent = {}; this.elapsedSeconds = {};
             return;
           }
           const requestId = ++this._loadSeq;
-          this.loading = true;
+          if (!silent) {
+            this.loading = true;
+            this.loadError = false;
+          }
           const plainColumns = this.columns.map(c => ({
             range_key: c.range_key, offset: c.offset, year_over_year: c.year_over_year,
             hidden: !!c.hidden, in_sum: c.in_sum !== false,
@@ -788,9 +824,16 @@
             formula_unit: r.formula_unit || '', aggregation: r.aggregation || 'auto',
             percent_of_total: !!r.percent_of_total,
           }));
-          const {values: computed, windowStarts, windowEnds, isCurrent, elapsedSeconds, summable} =
-            await TableCompute.computeValues(BASE, plainColumns, plainRows);
+          let result;
+          try {
+            result = await TableCompute.computeValues(BASE, plainColumns, plainRows);
+          } catch (error) {
+            // Abfragefehler (HTTP-Status, Netz): als Fehler anzeigen, nicht als leere Tabelle.
+            if (requestId === this._loadSeq && !silent) { this.loading = false; this.loadError = true; }
+            return;
+          }
           if (requestId !== this._loadSeq) return;  // überholt von einer neueren Anfrage
+          const {values: computed, windowStarts, windowEnds, isCurrent, elapsedSeconds, summable} = result;
           const newValues = {};
           const newWindowStarts = {};
           const newWindowEnds = {};
@@ -807,6 +850,7 @@
           // Rohdaten für die Σ-Spalte merken, damit ein Umschalten von
           // "in Σ"/"ausgeblendet" ohne neue Serverabfrage neu summiert (siehe
           // recomputeRowSums()).
+          if (silent) this.markChangedCells(newValues);
           this._computedValues = computed;
           this._summable = summable;
           this.values = newValues;
@@ -816,6 +860,65 @@
           this.elapsedSeconds = newElapsedSeconds;
           this.recomputeRowSums();
           this.loading = false;
+          this._lastRefresh = Date.now();
+        },
+
+        // Zellen, deren Wert sich gegenüber dem bisherigen geändert hat, für ~1,5 s markieren.
+        markChangedCells(newValues) {
+          const changed = {};
+          this.columns.forEach(col => {
+            this.rows.forEach(row => {
+              const before = this.values[col.uid] && this.values[col.uid][row.uid];
+              const after = newValues[col.uid] && newValues[col.uid][row.uid];
+              if (before && after && before.value !== after.value) changed[col.uid + ':' + row.uid] = true;
+            });
+          });
+          this.flashed = changed;
+          if (Object.keys(changed).length) setTimeout(() => { this.flashed = {}; }, 1500);
+        },
+
+        // Grund, warum das Nachladen gerade ruht: null (läuft), 'off' (abgeschaltet), 'edit' (Editor offen)
+        // oder 'past' (alle Spalten vergangene Zeiträume, die sich nicht mehr ändern).
+        refreshPause() {
+          if (!this.refreshOn) return 'off';
+          if (this.editing) return 'edit';
+          const flags = Object.values(this.isCurrent);
+          if (flags.length && !flags.some(Boolean)) return 'past';
+          return null;
+        },
+        refreshChipText() {
+          const pause = this.refreshPause();
+          if (pause === 'off') return t('Aus');
+          if (pause === 'edit') return t('Pausiert · Editor');
+          if (pause === 'past') return t('Pausiert · vergangen');
+          return t('Aktuell');
+        },
+        refreshChipTitle() {
+          const pause = this.refreshPause();
+          if (pause === 'off') return t('Die automatische Aktualisierung ist ausgeschaltet.');
+          if (pause === 'edit') return t('Im Editor würde ein Nachladen deine Eingaben stören. Nach dem Speichern geht es weiter.');
+          if (pause === 'past') return t('Die Zeiträume sind abgeschlossen, die Werte ändern sich nicht mehr.');
+          return t('Zuletzt aktualisiert vor {s} s', {s: this.refreshAge});
+        },
+        refreshInfo() {
+          if (this.refreshPause()) return t('Keine automatische Aktualisierung.');
+          return t('Zuletzt vor {s} s · nächste in {n} s', {s: this.refreshAge, n: Math.max(0, REFRESH_INTERVAL_MS / 1000 - this.refreshAge)});
+        },
+        async refreshNow() {
+          this.refreshMenuOpen = false;
+          await this.load({silent: true});
+          this.refreshAge = 0;
+        },
+        // Einmal pro Sekunde geprüft, alle 60 s nachgeladen — nur bei sichtbarem Tab und ohne Pause. Kehrt man
+        // nach längerer Zeit in den Tab zurück, lädt der nächste Takt sofort.
+        refreshTick() {
+          if (!this.$root.isConnected) { clearInterval(this._refreshTimer); return; }
+          const age = Date.now() - this._lastRefresh;
+          if (this.refreshMenuOpen) this.refreshAge = Math.round(age / 1000);
+          if (age >= REFRESH_INTERVAL_MS && document.visibilityState === 'visible'
+              && !this.refreshPause() && !this.loading && !this.saving) {
+            this.refreshNow();
+          }
         },
 
         // Σ-Spalte (style.show_row_sum): reine Client-Rechnung auf den schon
@@ -894,6 +997,7 @@
               bold: !!r.bold,
               hidden: !!r.hidden,
               show_label: r.row_type === 'separator' ? !!r.show_label : false,
+              hide_line: r.row_type === 'separator' ? !!r.hide_line : false,
               accent: r.row_type === 'formula' ? !!r.accent : false,
               percent_of_total: (r.row_type === 'entity' || r.row_type === 'group') ? !!r.percent_of_total : false,
               hide_if_empty: (r.row_type === 'entity' || r.row_type === 'group') ? !!r.hide_if_empty : false,
@@ -1045,6 +1149,10 @@
 
         init() {
           this.load();
+          if (TABLE_ID) {
+            this._refreshTimer = setInterval(() => this.refreshTick(), 1000);
+            document.addEventListener('visibilitychange', () => this.refreshTick());
+          }
           // .tbl-columns/.tbl-rows stecken in einem x-if="editing" — bei
           // jedem Wechsel auf "editing" wird der Container neu erzeugt (der
           // dragBound-Marker geht dabei verloren), deshalb hier neu binden,

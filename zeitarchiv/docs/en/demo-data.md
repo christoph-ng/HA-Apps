@@ -31,7 +31,7 @@ the files that a real instance would create too.
 
 The tables below list the German `entity_id`s; with `--language en` they follow the English name (`sensor.demo_gesamtwirkleistung` → `sensor.demo_total_active_power`).
 
-85 entities, thematically a single household with rooftop PV system (including
+97 entities, thematically a single household with rooftop PV system (including
 yield forecast), wallbox, an additional balcony power plant with its own
 storage, a larger home battery on the rooftop system and the grid CO2
 intensity, all with the prefix `demo_` in the entity ID (easy to recognize and
@@ -113,6 +113,14 @@ selectively deletable):
 | `sensor.demo_waermepumpe_energie` | Counter (`total_increasing`) | kWh | Weather dashboard (heating): 72 % of `demo_heizung` |
 | `sensor.demo_heizstab_energie` | Counter (`total_increasing`) | kWh | Weather dashboard (heating): 18 % of `demo_heizung`, only in frost |
 | `sensor.demo_konvektoren_energie` | Counter (`total_increasing`) | kWh | Weather dashboard (heating): the rest of `demo_heizung` (28 % minus heating element), e.g. bathroom and shoulder seasons |
+| `sensor.demo_helligkeit_sued` | Standard | lx | Weather dashboard (sunshine duration, weather conditions): derived from the global radiation (about 110 lx per W/m²), stepped in 590 lx steps and capped at 98,824 lx like the south sensor of an Eltako station; 0 at night, below 15,000 lx on overcast days |
+| `sensor.demo_helligkeit_daemmerung` | Standard | lx | Weather dashboard (daylight curve, weather conditions): 0 to 1,000 lx in steps of 4, a ramp over about 80 minutes around sunrise and sunset; dense cloud dampens it, so “day from 400 lx” starts later |
+| `sensor.demo_windrichtung` | Standard | ° | Weather dashboard (weather conditions): direction the wind comes from, mostly south-west to west, a different focus each day, a slow turn during the day; whole degrees |
+| `sensor.demo_sonnenhoehe` | Standard | ° | Weather dashboard (daylight): sun elevation above the horizon for 48° latitude, negative at night; for the role "Sun elevation". "PV and brightness" uses the existing `sensor.demo_pv_leistung` |
+| `sensor.demo_bedroom_temperature` / `_humidity` (German IDs: `sensor.demo_schlafzimmer_temperatur` / `_luftfeuchte`) | Standard | °C / % | Weather dashboard, "Temperature & climate" (room "Bedroom"): cool (about 17 to 20 °C), slightly damper at night (about 45 to 60 %) |
+| `sensor.demo_kitchen_temperature` / `_humidity` (German: `sensor.demo_kueche_temperatur` / `_luftfeuchte`) | Standard | °C / % | Room "Kitchen": peaks at mealtimes (breakfast later at the weekend), steam clears slowly after dinner |
+| `sensor.demo_bathroom_temperature` / `_humidity` (German: `sensor.demo_bad_temperatur` / `_luftfeuchte`) | Standard | °C / % | Room "Bathroom": shower peaks in the morning (later at the weekend) and evening, humidity briefly above 80 % |
+| `sensor.demo_basement_temperature` / `_humidity` (German: `sensor.demo_keller_temperatur` / `_luftfeuchte`) | Standard | °C / % | Room "Basement": slow annual curve (about 11 to 17 °C), clearly damper in summer (about 55 to 72 %) |
 
 Washing machine, dishwasher, dryer and wallbox each have two or three entities
 — instantaneous power (W), energy counter (kWh) and, for the three household
@@ -224,7 +232,7 @@ cd addon
 .venv/bin/python3 scripts/generate_demo_data.py --data-dir /path/to/data-directory
 ```
 
-With the default values, generates 6 months of history for all 85 demo entities
+With the default values, generates 6 months of history for all 97 demo entities
 in a fresh (or empty) target directory.
 
 More examples:
@@ -244,10 +252,12 @@ More examples:
 | --- | --- | --- |
 | `--data-dir` | *(required)* | Target directory; created if needed |
 | `--months` | `6` | How many months of history are generated (calculation: months × 30 days back from now) |
+| `--weather-months` | `60` | History of the series the weather dashboard reads (outdoor temperature, humidity, wind, precipitation, rain sensor, radiation, brightness, PV power, heating counters and others), in months. Five years give the long-term cards (monthly table, year matrix, key days, records, heating over several winters) enough to show; the rest of the demo keeps `--months`. Applies to the full generation only, not to `--append`; if the value is not larger than `--months`, nothing changes. The app's demo mode uses the same value |
 | `--tz` | `Europe/Berlin` | IANA time zone for month/day boundaries |
 | `--seed` | `42` | Random seed — the same seed reproducibly generates the same values |
 | `--clean` | *(off)* | Cleanly remove existing `demo_*` entities in the target directory before generating (for repeated runs) |
 | `--append` | *(off)* | Instead of the complete history, only add the values since the last run (`--months` is ignored) — see [Living demo instance](#living-demo-instance---append). Mutually exclusive with `--clean` |
+| `--setup-ui` | *(off)* | Additionally sets up the demo interface like the app's demo mode: energy and weather dashboards configured, 15 charts, 3 comparison tables and the dashboards "Overview", "Energy", "Weather". Without `--append`, previously created objects are removed and created anew (your own charts and tables stay); with `--append` only if it was never created |
 | `--language {de,en}` | `de` | Language of the demo entities — names **and** `entity_id`s (`en`: `sensor.demo_living_room_temperature` instead of `sensor.demo_wohnzimmer_temperatur`). A run in the other language replaces the existing dataset (entities of the other language are removed, dashboards referencing them point to nothing). In the app's demo mode the interface language applies. The names live in the translation catalog (`app/i18n/en.json`) |
 | `--clear {values,entities}` | *(off)* | Standalone action instead of generating — see [Deleting demo data](#deleting-demo-data---clear) |
 
@@ -294,7 +304,7 @@ directly at the add-on data path, then start the add-on again. A prior backup
 
 ## Regenerating demo data (`--clean`)
 
-Before rewriting, `--clean` cleans the values of all 85 `demo_*` entities — like
+Before rewriting, `--clean` cleans the values of all 97 `demo_*` entities — like
 **Housekeeping → Storage** in the app, just for all demo entities at once,
 without opening the app. Deliberately `delete_all_values()` instead of
 `delete_entity()`: the entities themselves remain in the index continuously
@@ -380,10 +390,17 @@ the current date, without recalculating months of data on every run:
   `pv_prognose_rest_heute` starts with a fresh daily estimate instead of
   continuing exactly where the last run left off. Cosmetic jump, not a counter
   jump.
+- The room sensors (`sensor.demo_schlafzimmer_…`, `_kueche_…`, `_bad_…`, `_keller_…`, temperature and humidity each) are
+  missing in demo instances created before them. An `--append` run (or "Supplement now" in demo mode) adds them
+  with 36 months of history, even if there is otherwise nothing to add; existing ones continue like the other
+  series. The weather of the added period is independent of the weather of the other series (the coupling to the outdoor
+  temperature is loose and not noticeable). With a full generation they get `--weather-months` like the other weather
+  series. The app's demo mode assigns them to the rooms "Bedroom", "Kitchen", "Bathroom", "Basement" and
+  "Living room" (weather dashboard, "Periods compared" on "Temperature & climate").
 - `sensor.demo_strompreis_dynamisch` is missing in demo instances created
   before this entity existed. An `--append` run (or “Supplement now” in demo mode)
   therefore generates the price history retroactively from the start of the
   remaining history, even if there is otherwise nothing to add. The series
   depends only on timestamp and date, so it joins later runs seamlessly. The demo
-  does not set up the assignment as grid import price in the energy dashboard;
-  you enter that in the setup yourself.
+  mode of the app sets up the assignment as grid import price in the energy dashboard
+  (`app/demo_seed.py`); the CLI script only with `--setup-ui`.

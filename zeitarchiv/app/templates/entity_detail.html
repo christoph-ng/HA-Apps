@@ -7,15 +7,30 @@
   {% from "_icons.html" import custom_name_icon %}
   
   {% set display_name = custom_name or friendly_name or entity_id %}
-  <div class="page" x-data="entityChart()">
-    <div class="h1-row">
+  <div class="page" x-data="entityChart()" :data-legend-size="legendSize || null">
+    <div class="h1-row popup-hide">
       <h1{% if not friendly_name and not custom_name %} class="raw"{% endif %}>{{ display_name }}{% if custom_name %}{{ custom_name_icon(_('App-eigener Anzeigename — HA: ') ~ (friendly_name or entity_id)) }}{% endif %}</h1>
       <button type="button" class="fav-star {{ 'active' if is_favorite else '' }}" aria-pressed="{{ 'true' if is_favorite else 'false' }}"
               title="{{ _('Favorit') }}" onclick="toggleFavorite('{{ app_root }}/entities/{{ entity_id }}/favorite', this)">★</button>
+      {# Chip für das automatische Nachladen des Verlaufs (Reiter "Verlauf"), rechts neben dem Titel. #}
+      <span class="refresh-wrap" @click.outside="refreshMenuOpen = false">
+        <button type="button" class="refresh-chip" :class="{paused: refreshPause()}" aria-haspopup="menu" :aria-expanded="refreshMenuOpen"
+                :title="refreshChipTitle()" @click="refreshMenuOpen = !refreshMenuOpen; refreshAge = Math.round((Date.now() - _lastRefresh) / 1000)">
+          <span class="refresh-dot"></span><span x-text="refreshChipText()"></span>
+        </button>
+        <div class="menu-popover menu-popover-narrow refresh-menu" x-show="refreshMenuOpen" x-cloak role="menu">
+          <div class="refresh-info" x-text="refreshInfo()"></div>
+          <button type="button" class="menu-row" role="menuitem" @click="refreshNow()">{{ _("Jetzt aktualisieren") }}</button>
+          <button type="button" class="menu-row" role="menuitem" @click="refreshOn = !refreshOn">
+            <span>{{ _("Automatisch aktualisieren") }}</span><span class="refresh-state" x-text="refreshOn ? t('An') : t('Aus')"></span>
+          </button>
+        </div>
+      </span>
     </div>
     <p class="sub" data-dynamic-back data-app-root="{{ app_root }}">
       {% if display_name != entity_id %}<code style="font-family:var(--font-mono);">{{ entity_id }}</code> &middot; {% endif %}
       <a href="{{ app_root }}/entities">{{ _("&larr; zurück zu Entitäten") }}</a>
+      {% if back_dashboard %}&middot; <a href="{{ app_root }}{{ back_dashboard.path }}" data-back-dashboard>{{ back_dashboard.label }}</a>{% endif %}
       {% if historic %}&middot; <span class="badge historic" title="{{ _('Keine neuen Werte mehr erwartet: wird nicht als inaktiv gemeldet') }}">{{ _("Historisch") }}</span>{% endif %}
       {% if used_in_energiedashboard %}
       {# Statisch statt referrer-basiert (dynamic-back-link.js unten deckt
@@ -30,8 +45,8 @@
       {% endif %}
     </p>
 
-    {% include "_entity_facts.html" %}
-    {% with active = 'verlauf' %}{% include "_entity_tabs.html" %}{% endwith %}
+    <div class="popup-hide">{% include "_entity_facts.html" %}</div>
+    <div class="popup-hide">{% with active = 'verlauf' %}{% include "_entity_tabs.html" %}{% endwith %}</div>
 
     {% include "_pending_purge_banner.html" %}
 
@@ -195,8 +210,16 @@
             <div class="menu-row">
               <span class="menu-row-label">{{ _("Legenden-Stil") }}</span>
               <div class="seg">
-                <button :class="{active: legendStyle === 'chips'}" @click="legendStyle = 'chips'; saveChartOptions()">{{ _("Chips") }}</button>
-                <button :class="{active: legendStyle === 'table'}" @click="legendStyle = 'table'; saveChartOptions()">{{ _("Tabelle") }}</button>
+                <button :class="{active: legendStyle === 'chips'}" @click="setLegendStyle('chips')">{{ _("Chips") }}</button>
+                <button :class="{active: legendStyle === 'table'}" @click="setLegendStyle('table')">{{ _("Tabelle") }}</button>
+                <button :class="{active: legendStyle === 'off'}" @click="setLegendStyle('off')">{{ _("Aus") }}</button>
+              </div>
+            </div>
+            <div class="menu-row" :class="{'is-disabled': legendStyle === 'off'}">
+              <span class="menu-row-label">{{ _("Legendengröße") }}</span>
+              <div class="seg">
+                <button :class="{active: legendSizeShown === 'normal'}" @click="setLegendSize('normal')">{{ _("Normal") }}</button>
+                <button :class="{active: legendSizeShown === 'small'}" @click="setLegendSize('small')">{{ _("Klein") }}</button>
               </div>
             </div>
             <label class="menu-row">
@@ -292,14 +315,14 @@
                 <button :class="{active: averageStyle === 'rolling'}" @click="averageStyle = 'rolling'; render(); saveChartOptions()">{{ _("Gleitend") }}</button>
               </div>
             </div>
-            <label class="menu-row">
+            <label class="menu-row" :class="{'is-disabled': legendStyle === 'off'}">
               <span class="menu-row-label">{{ _("Statistik in Legende") }}</span>
               <span class="menu-toggle">
                 <input type="checkbox" :checked="chartStats" @change="chartStats = !chartStats; render(); saveChartOptions()">
                 <span class="track"><span class="thumb"></span></span>
               </span>
             </label>
-            <div class="menu-row legend-metrics-row" x-show="chartStats">
+            <div class="menu-row legend-metrics-row" :class="{'is-disabled': legendStyle === 'off'}" x-show="chartStats">
               <template x-for="metric in legendMetricOptions" :key="metric.value">
                 {# .filter-chip statt einer Kästchen-Liste: der app-weite Standard
                    für Chip-Mehrfachauswahl (siehe _energiedashboard_setup.html).
@@ -314,8 +337,16 @@
             <div class="menu-row" x-show="chartStats">
               <span class="menu-row-label">{{ _("Legenden-Stil") }}</span>
               <div class="seg">
-                <button :class="{active: legendStyle === 'chips'}" @click="legendStyle = 'chips'; saveChartOptions()">{{ _("Chips") }}</button>
-                <button :class="{active: legendStyle === 'table'}" @click="legendStyle = 'table'; saveChartOptions()">{{ _("Tabelle") }}</button>
+                <button :class="{active: legendStyle === 'chips'}" @click="setLegendStyle('chips')">{{ _("Chips") }}</button>
+                <button :class="{active: legendStyle === 'table'}" @click="setLegendStyle('table')">{{ _("Tabelle") }}</button>
+                <button :class="{active: legendStyle === 'off'}" @click="setLegendStyle('off')">{{ _("Aus") }}</button>
+              </div>
+            </div>
+            <div class="menu-row" :class="{'is-disabled': legendStyle === 'off'}" x-show="chartStats">
+              <span class="menu-row-label">{{ _("Legendengröße") }}</span>
+              <div class="seg">
+                <button :class="{active: legendSizeShown === 'normal'}" @click="setLegendSize('normal')">{{ _("Normal") }}</button>
+                <button :class="{active: legendSizeShown === 'small'}" @click="setLegendSize('small')">{{ _("Klein") }}</button>
               </div>
             </div>
             {% endif %}

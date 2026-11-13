@@ -24,6 +24,18 @@
   .ov-job-failed{border-color:var(--danger);background:var(--danger-soft);}
   .ov-job a{color:var(--accent-line);}
 
+  .ov-roles{margin:0 0 18px;padding:14px 18px;border:1px solid var(--border-strong);border-radius:12px;background:var(--surface);}
+  .ov-roles h2{margin:0 0 2px;font-size:calc(15px * var(--font-scale, 1));}
+  .ov-roles .sub{margin:0 0 10px;}
+  .ov-roles-list{list-style:none;margin:0 0 12px;padding:0;}
+  .ov-roles-list li{border-top:1px solid var(--border);}
+  .ov-roles-list label{display:flex;align-items:center;gap:12px;padding:8px 0;cursor:pointer;}
+  .ov-roles-list input{flex:0 0 auto;width:18px;height:18px;accent-color:var(--accent-line);}
+  .ov-roles-name{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;}
+  .ov-roles-name code{font-size:calc(11px * var(--font-scale, 1));color:var(--ink-muted);overflow-wrap:anywhere;}
+  .ov-roles-role{flex:0 0 auto;font-size:calc(13px * var(--font-scale, 1));color:var(--accent-line);}
+  .ov-roles-role em{color:var(--warning);font-style:normal;}
+
   .ov-search{display:flex;gap:8px;margin:0 0 10px;}
   .ov-search input[type=search]{flex:1 1 auto;min-width:0;}
   .ov-search .btn{min-height:36px;}
@@ -85,17 +97,23 @@
   .ov-state-drifted::before{background:var(--warning);}
   .ov-since{display:block;margin:1px 0 0 15px;font-size:calc(11.5px * var(--font-scale, 1));color:var(--ink-faint);font-variant-numeric:tabular-nums;white-space:nowrap;}
 
-  /* Zeilenmenü: <details> statt eigenem Skript, schließt per Klick auf ⋯. */
+  /* Zeilenmenü: <details> statt eigenem Skript, Optik wie die übrigen Menüs der App (runder ⋮-Knopf, .menu-popover). */
   .ov-menu{position:relative;display:inline-block;}
-  .ov-menu summary{list-style:none;cursor:pointer;min-width:32px;text-align:center;}
+  .ov-menu summary{list-style:none;cursor:pointer;}
   .ov-menu summary::-webkit-details-marker{display:none;}
-  .ov-menu[open] summary{background:var(--surface);border-color:var(--border-strong);}
-  .ov-menu-pop{position:absolute;right:0;top:calc(100% + 4px);z-index:5;width:280px;padding:12px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface);box-shadow:var(--shadow);text-align:left;color:var(--ink);white-space:normal;}
-  .ov-menu-pop .btn{margin:0 0 10px;}
-  .ov-menu-h{margin:0 0 4px;font-weight:600;font-size:calc(13px * var(--font-scale, 1));}
-  .ov-explain{margin:0 0 8px;padding-left:18px;font-size:calc(12.5px * var(--font-scale, 1));color:var(--ink-muted);}
-  .ov-menu-note{margin:0 0 8px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);}
-  .ov-menu-pop a{color:var(--accent-line);font-size:calc(13px * var(--font-scale, 1));}
+  /* Wie .dtile-menu-btn der Dashboard-Kacheln: rund, schlicht, bei Hover/offen in der Akzentfarbe. */
+  .ov-menu-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid var(--border);border-radius:999px;
+    background:var(--surface);color:var(--ink-faint);font-size:calc(17px * var(--font-scale, 1));line-height:1;}
+  .ov-menu-btn:hover,.ov-menu[open] .ov-menu-btn{color:var(--accent-line);border-color:var(--accent-line);}
+  .ov-menu-btn:focus-visible{outline:2px solid var(--accent-bar);outline-offset:2px;}
+  .ov-menu-pop{left:auto;right:0;top:calc(100% + 6px);z-index:5;width:280px;text-align:left;white-space:normal;}
+  /* Aktionen als Zeilen des Standardmenüs; <button> und <a> sehen gleich aus. */
+  .ov-menu-pop button.menu-row,.ov-menu-pop a.menu-row{width:100%;box-sizing:border-box;border:0;background:none;font:inherit;
+    font-size:calc(13px * var(--font-scale, 1));text-align:left;text-decoration:none;color:var(--ink);cursor:pointer;list-style:none;}
+  .ov-menu-pop button.menu-row:hover,.ov-menu-pop a.menu-row:hover{background:var(--surface-alt);}
+  .ov-menu-pop button.menu-row.menu-row-danger{color:var(--danger);}
+  .ov-menu-pop button.menu-row.menu-row-danger:hover{background:var(--danger-soft);}
+  .ov-menu-note{margin:2px 10px 6px;font-size:calc(12px * var(--font-scale, 1));color:var(--ink-faint);}
 
   /* Muster: Karten wie die Muster-Vorschläge im Assistenten (.sel-pattern),
      Kennzahlen als kleine Kacheln. */
@@ -175,4 +193,30 @@
     .ov-assist-btn{flex:1 1 100%;text-align:center;}
     .ov-pattern-card{padding:12px 14px;}
     .ov-pattern-action,.ov-pattern-action .btn{width:100%;}
+  }
+
+  /* Bestätigung als Popup (selection_overview.js): die Bestätigungsseite der Route in einem Dialog,
+     ohne eigenen Rahmen der Seite. */
+  .sel-confirm-dialog{width:min(560px,calc(100vw - 32px));padding:20px 22px;}
+  .sel-confirm-body h1{margin:0 0 6px;font-size:calc(18px * var(--font-scale, 1));}
+  .sel-confirm-body .sub{margin:0 0 12px;}
+  .sel-confirm-body .settings-panel{margin:0;padding:0;border:0;box-shadow:none;background:none;}
+  .sel-confirm-body ul{margin:6px 0 10px;padding-left:20px;max-height:220px;overflow:auto;}
+  .sel-confirm-body p{margin:0 0 10px;}
+  .sel-confirm-body form > p:last-child{display:flex;justify-content:flex-end;gap:8px;margin:14px 0 0;}
+  .sel-confirm-body .hint{margin:0 0 10px;}
+  /* Echtes Kontrollkästchen statt des Filter-Chips. */
+  .confirm-check{display:flex;align-items:flex-start;gap:10px;margin:4px 0 10px;cursor:pointer;font-size:calc(14px * var(--font-scale, 1));line-height:1.4;}
+  .confirm-check input{flex:none;width:18px;height:18px;margin:1px 0 0;accent-color:var(--accent-line);cursor:pointer;}
+  @media(max-width:560px){
+    .sel-confirm-dialog{padding:16px;}
+  }
+
+  /* Breite Darstellung: die Seite nutzt die volle Breite. Tabelle links, rechts die Verlaufsspalte (bleibt beim
+     Scrollen stehen); die Hinweise darüber enden an der Tabellenspalte statt über die ganze Seite zu laufen. */
+  @media(min-width:1200px){
+    :root[data-page-layout="wide"] .page-sel{--ov-side:clamp(340px,24vw,480px);--ov-gap:28px;}
+    :root[data-page-layout="wide"] .page-sel .ov-layout{grid-template-columns:minmax(0,1fr) var(--ov-side);gap:var(--ov-gap);}
+    :root[data-page-layout="wide"] .page-sel :is(.ov-assist,.ov-job,.ov-roles,.ov-note,.ov-meta){max-width:calc(100% - var(--ov-side) - var(--ov-gap));}
+    :root[data-page-layout="wide"] .page-sel .ov-side{position:sticky;top:72px;max-height:calc(100vh - 88px);overflow:auto;}
   }

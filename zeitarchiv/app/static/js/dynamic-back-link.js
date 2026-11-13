@@ -12,6 +12,7 @@
   // den ersten Treffer. Ergänzen für weitere Herkunftsseiten reicht als
   // neuer Eintrag.
   const ROUTES = [
+    {re: /^\/uebersicht(\/|$)/, text: t('zur Übersicht')},
     {re: /^\/energiedashboard(\/|$)/, text: t('zum Energiedashboard')},
     {re: /^\/dashboards\/\d+/, text: t('zum Dashboard')},
     {re: /^\/dashboards(\/|$)/, text: t('zu den Dashboards')},
@@ -82,6 +83,11 @@
       try { return new URL(a.href, location.href).pathname === ref.pathname; } catch (e) { return false; }
     });
     if (alreadyLinked) return;
+
+    // Der Server hat den Weg zurück zum Dashboard schon fest eingetragen (?from_dashboard=…, siehe
+    // _back_dashboard in main.py): ein zweiter, referrer-basierter Link zu einem Dashboard bzw. zur
+    // Übersicht wäre dasselbe noch einmal (Standard-Dashboard: /uebersicht vs. /dashboards/1).
+    if (container.querySelector('[data-back-dashboard]') && /^\/(uebersicht|dashboards\/\d+)(\/|$)/.test(refRel)) return;
 
     const match = ROUTES.find((r) => r.re.test(refRel));
     if (!match) { forget(); return; }

@@ -58,7 +58,7 @@ def test_the_pages_that_use_buttons_load_the_script() -> None:
     Seite, in die sie hineingerendert werden."""
     seiten = {
         "entity_config.html": ["_entity_config_form.html", "_counter_decrease_field.html"],
-        "energiedashboard.html": ["_energiedashboard_setup.html", "_energie_langzeit.html"],
+        "energiedashboard.html": ["_energiedashboard_setup.html", "_energie_vergleich.html", "_energie_langzeit.html"],
         "backup.html": ["_settings_backup_ready.html"],
         "housekeeping.html": [
             "_settings_storage_index_form.html",
@@ -74,7 +74,7 @@ def test_the_pages_that_use_buttons_load_the_script() -> None:
         "wetterdashboard.html": ["_wetter_view.html", "_wetter_setup.html"],
         "data_quality.html": [],
         "table_editor.html": [],
-        "dashboard_editor.html": [],
+        "dashboard_editor.html": ["_dashboard_overview_options.html"],
     }
     quellen = _templates()
     for seite in seiten:
@@ -91,7 +91,8 @@ def test_the_default_state_follows_the_width() -> None:
     den beiden anderen einklappbaren Blöcken. Der serverseitig gerenderte
     `hidden`-Zustand wird beim Laden korrigiert, auch nach einem htmx-Tausch."""
     assert "matchMedia('(max-width:700px)')" in JS
-    assert "ziel.hidden = SCHMAL.matches || !!ziel.closest('[data-hints=\"collapsed\"]');" in JS
+    assert "ziel.hidden = SCHMAL.matches || BREIT || !!ziel.closest('[data-hints=\"collapsed\"]');" in JS
+    assert "document.documentElement.dataset.pageLayout === 'wide'" in JS
     assert "htmx:afterSwap" in JS
 
 

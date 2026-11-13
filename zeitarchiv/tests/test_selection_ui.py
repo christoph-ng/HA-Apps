@@ -151,7 +151,8 @@ def test_overview_renders_table_badges_filters_and_timeline(client, catalog) -> 
     assert 'class="entity-tabs"' in html and "Auswahl & Verlauf" in html
     assert "UI Wärmepumpe" in html and "Zeitarchiv · Energie" in html and "Muster: sensor.ui_*" in html
     assert "Manuell in HA" in html and "Ausgeschlossen" in html
-    assert "Warum ist das drin?" in html and "Passt auf das Muster" in html
+    # Die Herkunft steht in der Spalte, das Zeilenmenü erklärt sie nicht noch einmal
+    assert "Warum ist das drin?" not in html
     assert "In HA geändert" in html and "Muster hinzugefügt, +3" in html
     # Muster-Zeile: kein Kästchen, nur der Hinweis auf HA
     assert 'name="ids" value="sensor.ui_muster"' not in html
@@ -223,8 +224,39 @@ def test_pages_render_in_english(client, catalog, german_again) -> None:
     assert "Selection assistant" in suggest and "Temperature & climate" in suggest
     assert "Text entities are always added as a single ID." in suggest
     overview = client.get("/selection/overview").text
-    assert "Selection & history" in overview and "Why is this included?" in overview
+    assert "Selection & history" in overview
     assert "Start assistant" in overview
     assert "Changed in HA" in overview and "Zeitarchiv · Energy" in overview
     confirm = client.post("/selection/remove", data={"one": "sensor.ui_hand"}).text
     assert "Remove from the selection?" in confirm and "Chosen by hand: 1" in confirm
+
+
+# ---- Bestätigung als Popup (selection_overview.js) -----------------------------------------
+
+def test_confirmation_says_one_entity_in_the_singular(client, catalog) -> None:
+    text = client.post("/selection/remove", data={"one": "sensor.ui_wp"}).text
+    assert "1 Entität wird nicht mehr archiviert" in text and "1 Entitäten" not in text
+    both = client.post("/selection/remove", data={"ids": ["sensor.ui_hand", "sensor.ui_wp"]}).text
+    assert "2 Entitäten werden nicht mehr archiviert" in both
+
+
+def test_manual_confirmation_is_a_real_checkbox_with_a_hidden_warning(client, catalog) -> None:
+    text = client.post("/selection/remove", data={"ids": ["sensor.ui_hand", "sensor.ui_wp"]}).text
+    assert 'class="confirm-check"' in text and "filter-chip" not in text.split("Von Hand gewählt")[1]
+    assert "data-manual-missing hidden" in text  # das Popup zeigt den Hinweis ohne Neuladen
+    missing = client.post("/selection/remove", data={"ids": ["sensor.ui_hand", "sensor.ui_wp"], "confirmed": "1"})
+    assert missing.status_code == 400 and "data-manual-missing>" in missing.text.replace(" hidden", "")
+
+
+def test_popup_response_has_no_topnav_but_the_confirmation_page(client, catalog) -> None:
+    html = client.post("/selection/remove?popup=1", data={"one": "sensor.ui_wp"}).text
+    assert "page-sticky-header" not in html and "Aus der Auswahl entfernen?" in html and 'class="page' in html
+
+
+def test_overview_has_the_confirm_dialog_and_the_script_handles_the_three_actions() -> None:
+    from _paths import APP, template_text
+
+    html = template_text("selection_overview.html")
+    assert 'id="sel-confirm"' in html and "page-sel" in html and "page-head-wide" not in html
+    js = (APP / "static" / "js" / "pages" / "selection_overview.js").read_text()
+    assert "remove|exclude|include" in js and "getAttribute('formaction')" in js and "popup" in js

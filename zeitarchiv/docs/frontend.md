@@ -686,6 +686,49 @@ Zwei Eigenheiten, die man beim Nachbauen anders träfe:
 Balken und Farben kommen von `.usage-bar-track`/`.usage-bar-fill`, demselben
 Baustein wie der Host-Speicherplatz in `housekeeping.html`.
 
+## Breite Darstellung (experimentell)
+
+Einstellung `page_layout` (`standard`|`wide`, je Installation, Standard `standard`; `app/page_layout.py`).
+Bei `wide` trägt `<html>` das Attribut `data-page-layout="wide"` (`base.html`), bei `standard` fehlt es ganz,
+sodass ohne Schalter nichts anders aussieht als vorher.
+
+- **Regeln:** alle Breitenregeln stehen unter `:root[data-page-layout="wide"]` und innerhalb von
+  `@media (min-width:1200px)` bzw. `1500px` (vier Spalten). Ein Quelltext-Test (`tests/test_wide_layout.py`)
+  schlägt an, wenn eine Regel außerhalb steht.
+- **Tokens:** `--page-max` (1120 px; mit Schalter ab 1200 px 1920 px) und `--page-narrow` (1120 px).
+  Seiten ohne Opt-in (Formulare, Einstellungen, Energiedashboard) und die Backup-Leiste (`.rw-bar-in`) bleiben
+  bei `--page-narrow`, mittig. Opt-in ist die Klasse `.page-wide` (genau zehn
+  Templates: Charts, Tabellen, Tabelleneditor, Chart-Editor, Entitätenliste, Dashboard, Dashboard-Liste, Übersicht,
+  Energie- und Wetterdashboard).
+- **Dashboard:** das Raster ist bis 1440 px breit (`--dash-max`) und mittig; die Zeilenhöhe wächst mit der
+  Fensterbreite (`max(--dashboard-row-height, Spaltenbreite × .58)`, aus `vw` berechnet). Auf `.dgroup` und
+  `.dashboard-grid` darf **nie** `container-type` stehen: Die `position:fixed`-Überlagerungen der Kacheln
+  (Menü, Einstellungen, „Kachel hinzufügen“) hingen sonst am Raster statt am Fenster.
+- **Vier Spalten:** `dashboards.grid_columns` (3|4, Standard 3). Gespeicherte Größen werden nie gekappt, nur
+  in der Anzeige (CSS-Attributregeln, `span min()` gibt es nicht). Präziser Modus rechnet mit
+  `grid_columns × 2` bzw. `grid_columns` (`dashboard_grid.size_limits()`). Das Raster steht in
+  `dashboard_detail.css` **und** `entities.css`; jede Änderung gehört in beide, Tests prüfen beide.
+- **Kachelraster der Übersicht und der Dashboard-Liste** (`.ov-tiles`, `.dash-grid`): ab 1500 px höchstens fünf Spalten
+  (Mindestbreite `max(230px/240px, (100 % − 4 · 14px) / 5)`); darunter und ohne Schalter bleibt es beim `auto-fill`.
+- **Wetter-Kacheln:** `WetterLayout.tileColumns(count, width, maxColumns)` bekommt bei breiter Darstellung die Obergrenze 6
+  (`WIDE_TILE_MAX_COLUMNS` in `wetter.js`); die Regel „keine einzelne Kachel in der letzten Reihe“ gilt weiter, acht Kacheln
+  stehen also als 4+4, zwölf als 6+6.
+- **Neuzeichnen:** Chart-Kacheln hören mit einem `ResizeObserver` (eine Instanz je Seite,
+  `dashboard-tiles.js`) statt nur auf `window.resize`. Wetter-, Langzeit- und die meisten Energie-Diagramme haben
+  schon eigene Beobachter; nur das Sankey des Energiedashboards hängt am Fenster und rechnet seine Mindesthöhe
+  (≈ Breite / 3, nur bei breiter Darstellung) bei Größenänderung neu.
+- **Energie- und Wetterdashboard:** `.page-wide`, aber der Inhalt (`#energiedashboard-root`, `#wetter-root`) bleibt in
+  allen Reitern bei 1440 px und steht mittig (breiter würden Sankey, Heatmap und Diagramme mit fester Höhe zu
+  flachen Streifen; ein Rahmen für alle Reiter, damit nichts beim Reiterwechsel springt). Ab 1500 px sind die
+  Diagramme etwas höher (340/400 px, Heatmap 240 px), die Wetter-Tabellen füllen die Karte (`min-width:100%`).
+  Tooltips am rechten Kartenrand (Speicherstand, letzte zwei KPI-Kacheln) öffnen nach links, sonst entsteht bei
+  1500–1920 px waagrechter Überlauf. Die Regeln stehen je Seiten-CSS, nicht in `app.css`: `.wt-chart`, `.wt-card`
+  u. a. werden auch anderswo genutzt.
+- **Breakpoints:** 480/640/820 (Mobil), neu 1200/1500/1920 (nur mit Schalter), dazu die Sonderfälle
+  520/560/700/760/900.
+- **Prüfen:** `scripts/layout_shots.py` (Playwright, nur lokal, nicht in der CI) nimmt Screenshots und die
+  Geometrie aller Kacheln auf; verglichen wird die Geometrie mit 0,5 px Toleranz.
+
 ## Mobile Listenansicht
 
 Unter 640 px arbeiten zwei Module zusammen, die eine neue Seite nicht

@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from zoneinfo import ZoneInfo
 
-from . import cleanup_tile, entity_usage, i18n
+from . import cleanup_tile, dashboard_grid, entity_usage, i18n, page_layout
 from .chart_period import calendar_bounds
 from .chart_types import effective_chart_type
 from .formatting import decimals_to_int, entity_display_name, format_uptime, format_value
@@ -203,7 +203,7 @@ def tiles_context(
                 # gezeigt werden, und Chips vs. Tabelle sind dort konfiguriert,
                 # nicht hier erneut.
                 "chart_stats": c["chart_stats"], "legend_metrics": c["legend_metrics"],
-                "legend_style": c["legend_style"], "chart_type": effective_chart_type(c, aggregation_types),
+                "legend_style": c["legend_style"], "legend_size": c["legend_size"], "chart_type": effective_chart_type(c, aggregation_types),
                 "show_values": c["show_values"], "decimals": c["decimals"],
                 "average_line": c["average_line"], "area_fill": c["area_fill"], "show_points": c["show_points"],
                 "stacked": c["stacked"], "normalize": c["normalize"], "average_style": c["average_style"],
@@ -211,6 +211,7 @@ def tiles_context(
                 "compare_settings": c["compare_settings"],  # Vergleich wie auf der Chart-Seite
                 "heatmap_states": c["heatmap_states"],  # gezeichneter Zustand je Entität der Heatmap
                 "series_colors": c["series_colors"],  # eigene Serienfarbe wie auf der Chart-Seite
+                "stack_groups": c["stack_groups"],  # Stapel wie auf der Chart-Seite
             })
             groups[-1]["tiles"].append(tiles[-1])
         elif p["item_type"] == "table":
@@ -313,6 +314,7 @@ def tiles_context(
     dashboard_locked = bool(dashboard["locked"]) if dashboard else False
     dashboard_precise = bool(dashboard["precise_mode"]) if dashboard else False
     dashboard_fill_gaps = bool(dashboard["fill_gaps"]) if dashboard else False
+    dashboard_grid_columns = int(dashboard["grid_columns"]) if dashboard else 3
     entity_rows = index.list_entities()
     all_entities = [
         {
@@ -333,6 +335,11 @@ def tiles_context(
         # Lücken auffüllen: grid-auto-flow: dense (.dashboard-grid.is-dense) —
         # unabhängig vom Präzisen Modus, beide lassen sich frei kombinieren.
         "dashboard_fill_gaps": dashboard_fill_gaps,
+        # Kacheln pro Zeile (3 oder 4): bei 4 trägt das Raster data-columns="4" (breite Darstellung,
+        # ab 1500 px vier Spalten, darunter kappt das CSS zu breite Kacheln) und das Größenmenü geht bis 4 (8).
+        "dashboard_grid_columns": dashboard_grid_columns,
+        # Wegklickbarer Hinweis auf „4 Kacheln pro Zeile“ (_four_columns_hint.html).
+        "four_columns_hint": dashboard_grid.four_columns_hint_open(index, page_layout.current(index), dashboard_grid_columns),
         # Zeitraum-Navigation: Stichtag-Leiste über den Kacheln (_dashboard_period_nav.html),
         # der Kalender reicht über das ganze Archiv wie im Chart-Editor.
         "dashboard_period_nav": bool(dashboard["period_nav"]) if dashboard else False, **calendar_bounds(entity_rows, tz),

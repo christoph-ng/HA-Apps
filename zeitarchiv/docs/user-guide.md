@@ -5,7 +5,7 @@
 Dieses Dokument ist die ausführliche Anleitung für Nutzer der App — Schritt
 für Schritt, aufgabenorientiert, jede Seite im Detail. Für einen kurzen
 Überblick (was die App ist, Kernfunktionen auf einen Blick) siehe die
-[App-README](../README.md); technische Interna für Entwickler stehen in den
+[App-README](../README.de.md); technische Interna für Entwickler stehen in den
 übrigen Dokumenten dieses Ordners (siehe [README.md](README.md)).
 
 ## Inhalt
@@ -36,6 +36,7 @@ für Schritt, aufgabenorientiert, jede Seite im Detail. Für einen kurzen
 - [Wetterdashboard](#wetterdashboard)
   - [Rollen](#rollen)
   - [Kacheln und Vergleichstabelle](#kacheln-und-vergleichstabelle)
+  - [Sonne, Licht und Wetterlage](#sonne-licht-und-wetterlage)
   - [Reiter Niederschlag](#reiter-niederschlag)
   - [Monatsvergleich](#monatsvergleich)
   - [Reiter Langzeit](#reiter-langzeit)
@@ -112,7 +113,7 @@ für Schritt, aufgabenorientiert, jede Seite im Detail. Für einen kurzen
 
 1. **App installieren** — über den Add-on-Store (Repository
    `https://github.com/bertel2020/HA-Apps` hinzufügen) oder manuell. Details:
-   [App-README → Installation](../README.md#installation).
+   [App-README → Installation](../README.de.md#installation).
 2. **API-Token kopieren** — Zeitarchiv über die Home-Assistant-Seitenleiste
    öffnen, **Einstellungen → Verbindung**, Token kopieren. Der Token wird
    beim ersten Start automatisch erzeugt und ist nur für diese Zeitarchiv-
@@ -220,6 +221,17 @@ Speicherbedarf) und darunter das **Standard-Dashboard** — dieselbe
 Kachel-Ansicht wie unter **Dashboards**, nur fest der Übersicht zugeordnet
 und nicht umbenennbar oder löschbar. Es lässt sich wie jedes andere
 Dashboard mit Kacheln bestücken, umsortieren und fixieren (siehe unten).
+
+Zwei Dinge gelten nur für die Übersicht und stehen im Editor des
+Standard-Dashboards (**Dashboards → Bearbeiten**) unter **Übersichtsseite**,
+nicht mehr in den Einstellungen: Die **Kacheln der Übersicht** sind die
+Sprungziele oben auf der Seite (Energie- und Wetterdashboard, eigene
+Dashboards, Charts, Tabellen, Entitäten, Statistik, Housekeeping, Import,
+Export). Bis zu 10 sind gleichzeitig aktiv; mit den Pfeilen lässt sich die
+Reihenfolge ändern. **Statistik-Kacheln in der Übersicht** (Nur bei
+Auffälligkeit, Immer oder Aus) steuert, ob die Kennzahlen zusätzlich als
+Kacheln erscheinen oder nur ein schmaler Streifen, wenn in Housekeeping etwas
+offen ist. Beide Optionen speichern sofort, nicht erst mit „Speichern“.
 
 Was beim Öffnen von Zeitarchiv über die HA-Sidebar erscheint (Übersicht,
 Energiedashboard oder Wetterdashboard), legt **Einstellungen → Darstellung →
@@ -335,6 +347,13 @@ etwas kommt; er erscheint nur, wenn es tatsächlich etwas zu scrollen gibt.
   (⋮) Größe ändern, duplizieren (Charts/Tabellen) oder entfernen. Das
   Entfernen einer Kachel löscht nur die Platzierung, nicht das zugrunde
   liegende Chart oder die Tabelle.
+- **4 Kacheln pro Zeile:** Ist unter **Einstellungen → Darstellung** die
+  **Breite Darstellung (experimentell)** eingeschaltet, bietet der
+  Dashboard-Editor den Schalter „4 Kacheln pro Zeile“. Er gilt je Dashboard und
+  wirkt ab 1500 px Fensterbreite (im Präzisen Modus sind es dann acht Spalten);
+  darunter bleiben es drei. Gespeicherte Größen gehen beim Umschalten nicht
+  verloren: Eine 4 breite Kachel erscheint bei drei Spalten über die ganze
+  Zeile, das Größenmenü weist darauf hin.
 - **Sektionen** gliedern viele Kacheln in benannte Abschnitte: über die
   "+"-Kachel, Reiter "Sektion", einen Namen vergeben. Ein Sektionskopf lässt
   sich per Chevron ein-/ausklappen (nur lokal im Browser gemerkt) und über
@@ -831,6 +850,10 @@ Entitäten des passenden Typs und lehnt falsche Zuordnungen ab.
 | Niederschlag (Menge) | Zähler | Summe, Regentage, nassester Tag |
 | Regen (ein/aus) | Schalter | Regenminuten, Regentage, regenreichster Tag |
 | Luftfeuchte, Luftdruck, Wind, Böe, Strahlung | Messwert | Max und Min mit Zeitpunkt, Ø |
+| Helligkeit (am besten der Süd-Sensor) | Messwert | Sonnenscheindauer, Sonnenstunden, Tagesklasse |
+| Helligkeit Dämmerung | Messwert | Tagesbeginn und -ende, Tageslänge |
+| Windrichtung, Sonnenhöhe | Messwert | nur für Wetterlage bzw. Tageslicht |
+| PV-Leistung | Messwert (W, kW, MW) | Tagesertrag gegen Erwartung aus der Helligkeit |
 
 Ein Regensensor, der nur ein und aus meldet, reicht: Dann zeigt die Seite
 Regenminuten und Regentage statt Millimeter. Habt ihr beides, stehen beide
@@ -839,7 +862,9 @@ nassem Sensor „Regen“, die Trocknungszeit zählt dann mit. Ab wann ein Tag a
 Regentag zählt, stellt ihr in der Einrichtung ein (Standard 1 mm bzw. 10 min).
 Im Bereich **Anzeige** lassen sich Blöcke der Vergleichstabelle ausblenden (Kenntage, Niederschlag, Regen, Luftfeuchte, Luftdruck, Wind, Böe, Strahlung); die Außentemperatur und weitere Sensoren bleiben immer sichtbar, die Kacheln oben ändern sich nicht. Der Zeitraum einer Spalte steht im Tooltip der Überschrift („ⓘ“), nicht als eigene Zeile. Bei Max und Min steht in Monat, Vormonat und Jahr der Tag als kleine Zeile unter dem Wert; die Differenz zum Vorjahr lässt sich im Menü „Vorjahr“ mit „Differenz anzeigen“ aus- und einschalten (merkt sich der Browser).
 
-Der Knopf **Vorschlagen** im Bereich Messwerte füllt die noch leeren Rollen: aus Geräteklasse, Einheit, Namen („außen“, „Regen“, „Böe“) und der Wetter-Integration; gleiche Geräte wie die Außentemperatur werden bevorzugt. Bereits belegte Rollen bleiben unverändert, gespeichert wird erst mit „Speichern“. Bei knappen Entscheidungen steht „prüfen“ und es werden weitere Kandidaten genannt. Auch Heizzähler (Name mit Heizung, Wärmepumpe, Heizstab …) werden vorgeschlagen, ebenso weitere Temperatur- und Feuchtesensoren (auch Innenräume) für „Weitere Sensoren“, solange dort noch keiner steht. Passende Entitäten, die noch nicht archiviert sind, werden genannt; ein Link führt direkt in den Auswahl-Assistenten (Thema Wetter).
+Unter **Anzeige → Karten** lässt sich jeder Block der Reiter einzeln ausblenden, nach Reitern gegliedert: Übersicht (Wetterlage, Zeiträume im Vergleich, Tagesbild, Monatsvergleich), Niederschlag (Niederschlag, Niederschlag je Monat), Temperatur & Klima (Temperatur & Klima, Temperaturen im Vergleich, Luftfeuchte im Vergleich), Wind & Sonne (Wind & Sonne, Sonnenstunden, Tageslicht, Die letzten Tage im Vergleich, Tageslänge im Jahresverlauf, PV und Helligkeit) und Langzeit (Rekorde, Kenntage je Jahr, Monatswerte je Jahr, Jahre im Vergleich, Tag für Tag). Zur Wahl stehen nur Blöcke, für die eine Rolle zugeordnet ist. Ein Reiter fehlt, wenn alle seine Blöcke ausgeblendet sind. Nur der Reiter Heizen steht getrennt im Block „Experimentell“.
+
+Der Knopf **Vorschlagen** im Bereich Messwerte füllt die noch leeren Rollen: aus Geräteklasse, Einheit, Namen („außen“, „Regen“, „Böe“) und der Wetter-Integration; gleiche Geräte wie die Außentemperatur werden bevorzugt. Bereits belegte Rollen bleiben unverändert, gespeichert wird erst mit „Speichern“. Bei knappen Entscheidungen steht „prüfen“ und es werden weitere Kandidaten genannt. Auch Windrichtung, Sonnenhöhe (Name mit „Sonnenhöhe“ oder „elevation“, nicht Azimut) und die PV-Leistung der Anlage (Name mit PV, Einheit W/kW, keine Prognose; ein Balkonkraftwerk erst danach) werden vorgeschlagen, ebenso Heizzähler (Name mit Heizung, Wärmepumpe, Heizstab …), ebenso weitere Temperatur- und Feuchtesensoren (auch Innenräume) für „Weitere Sensoren“, solange dort noch keiner steht. Passende Entitäten, die noch nicht archiviert sind, werden genannt; ein Link führt direkt in den Auswahl-Assistenten (Thema Wetter).
 
 **Weitere Sensoren** (Temperatur oder Feuchte, zum Beispiel Keller oder Dachboden) werden eigene Zeilen und nie mit der Außentemperatur
 gemittelt; sie stehen auf dem eigenen Reiter **Temperatur & Klima**. Backups sichern die Zuordnung mit; der selektive Restore stellt sie
@@ -868,6 +893,47 @@ Vorjahreszeitraum. Abgeschlossene Zeiträume (Gestern, Letzter Monat) sind in
 beiden Fällen gleich. Fehlen für einen Zeitraum Daten, steht „–“, nie 0; ein
 Tooltip nennt, ab wann das Archiv beginnt. Die Auswahl der Spalten merkt sich
 der Browser.
+
+### Sonne, Licht und Wetterlage
+
+Mit einer **Helligkeit** (lx) lässt sich aus der Wetterstation mehr herausholen. Die
+Auswertung ist keine offizielle Messgröße: Die Station trennt direktes und diffuses Licht
+nicht, und der Süd-Sensor sättigt bei etwa 98.800 lx. Die Schwellen stehen in der
+Einrichtung unter **Sonne und Tageslicht**.
+
+- **Wetterlage** (Übersicht): Symbol und ein Wort für den Himmel (trüb, bewölkt, heiter,
+  sonnig, Dämmerung, Nacht), ein kurzer Satz aus Temperatur, Wind (nach Beaufort, mit
+  Richtung, wenn **Windrichtung** zugeordnet ist) und Regen, dazu Angaben wie Böen,
+  Tageshöchst- und -tiefstwert, Sonnenstunden und „gestern hell bis …“. Die Klassengrenzen
+  folgen der Sonnen-Schwelle, lassen sich aber in der Einrichtung selbst festlegen. Bei einem
+  früheren Tag steht die Zusammenfassung dieses Tages. Unter **Anzeige** wählt ihr die
+  Darstellung: **Groß** (zentrierter Kopf über vier Kacheln), **Kompakt** (Kopf in einer
+  Zeile, niedrigere Kacheln) oder **Leiste** (Kopf in einer Zeile, die Kacheln als eine
+  Zeile ohne Kästen; Standard). Die Angaben sind überall dieselben.
+- **Sonnenscheindauer**: Eine Stunde zählt als sonnig, wenn ihr Mittel die Sonnen-Schwelle
+  erreicht (Standard 25.000 lx). Sie steht als Zeile in der Vergleichstabelle, als Kachel und
+  als Kurve **Sonnenstunden** im Reiter Wind & Sonne.
+- **Tagesbild** (Übersicht): Eine Karte je Tag für die letzten 14 Tage, sonnig, wechselhaft
+  oder trüb nach dem Anteil der hellen Stunden mit Sonne. Ein Klick wählt den Tag.
+- **Tageslicht** (Wind & Sonne): Mit der Rolle **Helligkeit Dämmerung** zeigt die Kurve
+  Nacht, Dämmerung und Tag, dazu Tagesbeginn und -ende, Tageslänge und einen Vergleich der
+  letzten Tage (mit der Änderung der Tageslänge zum Vortag) sowie die **Tageslänge im
+  Jahresverlauf** (eine Linie je Jahr, aus Stundenwerten mit interpoliertem Übergang).
+  Die Zeiten zeigen, was der Sensor sieht, nicht den Sonnenstand. Mit der Rolle
+  **Sonnenhöhe** (ein Sensor mit der Höhe der Sonne in Grad, etwa ein Template-Sensor aus
+  `sun.sun`) steht zusätzlich der Sonnenstand bei Tagesbeginn und -ende in der Tabelle; ein
+  hoher Wert deutet auf Verschattung.
+- **Langzeit**: Monatsvergleich, Kenntage, Jahresübersicht und Rekorde kennen auch Sonne
+  (Sonnenstunden, sonnige und trübe Tage). Ein echter Vorjahresvergleich ist möglich, sobald
+  die Helligkeit ein Jahr archiviert ist.
+- **PV und Helligkeit** (Wind & Sonne): Mit den Rollen **Helligkeit** und **PV-Leistung**
+  vergleicht die Karte den Tagesertrag der Anlage mit der Erwartung. Die Erwartung wird aus
+  den 28 Tagen davor gelernt (Median der Stundenleistung je Helligkeitsstufe). Abweichungen
+  über 15 % werden markiert, aber nur an Tagen mit nennenswerter Erwartung. Die Erwartung
+  steht als gestrichelter Rahmen hinter dem Balken. Ein Klick auf einen Tag wählt ihn: Die
+  Marke oben nennt seine Abweichung, das Diagramm darunter zeigt je Stunde, ob die Anlage
+  morgens oder abends abweicht (grünes Band: im Rahmen). Es ist eine Messung, keine
+  Prognose: Temperatur, Abregelung und ein voller Akku senken die Leistung ohne Defekt.
 
 ### Reiter Niederschlag
 
@@ -915,6 +981,16 @@ abgeschlossene Jahre gibt; bis dahin stehen die Werte ungefärbt da. Das Jahresm
 erscheint ab sechs Monaten mit Werten, das laufende Jahr ist mit * markiert und
 zählt nicht zum Mittel. Gezeigt werden höchstens die letzten zehn Jahre.
 
+Über die Auswahl über der Tabelle (Temperatur, Niederschlag, Sonne; je nachdem, welche
+Rollen zugeordnet sind) zeigt dieselbe Tabelle auch **Niederschlag** und **Sonnenstunden**
+je Monat und Jahr. Dort sind die Zellen Summen, und die Abweichung steht in Prozent des
+Mittels dieses Monats. Gibt es nur einen Regensensor (Ein/Aus), zählt die Tabelle
+Regenstunden. Die Jahresspalte ist die Summe und erscheint nur für komplette,
+abgeschlossene Jahre, denn bei fehlenden Monaten wäre sie zu niedrig. Der laufende Monat
+zeigt nur den bisherigen Stand und wird nicht verglichen. Monate mit zu wenig Werten
+bleiben leer. Die Farbskala unter der Tabelle zeigt, welche Seite trockener oder nasser
+(bei der Sonne: weniger oder mehr Sonne) heißt.
+
 **Jahre im Vergleich, Tag für Tag** legt alle Jahre als Matrix untereinander: eine
 Zeile je Jahr (das neueste oben), eine Spalte je Kalendertag, gefärbt nach dem
 Tageswert. Wählbar sind Ø, Max, Min der Außentemperatur und der Niederschlag
@@ -926,7 +1002,9 @@ eine eigene Spalte.
 
 **Rekorde** (wärmster und kältester Tag, höchster und tiefster Wert, stärkste Böe,
 nassester Tag) erscheinen, sobald das Archiv mindestens ein Jahr Tageswerte
-enthält, und gelten seit Archivbeginn. Ein einzelner Messfehler kann einen
+enthält, und gelten seit Archivbeginn. Sie stehen ganz oben im Reiter Langzeit, in drei
+farbigen Gruppen (Temperatur, Wind und Regen, Sonne) mit großen Kennzahlen; jede Zeile ist ein Link auf den Tag, bei einer
+Folge auf ihren ersten Tag, und eine noch laufende Folge endet „heute“. Ein einzelner Messfehler kann einen
 Rekord setzen: über **Tag öffnen** springt ihr direkt in die Entität an diesem
 Tag. Fehlerhafte Werte lassen sich dort markieren; erst nach dem endgültigen
 Löschen rechnen die Rekorde ohne sie.
@@ -947,14 +1025,23 @@ Auswahl der Zähler, ohne neu zu laden; der Browser merkt sich die Werte.
 Die **Gradtagzahl** (G20/15 nach VDI 3807) zählt je Tag Raumtemperatur minus Tagesmittel,
 aber nur an Tagen unter der Heizgrenze. **kWh je Gradtag** ist der witterungsbereinigte
 Verbrauch: Er lässt kalte und milde Winter vergleichen, was die reine Summe nicht kann.
-Die Tabelle zeigt je Monat und für die ganze Heizperiode (fest 1.10. bis 30.4.) Gradtage,
-kWh und kWh je Gradtag der letzten drei Perioden, dazu die Veränderung gegenüber der
-Vorperiode. Eine Zeile „1.10.–gestern“ vergleicht die laufende Periode mit demselben
-Stück der Vorperioden, damit ein Winteranfang nicht wie ein Einbruch wirkt. Ein Satz oben
-fasst es zusammen. Nur abgeschlossene Tage mit ausreichend Temperaturwerten zählen.
+Die Tabelle zeigt je Monat und für die ganze Heizperiode (fest 1.10. bis 30.4.) kWh je
+Gradtag der letzten drei Perioden, darunter klein Gradtage und kWh, dazu die Veränderung
+gegenüber der Vorperiode als Pille (grün weniger, rot mehr, unter 1,5 % neutral). Eine Zeile
+„Gleicher Zeitraum“ (1.10.–gestern) vergleicht die laufende Periode mit demselben Stück der
+Vorperioden, damit ein Winteranfang nicht wie ein Einbruch wirkt. Nur abgeschlossene Tage mit ausreichend Temperaturwerten zählen.
 
 Bei mehreren Zählern zeigt **Anteil je Zähler** gestapelte Balken je Monat für eine wählbare
 Heizperiode, mit dem Anteil jedes Zählers in Prozent.
+
+**Heizen und Sonne** (experimentell, mit zugeordneter Helligkeit): Mit „Punkte nach Sonne
+einfärben“ trägt das Streudiagramm Farbe und Form je Tagesklasse (sonnig, wechselhaft,
+trüb). Drei Kacheln vergleichen kWh je Gradtag nach Klasse, eine Leiste zeigt, wie sich die
+Heiztage verteilen, und ein Chip nennt das Ergebnis. Ein Unterschied wird nur genannt, wenn er
+sich vom Zufall abhebt (mindestens 8 Tage je Klasse), sonst steht dort „Kein klarer
+Unterschied“; Klassen mit unter 30 Tagen tragen einen Hinweis. Das Ergebnis gilt nur für dieses Haus: Der Sensor misst an einem Punkt,
+PV-gesteuertes Heizen kann den Effekt umdrehen, und der Wärmespeicher lässt den Vortag
+mitwirken.
 
 ## Entitäten und Verläufe
 
@@ -2855,9 +2942,16 @@ echten archivierten Werte liegen unverändert in einem komplett eigenen
 Verzeichnis (`<Datenverzeichnis>/demo` statt des echten
 Datenverzeichnisses) und werden zu keinem Zeitpunkt gelesen, verändert oder
 überschrieben. Ist beim ersten Start in diesem Modus noch keine Demo-Historie
-vorhanden, erzeugt die App sie automatisch (rund 3 Jahre, dauert im
-Hintergrund rund eine Minute — die App ist währenddessen normal erreichbar,
-zeigt aber erst danach vollständige Werte).
+vorhanden, erzeugt die App sie automatisch (5 Jahre, dauert im Hintergrund einige
+Minuten — die App ist währenddessen normal erreichbar, zeigt aber erst danach
+vollständige Werte).
+
+Dazu legt die App eine fertige Oberfläche an: das Energie- und das
+Wetterdashboard sind eingerichtet (inklusive Speicher, dynamischem Strompreis,
+CO₂ und Heizzählern), drei Dashboards („Übersicht“, „Energie“, „Wetter“) zeigen
+gespeicherte Charts und Vergleichstabellen. Beim Erststart und bei „Neu
+erzeugen“ entsteht das alles komplett neu; bei „Jetzt ergänzen“ nur, wenn es
+noch nie angelegt wurde — eigene Änderungen bleiben dort erhalten.
 
 Eine Änderung der Option braucht **immer** einen Neustart, wie jede
 Add-on-Konfigurationsänderung — es gibt keinen Umschalter, der ohne
@@ -2880,8 +2974,10 @@ Ergänzung ansteht. Drei Bedienelemente:
   die vorhandene Historie anzutasten. Dasselbe passiert automatisch, wenn
   „Automatisch ergänzen" fällig wird.
 - **Neu erzeugen** — verwirft die komplette Demo-Historie und würfelt sie
-  neu (mit Sicherheitsabfrage). Nützlich, um wieder bei „frischen" 3 Jahren
-  anzufangen.
+  neu (mit Sicherheitsabfrage). Nützlich, um wieder bei „frischen" 5 Jahren
+  anzufangen. Die vordefinierten Dashboards, Charts, Tabellen und die Einrichtung
+  von Energie- und Wetterdashboard werden dabei ebenfalls neu angelegt (eigene
+  Charts und Tabellen bleiben).
 
 Ein „Entfernen" gibt es hier bewusst nicht: Solange die Instanz selbst im
 Demo-Modus läuft, würde ein Löschen die eigene laufende Datenbank unter sich
@@ -2955,7 +3051,7 @@ will, lädt es vorher herunter.
 
 | Bereich | Enthält |
 | --- | --- |
-| **Darstellung** | Sprache (Automatisch/Deutsch/English — Standard Deutsch; „Automatisch“ folgt der Browsersprache; nicht übersetzte Stellen erscheinen auf Deutsch), Zahlen- und Datumsformat (Automatisch/Deutsch/English UK/English US — „Automatisch“ folgt dem Browser: `en-GB` → `1,234.5` und `07/10/2026`, `en-US` → `10/07/2026` mit 12-Stunden-Uhr, `de-*` → `1.234,5` und `07.10.2026`; unabhängig von der Sprache; CSV-Exporte und Dateinamen bleiben unverändert), Währung (Automatisch/EUR/GBP/USD/CHF — „Automatisch“ übernimmt sie aus Home Assistant, sonst Euro; Beträge werden nicht umgerechnet, nach einem Wechsel die Preise neu eintragen), Startseite (Übersicht/Energiedashboard/Wetterdashboard), Farbschema (Zeitarchiv/Home Assistant/Modern), Hell/Dunkel/Automatisch, Schriftgröße, Dashboard-Kachel-Ein-/Ausblendanimation, Startwerte für die Chart-Optionen der Entität-Verlaufsansicht |
+| **Darstellung** | Sprache (Automatisch/Deutsch/English — Standard Deutsch; „Automatisch“ folgt der Browsersprache; nicht übersetzte Stellen erscheinen auf Deutsch), Zahlen- und Datumsformat (Automatisch/Deutsch/English UK/English US — „Automatisch“ folgt dem Browser: `en-GB` → `1,234.5` und `07/10/2026`, `en-US` → `10/07/2026` mit 12-Stunden-Uhr, `de-*` → `1.234,5` und `07.10.2026`; unabhängig von der Sprache; CSV-Exporte und Dateinamen bleiben unverändert), Währung (Automatisch/EUR/GBP/USD/CHF — „Automatisch“ übernimmt sie aus Home Assistant, sonst Euro; Beträge werden nicht umgerechnet, nach einem Wechsel die Preise neu eintragen), Startseite (Übersicht/Energiedashboard/Wetterdashboard), Farbschema (Zeitarchiv/Home Assistant/Modern), Hell/Dunkel/Automatisch, Schriftgröße, Dashboard-Kachel-Ein-/Ausblendanimation, Breite Darstellung (experimentell; Aus/An, Standard Aus — ab 1200 px Fensterbreite nutzen Übersicht, Dashboards, Charts, Tabellen und Entitäten bis 1920 px, darüber zentriert; gilt für die ganze Installation; andere Seiten wie Einstellungen und Energiedashboard bleiben bei 1120 px), Startwerte für die Chart-Optionen der Entität-Verlaufsansicht |
 | **Archivierung** | Standardwerte für neu erkannte Entitäten (wirken nie rückwirkend auf bestehende Entitäten): Auflösung, Aufbewahrung, Nachkommastellen, Wertänderungsfilter, Lücken-/Ausreißer-Erkennung |
 | **Meldungen** | Tipp-Anzeige an-/ausschalten und Dialog mit allen Tipps (siehe [Housekeeping](#housekeeping)); Übersicht stummgeschalteter Systemmeldungen mit verbleibender Dauer, einzeln vorzeitig wieder aktivierbar |
 | **Verbindung** | API-Token anzeigen/neu erzeugen, letzter empfangener Wert, Anzahl Schreibzugriffe und Auth-Fehler seit Start, verbundene Integrationsversion mit Zeitpunkt "zuletzt gesehen" (Hinweis bei veralteter oder neu verfügbarer Version) |

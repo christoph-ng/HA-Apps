@@ -21,7 +21,7 @@ import contextvars
 import math
 import random
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -65,8 +65,44 @@ class DemoEntity:
 WETTER_ENTITY_IDS = (
     "sensor.demo_luftdruck", "sensor.demo_boe", "sensor.demo_strahlung", "sensor.demo_niederschlag",
     "sensor.demo_aussentemperatur_nord", "sensor.demo_waermepumpe_energie", "sensor.demo_heizstab_energie",
-    "sensor.demo_konvektoren_energie",
+    "sensor.demo_konvektoren_energie", "sensor.demo_helligkeit_sued", "sensor.demo_helligkeit_daemmerung",
+    "sensor.demo_windrichtung", "sensor.demo_sonnenhoehe",
 )
+
+#: Historie der Wetter-Reihen in Monaten (5 Jahre). Die Auswertungen über mehrere Jahre (Monatstabelle, Jahresmatrix,
+#: Kenntage, Rekorde, Heizen über mehrere Winter) brauchen mehr als die Sechs Monate des CLI-Standards.
+WEATHER_HISTORY_MONTHS = 60
+
+#: Reihen, die das Wetterdashboard liest und die deshalb die lange Historie bekommen: Entität -> Schlüssel in
+#: ``simulate_household()``. Alles andere der Demo behält den Zeitraum aus ``months``.
+WEATHER_HISTORY_KEYS = {
+    "sensor.demo_aussentemperatur": "outdoor_temp", "sensor.demo_luftfeuchte": "humidity", "sensor.demo_wind": "wind",
+    "sensor.demo_pv_leistung": "pv_power", "binary_sensor.demo_regensensor": "regensensor",
+    "sensor.demo_luftdruck": "luftdruck", "sensor.demo_boe": "boe", "sensor.demo_strahlung": "strahlung",
+    "sensor.demo_niederschlag": "niederschlag", "sensor.demo_aussentemperatur_nord": "outdoor_temp_nord",
+    "sensor.demo_waermepumpe_energie": "waermepumpe_energie", "sensor.demo_heizstab_energie": "heizstab_energie",
+    "sensor.demo_konvektoren_energie": "konvektoren_energie", "sensor.demo_helligkeit_sued": "helligkeit_sued",
+    "sensor.demo_helligkeit_daemmerung": "helligkeit_daemmerung", "sensor.demo_windrichtung": "windrichtung",
+    "sensor.demo_sonnenhoehe": "sonnenhoehe",
+}
+#: Räume für „Temperatur & Klima“ im Wetterdashboard (ROADMAP 1.51): je Raum ein Temperatur- und ein Feuchtesensor, zusätzlich zum
+#: Wohnzimmer. Schlüssel -> deutsche Raumnamen für die Anzeigenamen. Die Entitäten stehen am Ende von DEMO_ENTITIES.
+ROOM_NAMES = {"schlafzimmer": "Schlafzimmer", "kueche": "Küche", "bad": "Bad", "keller": "Keller"}
+ROOM_ENTITY_IDS = tuple(
+    f"sensor.demo_{room}_{kind}" for room in ROOM_NAMES for kind in ("temperatur", "luftfeuchte")
+)
+#: Entität -> Schlüssel in ``simulate_rooms()``.
+ROOM_SERIES_KEYS = {
+    f"sensor.demo_{room}_{kind}": f"{room}_{'temp' if kind == 'temperatur' else 'feuchte'}"
+    for room in ROOM_NAMES for kind in ("temperatur", "luftfeuchte")
+}
+#: Historie der Raum-Sensoren in Monaten, wenn sie in einer bestehenden Demo fehlen: ``--append`` trägt sie so weit zurück
+#: nach (mindestens drei Jahre; die Auswertungen über mehrere Jahre brauchen mehr als die Zeit seit dem letzten Lauf).
+#: Bei voller Erzeugung gilt wie für die übrigen Wetter-Reihen ``weather_months``.
+ROOM_HISTORY_MONTHS = 36
+
+#: Zähler, die an der Nahtstelle zwischen langer Vorgeschichte und normalem Zeitraum nahtlos weiterlaufen müssen.
+_WEATHER_SEAM_COUNTERS = ("niederschlag", "waermepumpe_energie", "heizstab_energie", "konvektoren_energie")
 
 
 # Zustände der Demo-Zustands-Entitäten. Rohwerte wie Home Assistant sie
@@ -275,6 +311,22 @@ DEMO_ENTITIES = [
     DemoEntity("sensor.demo_waermepumpe_energie", "Demo Wärmepumpe Energie", "sensor", "total_increasing", "kWh"),
     DemoEntity("sensor.demo_heizstab_energie", "Demo Heizstab Energie", "sensor", "total_increasing", "kWh"),
     DemoEntity("sensor.demo_konvektoren_energie", "Demo Konvektoren Energie", "sensor", "total_increasing", "kWh"),
+    # Helligkeit wie bei einer Eltako-Wetterstation: Süd (Sonnenschein, Wetterlage) und Dämmerung (Tageslichtkurve).
+    DemoEntity("sensor.demo_helligkeit_sued", "Demo Helligkeit Süd", "sensor", "measurement", "lx"),
+    DemoEntity("sensor.demo_helligkeit_daemmerung", "Demo Helligkeit Dämmerung", "sensor", "measurement", "lx"),
+    # Windrichtung (Wetterlage) und Sonnenhöhe (Tageslicht, Sonnenstand beim Tagesbeginn); die PV-Leistung für
+    # „PV und Helligkeit“ ist die vorhandene sensor.demo_pv_leistung.
+    DemoEntity("sensor.demo_windrichtung", "Demo Windrichtung", "sensor", "measurement", "°"),
+    DemoEntity("sensor.demo_sonnenhoehe", "Demo Sonnenhöhe", "sensor", "measurement", "°"),
+    # Räume für „Temperatur & Klima“ (ROADMAP 1.51), wieder am Ende: Die Zufallsfolge der früheren Entitäten bleibt gleich.
+    DemoEntity("sensor.demo_schlafzimmer_temperatur", "Demo Schlafzimmer Temperatur", "sensor", "measurement", "°C"),
+    DemoEntity("sensor.demo_schlafzimmer_luftfeuchte", "Demo Schlafzimmer Luftfeuchte", "sensor", "measurement", "%"),
+    DemoEntity("sensor.demo_kueche_temperatur", "Demo Küche Temperatur", "sensor", "measurement", "°C"),
+    DemoEntity("sensor.demo_kueche_luftfeuchte", "Demo Küche Luftfeuchte", "sensor", "measurement", "%"),
+    DemoEntity("sensor.demo_bad_temperatur", "Demo Bad Temperatur", "sensor", "measurement", "°C"),
+    DemoEntity("sensor.demo_bad_luftfeuchte", "Demo Bad Luftfeuchte", "sensor", "measurement", "%"),
+    DemoEntity("sensor.demo_keller_temperatur", "Demo Keller Temperatur", "sensor", "measurement", "°C"),
+    DemoEntity("sensor.demo_keller_luftfeuchte", "Demo Keller Luftfeuchte", "sensor", "measurement", "%"),
 ]
 
 
@@ -655,6 +707,57 @@ def gen_radiation(pv_power_w: float, rng: random.Random) -> float:
     return round(max(0.0, pv_power_w / PV_PEAK_W * 1000.0 * rng.uniform(0.97, 1.03)), 0)
 
 
+#: Der Süd-Sensor einer Eltako-Station sättigt bei 98.824 lx und meldet grob gestuft (etwa 590 lx je Schritt).
+SUED_LUX_MAX = 98824.0
+SUED_LUX_STEP = 590.0
+#: Etwa 110 lx je W/m² (Tageslicht), dieselbe Umrechnung wie die Strahlungsklassen der Wetterlage.
+LUX_PER_WM2 = 110.0
+
+
+def gen_south_lux(radiation_wm2: float, rng: random.Random) -> float:
+    """Helligkeit Süd in lx aus der Globalstrahlung: dieselbe Bewölkung und Tageskurve, gestuft und gekappt wie
+    der echte Sensor. Mittags im Sommer liegt sie an der Sättigung, trübe Tage bleiben unter 15.000 lx."""
+    if radiation_wm2 <= 0:
+        return 0.0
+    # Dünne Strahlung ergibt überproportional wenig Licht (Schleier, tiefer Sonnenstand): So gibt es trübe, heitere und
+    # sonnige Tage statt fast nur sonniger.
+    lux = radiation_wm2 * LUX_PER_WM2 * (0.35 + 0.65 * min(1.0, radiation_wm2 / 700.0)) * rng.uniform(0.9, 1.1)
+    return min(SUED_LUX_MAX, round(lux / SUED_LUX_STEP) * SUED_LUX_STEP)
+
+
+def gen_wind_direction(dt: datetime, rng: random.Random) -> float:
+    """Windrichtung in Grad (Herkunft): meist Südwest bis West, je Tag ein anderer Schwerpunkt, tagsüber eine
+    langsame Drehung, ganzzahlig wie bei einer Wetterstation."""
+    day = dt.toordinal()
+    base = 240.0 + 55.0 * math.sin(day * 1.7) + 35.0 * math.sin(day * 0.43)
+    drift = 15.0 * math.sin(2 * math.pi * (dt.hour + dt.minute / 60) / 24)
+    return float(round((base + drift + rng.uniform(-8, 8)) % 360.0))
+
+
+#: Breite des Demo-Standorts (Mitteleuropa) für die Sonnenhöhe; die Sonne steht wie bei den anderen Reihen um 12:00 am höchsten.
+DEMO_LATITUDE = 48.0
+
+
+def gen_sun_elevation(dt: datetime) -> float:
+    """Sonnenhöhe in Grad über dem Horizont (negativ in der Nacht), aus Tag im Jahr und Uhrzeit."""
+    declination = math.radians(23.44 * math.sin(2 * math.pi * (dt.timetuple().tm_yday - 81) / 365))
+    hour_angle = math.radians((dt.hour + dt.minute / 60 - 12.0) * 15.0)
+    latitude = math.radians(DEMO_LATITUDE)
+    value = math.sin(latitude) * math.sin(declination) + math.cos(latitude) * math.cos(declination) * math.cos(hour_angle)
+    return round(math.degrees(math.asin(max(-1.0, min(1.0, value)))), 1)
+
+
+def gen_dawn_lux(dt: datetime, weather: WeatherContext, rng: random.Random) -> float:
+    """Dämmerungssensor in lx (0 bis 1.000, Stufen von 4): Rampe über etwa 80 Minuten um Sonnenauf- und
+    -untergang. Dichte Bewölkung dämpft sie, deshalb beginnt „Tag ab 400 lx“ an trüben Tagen später."""
+    daylight = _daylight_hours(dt.timetuple().tm_yday)
+    sunrise, sunset = 12.0 - daylight / 2, 12.0 + daylight / 2
+    hour = dt.hour + dt.minute / 60
+    ramp = max(0.0, min(1.0, (min(hour - sunrise, sunset - hour) + 0.75) / 1.35))
+    value = 1000.0 * ramp * ramp * (0.4 + 0.6 * weather.cloud_factor(dt)) * rng.uniform(0.97, 1.03)
+    return 0.0 if value < 4 else min(1000.0, round(value / 4) * 4)
+
+
 def _rain_intensity_mm_h(schedule_for_day: list[ApplianceCycle], dt: datetime) -> float:
     """Regenrate im gerade laufenden Regenfenster (0,4 bis 6 mm/h), je Fenster fest aus dessen Beginn
     abgeleitet. So ist die Menge eine Funktion derselben Fenster, die der Regensensor schaltet."""
@@ -806,6 +909,15 @@ HEIM_CHARGE_EFFICIENCY = 0.97
 HEIM_DISCHARGE_EFFICIENCY = 0.95
 
 
+def join_prehistory(prehistory: list[Row], rows: list[Row]) -> list[Row]:
+    """Hängt die Vorgeschichte vor die Reihe. Beide Abschnitte erzeugen den Zeitstempel der Nahtstelle (die Zeitschleife
+    schließt Anfang und Ende ein); dort gilt der Wert der Reihe, die Vorgeschichte endet davor."""
+    if not rows:
+        return list(prehistory)
+    seam = rows[0][0]
+    return [row for row in prehistory if row[0] < seam] + rows
+
+
 def simulate_household(
     start: datetime, end: datetime, tz: ZoneInfo, rng: random.Random,
     weather: WeatherContext, schedules: dict[str, dict[str, list[ApplianceCycle]]],
@@ -845,6 +957,7 @@ def simulate_household(
         "pv_power": [], "pv_ertrag": [], "stromzaehler_bezug": [], "stromzaehler_einspeisung": [],
         "pv_prognose_rest_heute": [], "pv_prognose_morgen": [], "co2_intensitaet": [],
         "luftdruck": [], "boe": [], "strahlung": [], "niederschlag": [], "outdoor_temp_nord": [],
+        "helligkeit_sued": [], "helligkeit_daemmerung": [], "windrichtung": [], "sonnenhoehe": [],
         "waermepumpe_energie": [], "heizstab_energie": [], "konvektoren_energie": [],
         "balkon_pv": [], "balkon_ladeleistung": [], "balkon_entladeleistung": [],
         "balkon_soc_pct": [], "balkon_speicher_stand": [], "balkon_hausabgabe": [],
@@ -887,6 +1000,9 @@ def simulate_household(
     # Wetterdashboard-Reihen: eigene Zufallsfolge und feste Startwerte (kein rng-Zug), damit die
     # Werte aller früheren Entitäten für denselben Seed unverändert bleiben.
     wetter_rng = random.Random(int(start.timestamp()))
+    # Eigener Zufallsstrom für die Helligkeit: die Werte der übrigen Wetterreihen bleiben dadurch unverändert.
+    licht_rng = random.Random(int(start.timestamp()) + 1)
+    richtung_rng = random.Random(int(start.timestamp()) + 2)
     niederschlag_total = counter_seed.get("niederschlag", 842.3)
     waermepumpe_total = counter_seed.get("waermepumpe_energie", 1480.0)
     heizstab_total = counter_seed.get("heizstab_energie", 160.0)
@@ -1011,7 +1127,12 @@ def simulate_household(
         series["wallbox2"].append((ts, round(wallbox2_w, 1)))
         series["load_power"].append((ts, round(load_w, 1)))
         series["pv_power"].append((ts, pv_w))
-        series["strahlung"].append((ts, gen_radiation(pv_w, wetter_rng)))
+        radiation_now = gen_radiation(pv_w, wetter_rng)
+        series["strahlung"].append((ts, radiation_now))
+        series["helligkeit_sued"].append((ts, gen_south_lux(radiation_now, licht_rng)))
+        series["helligkeit_daemmerung"].append((ts, gen_dawn_lux(dt, weather, licht_rng)))
+        series["windrichtung"].append((ts, gen_wind_direction(dt, richtung_rng)))
+        series["sonnenhoehe"].append((ts, gen_sun_elevation(dt)))
 
         series["co2_intensitaet"].append((ts, gen_co2_intensity(dt, weather, rng)))
 
@@ -1640,6 +1761,107 @@ def write_entity(
         import_rows(data_dir, index, current_rows, entity_id, tz, source_label="demo", accepts_state=True)
 
 
+def _hour_gap(hour: float, center: float) -> float:
+    """Abstand zweier Uhrzeiten über Mitternacht hinweg, in Stunden (negativ = vor der Mitte)."""
+    return (hour - center + 12) % 24 - 12
+
+
+def _peak(hour: float, center: float, width: float, tail: float | None = None) -> float:
+    """Spitze um ``center``: glockenförmig, mit ``tail`` fällt sie nach der Mitte langsamer ab (Dampf zieht nur langsam ab)."""
+    gap = _hour_gap(hour, center)
+    if tail is not None and gap > 0:
+        return math.exp(-gap / tail)
+    return math.exp(-0.5 * (gap / width) ** 2)
+
+
+def gen_room_values(room: str, dt: datetime, outdoor: float, rng: random.Random) -> tuple[float, float]:
+    """Temperatur und relative Feuchte eines Raums zum Zeitpunkt ``dt``. ``outdoor`` ist die Außentemperatur ohne Rauschen.
+
+    Schlafzimmer: kühl, nachts etwas feuchter. Küche: Spitzen zu den Mahlzeiten. Bad: Duschspitzen morgens (am Wochenende
+    später) und abends, Feuchte bis über 80 %. Keller: träge Jahreskurve, im Sommer feuchter."""
+    hour = dt.hour + dt.minute / 60
+    doy = dt.timetuple().tm_yday
+    weekend = dt.weekday() >= 5
+    summer = math.cos(2 * math.pi * (doy - 200) / 365)
+    damp = 0.18 * (outdoor - 9.0)  # lose Kopplung an das Wetter: im Winter trockener
+    if room == "schlafzimmer":
+        temp = 18.2 + 0.9 * summer + 0.7 * math.cos(2 * math.pi * (hour - 21) / 24) + rng.uniform(-0.2, 0.2)
+        humidity = 51.0 + 4.0 * summer + damp + 4.5 * _peak(hour, 3.0, 3.5) + rng.uniform(-1.5, 1.5)
+    elif room == "kueche":
+        morning = 9.0 if weekend else 7.6
+        cooking = 1.8 * _peak(hour, morning, 0.5, 0.8) + 1.2 * _peak(hour, 12.4, 0.5, 0.8) + 2.4 * _peak(hour, 18.3, 0.6, 1.0)
+        steam = 8.0 * _peak(hour, morning, 0.4, 0.8) + 6.0 * _peak(hour, 12.4, 0.4, 0.8) + 13.0 * _peak(hour, 18.3, 0.5, 1.0)
+        temp = 21.4 + 0.8 * summer + cooking + rng.uniform(-0.2, 0.2)
+        humidity = 49.0 + 3.0 * summer + damp + steam + rng.uniform(-1.5, 1.5)
+    elif room == "bad":
+        shower = 8.3 if weekend else 6.9
+        temp = 22.0 + 0.7 * summer + 2.6 * _peak(hour, shower, 0.45, 0.9) + 2.2 * _peak(hour, 21.0, 0.6, 1.0) + rng.uniform(-0.2, 0.2)
+        humidity = (
+            56.0 + 3.0 * summer + damp + 27.0 * _peak(hour, shower, 0.4, 1.2) + 22.0 * _peak(hour, 21.0, 0.5, 1.2)
+            + rng.uniform(-1.5, 1.5)
+        )
+    else:  # keller
+        season = math.cos(2 * math.pi * (doy - 215) / 365)  # hinkt dem Sommer hinterher
+        temp = 14.0 + 3.6 * season + rng.uniform(-0.08, 0.08)
+        humidity = 63.0 + 9.0 * season + 0.1 * (outdoor - 9.0) + rng.uniform(-0.8, 0.8)
+    return round(temp, 2), round(max(25.0, min(95.0, humidity)), 1)
+
+
+def simulate_rooms(start: datetime, end: datetime, weather: WeatherContext, rng: random.Random) -> dict[str, list[Row]]:
+    """Alle Raum-Reihen für ``start`` bis ``end`` in einem Durchlauf (Schlüssel ``<raum>_temp`` und ``<raum>_feuchte``).
+
+    Bewusst unabhängig von ``simulate_household()``: eigener Zufallsstrom, damit die Werte der übrigen Entitäten für
+    denselben Seed unverändert bleiben. ``weather`` muss die Tage von ``start`` bis ``end`` kennen."""
+    series: dict[str, list[Row]] = {f"{room}_{part}": [] for room in ROOM_NAMES for part in ("temp", "feuchte")}
+    for dt in _time_range(start, end, CONTINUOUS_STEP_MINUTES):
+        ts = dt.timestamp()
+        outdoor = _outdoor_temp_at(dt, weather)
+        for room in ROOM_NAMES:
+            temp, humidity = gen_room_values(room, dt, outdoor, rng)
+            series[f"{room}_temp"].append((ts, temp))
+            series[f"{room}_feuchte"].append((ts, humidity))
+    return series
+
+
+def room_rows_for(
+    ids: Sequence[str], start: datetime, now: datetime, weather: WeatherContext | None, weather_from: datetime | None,
+) -> dict[str, list[Row]]:
+    """Zeilen der gewünschten Raum-Entitäten von ``start`` bis ``now``. Reicht der Wetterkontext der Demo (``weather``,
+    gültig ab ``weather_from``) so weit zurück, läuft das Wetter durch; sonst bekommt der Zeitraum einen eigenen."""
+    if not ids:
+        return {}
+    if weather is None or weather_from is None or weather_from > start:
+        weather = WeatherContext(start, now, random.Random(int(start.timestamp()) + 11))
+    series = simulate_rooms(start, now, weather, random.Random(int(start.timestamp()) + 3))
+    return {entity_id: series[ROOM_SERIES_KEYS[entity_id]] for entity_id in ids}
+
+
+def missing_room_ids(index: Index, language: str) -> list[str]:
+    """Raum-Entitäten, die in dieser Demo noch keine Werte haben (eine ältere Demo kennt sie nicht)."""
+    missing = []
+    for entity_id in ROOM_ENTITY_IDS:
+        entity = index.get_entity(localized_id(entity_id, language))
+        if entity is None or entity["last_ts"] is None:
+            missing.append(entity_id)
+    return missing
+
+
+def backfill_rooms(
+    data_dir: Path, index: Index, tz: ZoneInfo, now: datetime, language: str, rng: random.Random, missing: Sequence[str],
+) -> int:
+    """Schreibt die fehlenden Raum-Entitäten mit ihrer Historie (``ROOM_HISTORY_MONTHS``), wenn sonst nichts zu ergänzen ist.
+    Gibt die Zahl der Zeilen zurück."""
+    rows_by_id = room_rows_for(missing, now - timedelta(days=ROOM_HISTORY_MONTHS * 30), now, None, None)
+    boundary = month_start(now).timestamp()
+    total = 0
+    for entity in DEMO_ENTITIES:
+        if entity.entity_id in rows_by_id:
+            rows = inject_data_quality_issues(entity, rows_by_id[entity.entity_id], rng, boundary)
+            write_entity(data_dir, index, tz, entity, rows, language)
+            total += len(rows)
+    return total
+
+
 # Kategorien der Demo (ROADMAP 1.42), in der Reihenfolge der Liste. Zugeordnet wird
 # nach dem Namensteil der Entitäts-ID, ohne Domain; was keine Regel trifft (Heizung,
 # Wasserzähler, Anwesenheit, Migrationspaare), bleibt ohne Kategorie.
@@ -1652,7 +1874,8 @@ _DEMO_CATEGORY_RULES = (
     (3, ("stromzaehler_", "strompreis_", "co2_")),
     (4, ("gesamtwirkleistung", "waschmaschine", "spuelmaschine", "trockner", "kuehlschrank", "herd", "homeoffice",
          "entertainment", "boiler", "werkstatt", "waermepumpe", "heizstab", "konvektoren")),
-    (5, ("aussentemperatur", "luftfeuchte", "wind", "regensensor", "luftdruck", "boe", "strahlung", "niederschlag")),
+    (5, ("aussentemperatur", "luftfeuchte", "wind", "regensensor", "luftdruck", "boe", "strahlung", "niederschlag",
+         "helligkeit", "sonnenhoehe")),
 )
 
 
@@ -1867,6 +2090,7 @@ def run_generation(
     rng: random.Random,
     *,
     months: int = 36,
+    weather_months: int = 0,
     append: bool = False,
     clean: bool = False,
     on_entity: Callable[[int, str, int], None] | None = None,
@@ -1928,6 +2152,7 @@ def run_generation(
 
     fell_back_to_full_history = False
     price_backfill_start: datetime | None = None
+    missing_rooms: list[str] = []
     if append:
         anchor = index.get_entity(localized_id(APPEND_ANCHOR_ENTITY_ID, language))
         if anchor is None or anchor["last_ts"] is None:
@@ -1953,18 +2178,32 @@ def run_generation(
                     datetime.fromtimestamp(anchor["first_ts"], tz) if anchor["first_ts"] is not None
                     else now - timedelta(days=months * 30)
                 )
+            # Raum-Sensoren, die eine ältere Demo noch nicht kennt: sie bekommen ihre Historie nachgetragen.
+            missing_rooms = missing_room_ids(index, language)
             if start >= now and price_backfill_start is not None:
                 price_entity_def = next(e for e in DEMO_ENTITIES if e.entity_id == DYNAMIC_PRICE_ENTITY_ID)
                 price_rows = gen_dynamic_price(price_backfill_start, now, tz)
                 write_entity(data_dir, index, tz, price_entity_def, price_rows, language)
-                report = reconcile.audit_storage_metadata(
-                    data_dir, index, tz, entity_ids=[localized_id(DYNAMIC_PRICE_ENTITY_ID, language)], repair=True,
-                )
+                room_row_count = backfill_rooms(data_dir, index, tz, now, language, rng, missing_rooms)
+                audited = [localized_id(DYNAMIC_PRICE_ENTITY_ID, language)] + [localized_id(i, language) for i in missing_rooms]
+                report = reconcile.audit_storage_metadata(data_dir, index, tz, entity_ids=audited, repair=True)
                 if on_entity is not None:
                     on_entity(1, localized_id(DYNAMIC_PRICE_ENTITY_ID, language), len(price_rows))
                 return GenerationResult(
-                    entity_count=1, rows_written=len(price_rows), cleaned_count=cleaned_count,
-                    start=price_backfill_start, now=now,
+                    entity_count=1 + len(missing_rooms), rows_written=len(price_rows) + room_row_count,
+                    cleaned_count=cleaned_count, start=price_backfill_start, now=now,
+                    mismatches_repaired=len(report["mismatches"]), entities_checked=report["entities_checked"],
+                )
+            if start >= now and missing_rooms:
+                if on_status is not None:
+                    on_status(f"Die Raum-Sensoren fehlen in dieser Demo: trage {ROOM_HISTORY_MONTHS} Monate Historie nach.")
+                room_row_count = backfill_rooms(data_dir, index, tz, now, language, rng, missing_rooms)
+                report = reconcile.audit_storage_metadata(
+                    data_dir, index, tz, entity_ids=[localized_id(i, language) for i in missing_rooms], repair=True,
+                )
+                return GenerationResult(
+                    entity_count=len(missing_rooms), rows_written=room_row_count, cleaned_count=cleaned_count,
+                    start=now - timedelta(days=ROOM_HISTORY_MONTHS * 30), now=now,
                     mismatches_repaired=len(report["mismatches"]), entities_checked=report["entities_checked"],
                 )
             if start >= now:
@@ -1991,6 +2230,8 @@ def run_generation(
                         "Die Wetter-Entitäten für das Wetterdashboard fehlen in dieser Demo und starten nur ab jetzt; "
                         "für ihre Historie die Demo-Daten neu erzeugen (--clean)."
                     )
+                if missing_rooms:
+                    on_status(f"Die Raum-Sensoren fehlen in dieser Demo: trage {ROOM_HISTORY_MONTHS} Monate Historie nach.")
     else:
         start = now - timedelta(days=months * 30)
 
@@ -2015,9 +2256,29 @@ def run_generation(
                 delete_all_values(data_dir, index, entity_id)
     migration_start = now - timedelta(days=MIGRATION_BACKFILL_DAYS) if append else start
 
-    weather = WeatherContext(start, now, rng)
+    # Längere Vorgeschichte nur der Wetter-Reihen (siehe WEATHER_HISTORY_KEYS), nur bei voller Erzeugung: ein --append
+    # kann nichts nachträglich vor den vorhandenen Anfang legen. Das Wetter (Bewölkung, Temperatur, Wind) läuft über
+    # beide Abschnitte durch, die Zähler setzen an der Nahtstelle fort.
+    weather_start: datetime | None = None
+    if (not append or fell_back_to_full_history) and weather_months * 30 > months * 30:
+        weather_start = now - timedelta(days=weather_months * 30)
+    weather = WeatherContext(weather_start or start, now, rng)
+    prehistory: dict[str, list[Row]] = {}
+    if weather_start is not None:
+        if on_status is not None:
+            on_status(f"Wetter-Reihen: {weather_months} Monate Historie statt {months}.")
+        rain_schedule = build_rain_schedule(weather_start, now, weather, rng)
+        prehistory = simulate_household(
+            weather_start, start, tz, rng, weather, build_appliance_schedules(weather_start, start, rng), rain_schedule,
+        )
+        counter_seed = {**counter_seed, **{
+            key: prehistory[key][-1][1] for key in _WEATHER_SEAM_COUNTERS if prehistory[key]
+        }}
+        if prehistory["regensensor"]:
+            rain_seed = prehistory["regensensor"][-1][1]
+    else:
+        rain_schedule = build_rain_schedule(start, now, weather, rng)
     schedules = build_appliance_schedules(start, now, rng)
-    rain_schedule = build_rain_schedule(start, now, weather, rng)
     household = simulate_household(
         start, now, tz, rng, weather, schedules, rain_schedule,
         counter_seed=counter_seed, appliance_seed=appliance_seed, rain_seed=rain_seed,
@@ -2026,6 +2287,17 @@ def run_generation(
         heim_seed=heim_seed, heim_heute_seed=heim_heute_seed,
         heim_online_seed=heim_online_seed,
     )
+
+    # Raum-Sensoren: bei voller Erzeugung wie die übrigen Wetter-Reihen (Standard 60 Monate, das Wetter läuft durch); bei
+    # --append laufen vorhandene weiter, fehlende bekommen ihre Historie von mindestens ROOM_HISTORY_MONTHS.
+    backfill_start = now - timedelta(days=ROOM_HISTORY_MONTHS * 30)
+    weather_from = weather_start or start
+    if not append or fell_back_to_full_history:
+        room_rows = room_rows_for(ROOM_ENTITY_IDS, weather_from, now, weather, weather_from)
+    else:
+        present_rooms = [i for i in ROOM_ENTITY_IDS if i not in missing_rooms]
+        room_rows = room_rows_for(present_rooms, start, now, weather, weather_from)
+        room_rows.update(room_rows_for(missing_rooms, backfill_start, now, weather, weather_from))
 
     rows_by_key = {
         "sensor.demo_wohnzimmer_temperatur": household["indoor_temp"],
@@ -2108,6 +2380,11 @@ def run_generation(
         "sensor.demo_waermepumpe_energie": household["waermepumpe_energie"],
         "sensor.demo_heizstab_energie": household["heizstab_energie"],
         "sensor.demo_konvektoren_energie": household["konvektoren_energie"],
+        "sensor.demo_helligkeit_sued": household["helligkeit_sued"],
+        "sensor.demo_helligkeit_daemmerung": household["helligkeit_daemmerung"],
+        "sensor.demo_windrichtung": household["windrichtung"],
+        "sensor.demo_sonnenhoehe": household["sonnenhoehe"],
+        **room_rows,
         "sensor.demo_saugroboter_status": gen_saugroboter_status(start, now, rng),
         "sensor.demo_waschmaschine_programm": gen_waschmaschine_programm(
             start, now, household["waschmaschine_an"], rng,
@@ -2122,6 +2399,10 @@ def run_generation(
         "sensor.demo_migration2_alt_stromverbrauch": gen_migration2_old_counter(migration_start, now, rng),
         "sensor.demo_migration2_stromverbrauch": gen_migration2_new_counter(migration_start, now, rng),
     }
+
+    for entity_id, key in WEATHER_HISTORY_KEYS.items():
+        if prehistory.get(key):
+            rows_by_key[entity_id] = join_prehistory(prehistory[key], rows_by_key[entity_id])
 
     if not append or fell_back_to_full_history:
         # Ein Sprachwechsel soll den Datensatz ersetzen, nicht verdoppeln: IDs der anderen Sprache entfernen.

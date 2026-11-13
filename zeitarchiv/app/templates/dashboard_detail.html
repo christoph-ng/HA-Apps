@@ -7,22 +7,27 @@
 {% endblock %}
 {% block content %}
   
-  <div class="page">
+  <div class="page page-wide"{% if dashboard_grid_columns == 4 %} data-columns="4"{% endif %}>
+    <div class="dash-sticky-bar{% if dashboard_period_nav %} is-sticky{% endif %}">
     <div class="dash-title-row">
       <h1>{{ (dashboard.name | retranslate) if dashboard.is_default else dashboard.name }}</h1>
       {% if dashboard.locked %}
-      <span class="dash-locked-badge" title="{{ _('Fixiert') }}">🔒</span>
+      <button type="button" class="dash-locked-badge" data-unlock-url="{{ app_root }}/dashboards/{{ dashboard.id }}/lock" title="{{ _('Fixiert') }} — {{ _('Klicken zum Bearbeiten') }}" aria-label="{{ _('Fixiert') }} — {{ _('Klicken zum Bearbeiten') }}">🔒</button>
       {% else %}
       <a class="dash-rename-btn" href="{{ app_root }}/dashboards/{{ dashboard.id }}/edit" title="{{ _('Bearbeiten') }}">✎</a>
       {% endif %}
       {% if dashboard_period_nav %}{{ period_nav() }}{% endif %}
     </div>
     {% if dashboard_period_nav %}{{ period_banner() }}{% endif %}
+    </div>
+    {% include "_four_columns_hint.html" %}
 
     <div class="dashboard-section">
       {% include "_dashboard_tiles.html" %}
     </div>
   </div>
+
+  {% include "_tile_popup.html" %}
 
   <script src="{{ asset('vendor/htmx.min.js') }}"></script>
   <script src="{{ asset('vendor/echarts.min.js') }}"></script>
@@ -38,5 +43,8 @@
   <script src="{{ asset('js/state-entities.js') }}"></script>
   <script src="{{ asset('js/table-tile-render.js') }}"></script>
   <script src="{{ asset('js/chart-tile-render.js') }}"></script>
+  <script src="{{ asset('js/legend-render.js') }}"></script>
   <script src="{{ asset('js/dashboard-tiles.js') }}"></script>
+  <script src="{{ asset('js/tile-popup.js') }}"></script>
+  <script src="{{ asset('js/pages/dashboard_detail.js') }}"></script>
 {% endblock %}

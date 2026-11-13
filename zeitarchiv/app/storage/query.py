@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from . import cleanup, rollup
@@ -94,9 +95,12 @@ class QueryReadCache:
         # keine.
         self.memo: dict = {}
 
+    # Beide Sichten (mit und ohne Min/Max) kommen aus EINEM Parse der Datei: iter_records() liest ohnehin jede Zeile
+    # vollständig, read_rows() wirft Min/Max danach nur weg. Zwei getrennte Caches parsten dieselbe Monats-CSV je Request
+    # zweimal (einmal für die Reihe, einmal für den Randwert), und eine kaputte Zeile wurde zweimal gemeldet.
     def read_hot_rows(self, path: Path) -> list[tuple[float, float]]:
         if path not in self._hot_rows:
-            self._hot_rows[path] = read_rows(path)
+            self._hot_rows[path] = [(row[0], row[1]) for row in self.read_hot_rows_with_extremes(path)]
         return self._hot_rows[path]
 
     def read_hot_rows_with_extremes(self, path: Path) -> list[tuple[float, float, float | None, float | None]]:
@@ -384,9 +388,10 @@ def _boundary_value(
     """Letzter Rohwert vor ``before_ts`` aus Hot Buffer oder Monatsarchiv."""
     before_local = datetime.fromtimestamp(before_ts, tz)
     rows = _hot_rows(hot_path(data_dir, entity_id, before_ts, tz), read_cache)
-    prior = sorted((ts, value) for ts, value in rows if ts < before_ts)
-    if prior:
-        return prior[-1][1]
+    # Der letzte Wert vor dem Fenster: das größte (ts, value)-Paar, ohne die ganze Datei dafür zu sortieren.
+    prior = max(((ts, value) for ts, value in rows if ts < before_ts), default=None)
+    if prior is not None:
+        return prior[1]
 
     # Bei historischen Fenstern liegt auch der aktuelle Fenstermonat bereits
     # im Archiv. Rueckwaerts suchen, damit der letzte bekannte Wert selbst bei
@@ -465,6 +470,19 @@ def _rollup_rows_from_table(table) -> list[rollup.FineRow]:
     present = [col for col in ("value", "min_value", "max_value", "on_seconds") if col in columns]
     bucket_starts = table.column("bucket_start").to_pylist()
     values_by_col = {col: table.column(col).to_pylist() for col in present}
+    # Die beiden Formen, die es in Wirklichkeit gibt (Messwert mit Min/Max, Zähler), ohne je Zeile ein Wörterbuch für
+    # FineRow(**kwargs) zu bauen: In der Vergleichstabelle sind das hunderttausende Zeilen je Aufruf.
+    if present == ["value", "min_value", "max_value"]:
+        fine_row = rollup.FineRow
+        return [
+            fine_row(bucket_start, value, low, high)
+            for bucket_start, value, low, high in zip(
+                bucket_starts, values_by_col["value"], values_by_col["min_value"], values_by_col["max_value"], strict=True,
+            )
+        ]
+    if present == ["value"]:
+        fine_row = rollup.FineRow
+        return [fine_row(bucket_start, value) for bucket_start, value in zip(bucket_starts, values_by_col["value"], strict=True)]
     rows = []
     for i, bucket_start in enumerate(bucket_starts):
         kwargs = {"bucket_start": bucket_start}
@@ -491,6 +509,50 @@ def _state_rows_from_table(table) -> list[rollup.FineRow]:
     ]
 
 
+# Prozessweiter Cache für die Tabellen feiner Rollup-Stufen (tag/stunde). Die Vergleichstabellen von Energie- und
+# Wetterdashboard lesen bei jedem Aufruf dieselben, sich überlappenden Zeiträume (Monat, Vormonat, Jahr, Vorjahr) je Entität
+# neu aus der Parquet-Datei; gemessen gingen etwa drei Viertel der Wetter-Tabelle (2,5 s) in diese Lesungen. Ein Cache über
+# fertige Ausschnitte (FineRow-Listen) hat nicht getragen: Die Ausschnitte überlappen, belegten zusammen ein Vielfaches der
+# Datei und verdrängten sich gegenseitig. Deshalb liegt die Tabelle einer Datei als Arrow-Tabelle im Speicher (spaltenweise,
+# gemessen 61 MB für alle 115 stunde-Dateien der Testdaten gegenüber 2,2 Mio. Python-Objekten) und der Ausschnitt wird daraus
+# gefiltert. Gültigkeit: Änderungszeit und Größe der Datei. Rollup, Import, Restore und Löschen schreiben die Datei neu, ein
+# Fingerabdruck erspart jede Invalidierung an den Schreibstellen. Begrenzt nach Bytes, die ältesten fliegen zuerst.
+_FINE_TABLE_CACHE: "OrderedDict[str, tuple[tuple, object]]" = OrderedDict()
+_FINE_TABLE_CACHE_LOCK = threading.Lock()
+_FINE_TABLE_CACHE_MAX_BYTES = 80 * 1024 * 1024
+_fine_table_cache_bytes = 0
+
+
+def _fine_table_cached(path: Path):
+    """Gesamte Tabelle einer feinen Rollup-Datei (aus dem Cache, sonst gelesen); None, wenn es die Datei nicht gibt."""
+    global _fine_table_cache_bytes
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    fingerprint = (stat.st_mtime_ns, stat.st_size)
+    key = str(path)
+    with _FINE_TABLE_CACHE_LOCK:
+        cached = _FINE_TABLE_CACHE.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            _FINE_TABLE_CACHE.move_to_end(key)
+            return cached[1]
+    table = pq.read_table(path)
+    size = table.nbytes
+    if size > _FINE_TABLE_CACHE_MAX_BYTES // 4:
+        return table  # eine einzelne Datei soll den Cache nicht allein füllen
+    with _FINE_TABLE_CACHE_LOCK:
+        old = _FINE_TABLE_CACHE.pop(key, None)
+        if old is not None:
+            _fine_table_cache_bytes -= old[1].nbytes
+        _FINE_TABLE_CACHE[key] = (fingerprint, table)
+        _fine_table_cache_bytes += size
+        while _fine_table_cache_bytes > _FINE_TABLE_CACHE_MAX_BYTES and _FINE_TABLE_CACHE:
+            _key, (_fp, dropped) = _FINE_TABLE_CACHE.popitem(last=False)
+            _fine_table_cache_bytes -= dropped.nbytes
+    return table
+
+
 def _read_rollup_rows(
     data_dir: Path, entity_id: str, level: str, start_ts: float, end_ts: float,
     read_cache: QueryReadCache | None = None,
@@ -508,12 +570,11 @@ def _read_rollup_rows(
             if start_ts <= row.bucket_start < end_ts
         ]
     path = rollup.rollup_path(data_dir, entity_id, level)
-    if not path.exists():
+    table = _fine_table_cached(path)
+    if table is None:
         return []
-    table = pq.read_table(
-        path,
-        filters=[("bucket_start", ">=", start_ts), ("bucket_start", "<", end_ts)],
-    )
+    bucket = table.column("bucket_start")
+    table = table.filter(pc.and_(pc.greater_equal(bucket, start_ts), pc.less(bucket, end_ts)))
     return _rollup_rows_from_table(table)
 
 
@@ -766,6 +827,42 @@ def query_hourly_counter_series(
 #: Sonst entstünden Frosttage, Rekorde und Tagesmittel aus Lückentagen (ROADMAP 1.43).
 DAILY_MIN_HOURS = 18
 
+#: Messwerte werden nur bei Änderung gespeichert: Bleibt der Wert (etwa bei Frost um 0 °C und ganzen
+#: Grad) stundenlang gleich, gibt es für diese Stunden keine Zeile, obwohl er galt. Für die Tageswerte
+#: gilt ein Wert deshalb höchstens so viele Stunden über seine eigene hinaus weiter. Längere Stille
+#: bleibt Lücke, damit ein Ausfall nicht als gleichbleibende Temperatur erscheint.
+DAILY_CARRY_HOURS = 12
+
+
+def _carry_forward_hours(
+    rows: list[rollup.FineRow], window_end_ts: float, now_ts: float, max_hours: int = DAILY_CARRY_HOURS,
+) -> list[rollup.FineRow]:
+    """Ergänzt Stundenzeilen ohne Änderung um den zuletzt bekannten Wert (höchstens ``max_hours`` Stunden).
+
+    Es wird nie über die nächste echte Zeile, das Fensterende oder die aktuelle Stunde hinaus ergänzt.
+    Angenommen wird der Stunden-Ø der letzten Zeile (der letzte Rohwert steckt nicht im Rollup); Min und
+    Max der ergänzten Stunde sind dieser Wert."""
+    filled: list[rollup.FineRow] = []
+    last: rollup.FineRow | None = None
+    for row in sorted(rows, key=lambda r: r.bucket_start):
+        if row.value is None:
+            continue
+        if last is not None:
+            for step in range(1, max_hours + 1):
+                slot = last.bucket_start + step * 3600.0
+                if slot >= row.bucket_start:
+                    break
+                filled.append(rollup.FineRow(bucket_start=slot, value=last.value, min_value=last.value, max_value=last.value))
+        filled.append(row)
+        last = row
+    if last is not None:
+        for step in range(1, max_hours + 1):
+            slot = last.bucket_start + step * 3600.0
+            if slot >= window_end_ts or slot > now_ts:
+                break
+            filled.append(rollup.FineRow(bucket_start=slot, value=last.value, min_value=last.value, max_value=last.value))
+    return filled
+
 
 @dataclass(frozen=True)
 class DailyPoint:
@@ -797,9 +894,16 @@ def _daily_points(
     und gehören nicht in Kenntage oder Rekorde. Zustands-Entitäten haben keine Tagesreihe (leer).
     Der laufende Tag ist enthalten, aber meist unvollständig: der Aufrufer entscheidet.
     """
+    # Ein Wert, der seit dem Vorabend gilt, soll auch die Stunden am Anfang des Fensters füllen: Die Fortschreibung
+    # braucht deshalb die letzte Zeile VOR dem Fenster (höchstens DAILY_CARRY_HOURS davor). Ohne sie hing das Ergebnis
+    # des ersten Tages davon ab, wo das Fenster beginnt (1. Januar, Monatsanfang der Kenntage).
+    carries = aggregation_type not in ("counter", "switch")
+    read_start = (
+        datetime.fromtimestamp(window_start.timestamp() - DAILY_CARRY_HOURS * 3600.0, tz) if carries else window_start
+    )
     rows = _query_completed_plus_live_fine(
         data_dir, index, entity_id, aggregation_type, "line",
-        window_start, window_end, tz, now_local, read_cache,
+        read_start, window_end, tz, now_local, read_cache,
     )
     if aggregation_type == "counter":
         return [DailyPoint(day_start=row.bucket_start, value=row.value or 0.0) for row in rows]
@@ -808,6 +912,9 @@ def _daily_points(
     # je zehn Jahre, deshalb nicht zweimal berechnen (einmal zum Zählen, einmal in der Verdichtung).
     key_fn = rollup.named_bucket_key(tz, "tag")
     is_switch = aggregation_type == "switch"
+    if not is_switch:
+        rows = _carry_forward_hours(rows, window_end.timestamp(), now_local.timestamp())
+        rows = [row for row in rows if row.bucket_start >= window_start.timestamp()]  # der Vorlauf gehört nicht zum Fenster
     grouped: dict[float, list[rollup.FineRow]] = {}
     for row in rows:
         if (row.on_seconds is None) if is_switch else (row.value is None):
@@ -853,7 +960,8 @@ def _rollup_year_fingerprint(
     directory = rollup.rollup_path(data_dir, entity_id, FINE_LEVEL[aggregation_type])
     if not directory.is_dir():
         return None
-    names = [rollup.segment_name(year, month) for month in range(1, 13)] + ["legacy.parquet"]
+    # Der Dezember des Vorjahres steht mit drin: Die Fortschreibung am 1. Januar liest den Wert vom Vorabend.
+    names = [rollup.segment_name(year - 1, 12)] + [rollup.segment_name(year, month) for month in range(1, 13)] + ["legacy.parquet"]
     parts = []
     for name in names:
         try:
@@ -1120,8 +1228,14 @@ def query_series(
     read_cache: QueryReadCache | None = None,
     same_elapsed: bool = False,
     cap_to: timedelta | None = None,
+    full_period: bool = False,
 ) -> dict:
-    """cap_to: deckelt eine bereits vergangene Periode (offset<0) auf diesen
+    """full_period: nur mit year_over_year — das Vorjahresfenster läuft bis zum Ende
+    der Vorjahresperiode statt nur bis zum Abstand, den die laufende Periode gerade
+    hat. Für die Vergleichsreihe im Chart (zeigt den ganzen Vergleichszeitraum); der
+    faire Vergleichswert der Tabellen bleibt beim gekappten Fenster.
+
+    cap_to: deckelt eine bereits vergangene Periode (offset<0) auf diesen
     Abstand vom Periodenanfang — nur für den fairen "Gleicher Zeitpunkt"-
     Vergleichswert (siehe unten), nicht für die Anzeige der Periode selbst."""
     if range_key not in RANGE_KEYS:
@@ -1171,6 +1285,8 @@ def query_series(
         window_start = _shift_year(window_start, -1)
         window_end = _shift_year(window_end, -1)
         period_end = _shift_year(period_end, -1)
+        if full_period:
+            window_end = period_end
 
     if range_key in ("hour", "day"):
         fine = _query_live_fine(
